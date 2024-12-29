@@ -1,5 +1,3 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
-
 export interface TransactionContext {}
 
 export abstract class AbstractUnitOfWork<Tx extends TransactionContext> {

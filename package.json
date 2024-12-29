@@ -4,7 +4,7 @@
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc -b packages/core packages/mysql2"
   },
   "repository": {
     "type": "git",
@@ -26,5 +26,11 @@
   "bugs": {
     "url": "https://github.com/asheswook/node-transaction/issues"
   },
-  "homepage": "https://github.com/asheswook/node-transaction#readme"
+  "homepage": "https://github.com/asheswook/node-transaction#readme",
+  "workspaces": [
+      "packages/*"
+  ],
+  "devDependencies": {
+    "typescript": "^4.5.0"
+  }
 }
