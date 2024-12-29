@@ -1,0 +1,30 @@
+{
+  "name": "transaction",
+  "version": "1.0.0",
+  "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asheswook/node-transaction.git"
+  },
+  "keywords": [
+    "transaction",
+    "transactional",
+    "typeorm",
+    "orm",
+    "database",
+    "query"
+  ],
+  "engines": {
+    "node": ">=16.4.0"
+  },
+  "author": "asheswook",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/asheswook/node-transaction/issues"
+  },
+  "homepage": "https://github.com/asheswook/node-transaction#readme"
+}
