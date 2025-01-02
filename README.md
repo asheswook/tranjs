@@ -10,22 +10,24 @@ You can use like this:
 class MyService {
     @Transactional()
     async doSomething() {
-        console.log('doSomething');
-        await this.doSomethingElse();
-        await this.doSomethingElse();
+        await this.doSomethingElse("1", "Alice");
+        await this.doSomethingElse("2", "Bob");
     }
 
     @Transactional()
-    async doSomethingElse() {
-        console.log('doSomethingElse');
+    @Query("INSERT INTO user (id, name) VALUES (:id, :name)")
+    async doSomethingElse(
+        @Param('id') id: string,
+        @Param('name') name: string,
+    ) {
+        console.log("Execute Query", id, name);
     }
 }
 ```
 ```
 beginTransaction (id: 0e8wml5i78rt)
-doSomething
-doSomethingElse
-doSomethingElse
+Execute Query 1 Alice
+Execute Query 2 Bob
 commitTransaction (id: 0e8wml5i78rt)
 ```
 
@@ -54,7 +56,7 @@ async doSomething() {
 ```typescript
 @Transactional(Propagation.REQUIRES_NEW)
 async doSomething() {
-    // Reuses the existing transaction or starts a new one.
+    // Always starts a new transaction.
 }
 ```
 
