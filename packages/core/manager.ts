@@ -2,17 +2,27 @@ import { AbstractUnitOfWork, TransactionContext } from "./unitOfWork";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Propagation } from "./propagation";
 
+export abstract class GlobalAsyncLocalStorage {
+    private static asyncLocalStorage = new AsyncLocalStorage<TransactionContext>();
+
+    static get Context() {
+        return GlobalAsyncLocalStorage.asyncLocalStorage.getStore();
+    }
+
+    static Run<T>(context: TransactionContext, callback: () => T): T {
+        return GlobalAsyncLocalStorage.asyncLocalStorage.run(context, callback);
+    }
+}
+
 export class TransactionManager<Tx extends TransactionContext> {
     private unitOfWork: AbstractUnitOfWork<Tx>;
-    private asyncLocalStorage: AsyncLocalStorage<Tx>;
 
     constructor(unitOfWork: AbstractUnitOfWork<Tx>) {
         this.unitOfWork = unitOfWork;
-        this.asyncLocalStorage = new AsyncLocalStorage<Tx>();
     }
 
     getCurrentTransaction(): Tx | undefined {
-        return this.asyncLocalStorage.getStore();
+        return GlobalAsyncLocalStorage.Context as Tx;
     }
 
     private async beginTransaction(): Promise<Tx> {
@@ -28,14 +38,14 @@ export class TransactionManager<Tx extends TransactionContext> {
     }
 
     async executeTransaction(
+        propagation: Propagation = Propagation.REQUIRED,
         callback: (tx: Tx) => Promise<any>,
-        propagation: Propagation = Propagation.REQUIRED
     ): Promise<any> {
         const existingTx = this.getCurrentTransaction();
 
         if (propagation === 'REQUIRES_NEW' || !existingTx) {
             const newTx = await this.beginTransaction();
-            return this.asyncLocalStorage.run(newTx, async () => {
+            return GlobalAsyncLocalStorage.Run(newTx, async () => {
                 try {
                     const result = await callback(newTx);
                     await this.commitTransaction(newTx);
