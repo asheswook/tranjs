@@ -1,4 +1,6 @@
-export interface TransactionContext {}
+export interface TransactionContext {
+    execute(query: string, params: any[]): Promise<any>;
+}
 
 export abstract class AbstractUnitOfWork<Tx extends TransactionContext> {
     abstract beginTransaction(): Promise<Tx>;
