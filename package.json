@@ -28,9 +28,12 @@
   },
   "homepage": "https://github.com/asheswook/node-transaction#readme",
   "workspaces": [
-      "packages/*"
+    "packages/*"
   ],
   "devDependencies": {
     "typescript": "^4.5.0"
+  },
+  "dependencies": {
+    "reflect-metadata": "^0.2.2"
   }
 }
