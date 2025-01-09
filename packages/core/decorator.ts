@@ -1,5 +1,5 @@
 import {QueryParser} from "./query";
-import { TransactionManager } from "./manager";
+import { PlatformTransactionManager } from "./manager";
 import { Propagation } from "./propagation";
 import {TransactionContext} from "./unitOfWork";
 import 'reflect-metadata';
@@ -11,7 +11,7 @@ interface QueryParameter {
     name: string;
 }
 
-export function createQueryDecorator(transactionManager: TransactionManager<TransactionContext>, parser: QueryParser) {
+export function createQueryDecorator(transactionManager: PlatformTransactionManager<TransactionContext>, parser: QueryParser) {
     return function (query: string) {
         return function <T extends Function>(target: Object, propertyKey: string | symbol, descriptor: TypedPropertyDescriptor<T>): void {
             const q = parser.parse(query);
@@ -43,7 +43,7 @@ export function createQueryDecorator(transactionManager: TransactionManager<Tran
 }
 
 
-export function createTransactionDecorator(transactionManager: TransactionManager<TransactionContext>) {
+export function createTransactionDecorator(transactionManager: PlatformTransactionManager<TransactionContext>) {
     return function (propagation: Propagation = Propagation.REQUIRED): MethodDecorator {
         return function (
             target: any,

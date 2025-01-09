@@ -4,14 +4,14 @@ import {MySQLConnection, MySQLUnitOfWork} from "./unitOfWork";
 import {
     AbstractUnitOfWork, createQueryDecorator,
     createTransactionDecorator,
-    GlobalAsyncLocalStorage,
+    AsyncLocal,
     Propagation,
-    TransactionManager
+    PlatformTransactionManager
 } from "@node-transaction/core";
 import {MySQLQueryParser} from "./query";
 
 let uow: MySQLUnitOfWork;
-let manager: TransactionManager<MySQLConnection>
+let manager: PlatformTransactionManager<MySQLConnection>
 let Transactional: (propagation?: Propagation) => MethodDecorator;
 let Query: (query: string) => any;
 
@@ -28,7 +28,7 @@ function ConnectionProxy(connection: Connection) {
                         console.log('Intercepted SQL in Connection:', sql);
                         console.log('With Params:', params);
 
-                        const tx = GlobalAsyncLocalStorage.Context as MySQLConnection;
+                        const tx = AsyncLocal.Context as MySQLConnection;
                         if (tx) {
                             const conn = tx.connection
                             console.log("execute with transaction")
@@ -78,7 +78,7 @@ export async function createConnection(connectionUri: string): Promise<Connectio
 export function createPool(config: PoolOptions): Pool {
     const pool = mysql.createPool(config);
     uow = new MySQLUnitOfWork(pool)
-    manager = new TransactionManager(uow);
+    manager = new PlatformTransactionManager(uow);
     Transactional = createTransactionDecorator(manager);
     Query = createQueryDecorator(manager, new MySQLQueryParser());
     return PoolProxy(pool);

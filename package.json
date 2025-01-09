@@ -22,7 +22,7 @@
     "node": ">=16.4.0"
   },
   "author": "asheswook",
-  "license": "MIT",
+  "license": "LGPL-2.1-only",
   "bugs": {
     "url": "https://github.com/asheswook/node-transaction/issues"
   },
