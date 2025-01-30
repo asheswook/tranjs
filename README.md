@@ -1,4 +1,4 @@
-# node-transaction
+# tranjs
 
 Node.js transaction management framework inspired by Spring's `@Transactional` annotation.
 
