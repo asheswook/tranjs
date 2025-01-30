@@ -1,44 +1,20 @@
-import { AbstractUnitOfWork, TransactionContext } from "./unitOfWork";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { Propagation } from "./propagation";
+import {TransactionContext} from "./context";
+import {Propagation} from "./propagation";
+import {AsyncLocal} from "./asyncLocal";
+import {IllegalTransactionStateException} from "./error";
 
-export class AsyncLocal {
-    private static storage = new AsyncLocalStorage<TransactionContext>();
-
-    // static class
-    private constructor() {}
-
-    static get Context() {
-        return AsyncLocal.storage.getStore();
-    }
-
-    static Run<T>(context: TransactionContext, callback: () => T): T {
-        return AsyncLocal.storage.run(context, callback);
-    }
-}
-
-export class PlatformTransactionManager<Tx extends TransactionContext> {
-    private unitOfWork: AbstractUnitOfWork<Tx>;
-
-    constructor(unitOfWork: AbstractUnitOfWork<Tx>) {
-        this.unitOfWork = unitOfWork;
-    }
+export abstract class PlatformTransactionManager<Tx extends TransactionContext> {
+    protected constructor() {}
 
     getCurrentTransaction(): Tx | undefined {
         return AsyncLocal.Context as Tx;
     }
 
-    private async beginTransaction(): Promise<Tx> {
-        return await this.unitOfWork.beginTransaction();
-    }
+    protected abstract beginTransaction(): Promise<Tx>;
 
-    private async commitTransaction(tx: Tx): Promise<void> {
-        return await this.unitOfWork.commitTransaction(tx);
-    }
+    protected abstract commitTransaction(tx: Tx): Promise<void>;
 
-    private async rollbackTransaction(tx: Tx): Promise<void> {
-        return await this.unitOfWork.rollbackTransaction(tx);
-    }
+    protected abstract rollbackTransaction(tx: Tx): Promise<void>;
 
     async executeTransaction(
         propagation: Propagation = Propagation.REQUIRED,
@@ -46,7 +22,7 @@ export class PlatformTransactionManager<Tx extends TransactionContext> {
     ): Promise<any> {
         const existingTx = this.getCurrentTransaction();
 
-        if (propagation === 'REQUIRES_NEW' || !existingTx) {
+        if (propagation === Propagation.REQUIRES_NEW) {
             const newTx = await this.beginTransaction();
             return AsyncLocal.Run(newTx, async () => {
                 try {
@@ -58,19 +34,42 @@ export class PlatformTransactionManager<Tx extends TransactionContext> {
                     throw error;
                 }
             });
-        } else if (propagation === 'REQUIRED') {
+        } else if (propagation === Propagation.REQUIRED && existingTx) {
+            return callback(existingTx);
+        } else if (propagation === Propagation.REQUIRED && !existingTx) {
+            const newTx = await this.beginTransaction();
+            return AsyncLocal.Run(newTx, async () => {
+                try {
+                    const result = await callback(newTx);
+                    await this.commitTransaction(newTx);
+                    return result;
+                } catch (error) {
+                    await this.rollbackTransaction(newTx);
+                    throw error;
+                }
+            });
+        } else if (propagation === Propagation.MANDATORY) {
             if (!existingTx) {
-                throw new Error('Unexpected Error: No existing transaction found');
+                throw new IllegalTransactionStateException(propagation);
             }
 
-            try {
-                return await callback(existingTx);
-            } catch (error) {
-                await this.rollbackTransaction(existingTx);
-                throw error;
+            return callback(existingTx);
+        } else if (propagation === Propagation.SUPPORTS) {
+            if (existingTx) {
+                return callback(existingTx);
             }
+
+            throw new Error("Not implemented");
+        } else if (propagation === Propagation.NOT_SUPPORTED) {
+            throw new Error("Not implemented");
+        } else if (propagation === Propagation.NEVER) {
+            if (existingTx) {
+                throw new IllegalTransactionStateException(propagation);
+            }
+
+            throw new Error("Not implemented");
         }
 
-        throw new Error(`Unsupported propagation: ${propagation}`);
+        throw new Error("Unsupported propagation: " + propagation);
     }
 }
