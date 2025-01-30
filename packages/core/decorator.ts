@@ -1,7 +1,7 @@
 import {QueryParser} from "./query";
 import { PlatformTransactionManager } from "./manager";
 import { Propagation } from "./propagation";
-import {TransactionContext} from "./unitOfWork";
+import {TransactionContext} from "./context";
 import 'reflect-metadata';
 
 const QueryParamKey = Symbol("QueryParam");
