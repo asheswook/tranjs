@@ -64,10 +64,10 @@ export function createTransactionDecorator(transactionManager: PlatformTransacti
     };
 }
 
-export function Param(key: string): ParameterDecorator {
-    return (target: Object, propertyKey: string | symbol, parameterIndex: number): void => {
-        const params: QueryParameter[] = Reflect.getOwnMetadata(QueryParamKey, target, propertyKey) || [];
+export function ParamDecorator(key: string): ParameterDecorator {
+    return (target: Object, propertyKey: string | symbol | undefined, parameterIndex: number): void => {
+        const params: QueryParameter[] = Reflect.getOwnMetadata(QueryParamKey, target, propertyKey!) || [];
         params.push({ index: parameterIndex, name: key });
-        Reflect.defineMetadata(QueryParamKey, params, target, propertyKey);
+        Reflect.defineMetadata(QueryParamKey, params, target, propertyKey!);
     }
 }

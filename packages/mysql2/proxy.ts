@@ -4,14 +4,15 @@ import {
     createQueryDecorator,
     createTransactionDecorator,
     Propagation,
-    PlatformTransactionManager, TransactionContext
-} from "@node-transaction/core";
+    PlatformTransactionManager, TransactionContext, ParamDecorator
+} from "@tranjs/core";
 import {MySQLQueryParser} from "./query";
 import {MySQLTransactionManager} from "./manager";
 
 let manager: PlatformTransactionManager<MySQLConnection>
 let Transactional: (propagation?: Propagation) => MethodDecorator;
 let Query: (query: string) => any;
+const Param = ParamDecorator;
 
 /**
  * Use the pool to globally manage transactions (for tranjs)
@@ -33,4 +34,4 @@ function getCurrentTransaction(): TransactionContext {
 }
 
 export * from "mysql2/promise";
-export { Transactional, Query, usePool, getCurrentTransaction };
+export { Transactional, Query, Param, usePool, getCurrentTransaction };

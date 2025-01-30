@@ -1,4 +1,4 @@
-import { ParameterWithNames, ParametrizedQuery, QueryParser} from "@node-transaction/core";
+import { ParameterWithNames, ParametrizedQuery, QueryParser} from "@tranjs/core";
 
 export class MySQLQueryParser implements QueryParser {
     parse(query: string): ParametrizedQuery {
