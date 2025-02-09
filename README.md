@@ -1,68 +1,81 @@
-# tranjs
+# TranJS
 
-Node.js transaction management framework inspired by Spring's `@Transactional` annotation.
+**Node.js Transaction Management Framework**
+
+TranJS is a transaction management framework for Node.js, inspired by Java Hibernate's `@Transactional` annotation.
+It is designed to provide reliable and intuitive transaction management for mission-critical safety applications and general-purpose applications.
+
+**This framework is now experimental and under development. Please feel free to contribute or provide feedback.**
+
+## Getting Started
+* API Documentation is available at [here](/docs/api.md).
+* The [example](/example) contains a simple example of how to use the TranJS framework.
+* Native supported drivers are available at [here](/docs/drivers.md). Also, [you can implement driver by yourself](/docs/self-implement-guide.md).
+
+If you have any questions or need help, just ask!
+
+## Installation
+
+Native supported drivers are available at [here](/docs/drivers.md).
+
+For example, using tranjs with MySQL (mysql2):
+
+```bash
+npm install @tranjs/core @tranjs/mysql2 --save
+```
+
+### Self-Implementation Database Driver
+
+If your desired database driver isn’t available or if you prefer to roll your own,
+install only the core package:
+
+```bash
+npm install @tranjs/core --save
+```
+
+Then you can refer to the [guide](/docs/self-implement-guide.md) to implement your own driver.
 
 ## Usage
-
-You can use like this:
 
 ```typescript
 class MyService {
     @Transactional()
-    async doSomething() {
-        await this.doSomethingElse("1", "Alice");
-        await this.doSomethingElse("2", "Bob");
+    async transfer(from: string, to: string, amount: number) {
+        await this.withdrawMoney("Jaewook", 100);
+        await this.depositMoney("Chansu", 100);
     }
 
-    @Transactional()
-    @Query("INSERT INTO user (id, name) VALUES (:id, :name)")
-    async doSomethingElse(
-        @Param('id') id: string,
-        @Param('name') name: string,
-    ) {
-        console.log("Execute Query", id, name);
+    @Transactional(Propagination.MANDATORY)
+    private async depositMoney(userId: string, amount: number) {
+        console.log("Execute Query", userId, amount);
+        ctx().execute("UPDATE user SET balance = balance + ? WHERE id = ?", [amount, userId]);
+    }
+
+    @Transactional(Propagination.MANDATORY)
+    private async withdrawMoney(userId: string, amount: number) {
+        console.log("Execute Query", userId, amount);
+        ctx().execute("UPDATE user SET balance = balance - ? WHERE id = ?", [amount, userId]);
     }
 }
 ```
-```
-beginTransaction (id: 0e8wml5i78rt)
-Execute Query 1 Alice
-Execute Query 2 Bob
-commitTransaction (id: 0e8wml5i78rt)
-```
 
-## Propagation
-
-Propagation refers to the behavior of how transactions are managed when a transactional method is called within another transactional method. The node-transaction framework provides the following propagation options, inspired by Spring:
-
-### Propagation Types
-
-1. REQUIRED (default)
-- If a transaction already exists, it will be reused.
-- If no transaction exists, a new transaction will be started.
-
-Example:
-
-```typescript
-@Transactional(Propagation.REQUIRED)
-async doSomething() {
-    // Reuses the existing transaction or starts a new one.
-}
+```bash
+Start Transaction (id: ae8wml5i78rt) # Transaction started at transfer()
+Execute Query Jaewook 100
+Execute Query Chansu 100
+Commit Transaction (id: ae8wml5i78rt) # Transaction committed when transfer() finished
 ```
 
-2. REQUIRES_NEW
-- Always starts a new transaction, suspending any existing transaction.
+## Feature
+* Provide declarative database transaction
+* Typescript Native
+* No dependencies
 
-```typescript
-@Transactional(Propagation.REQUIRES_NEW)
-async doSomething() {
-    // Always starts a new transaction.
-}
-```
+## The reason why made this
+While developing software requiring robust transaction management, I needed a way to group multiple query executions into a single transaction. Initially, I used anonymous functions, referred to as _Executables_, to achieve this. However, this approach was complex, required extra boilerplate code, and made it difficult for new developers to understand.
 
-The following propagation types are not supported yet:
-- NESTED
-- MANDATORY
-- SUPPORTS
-- NOT_SUPPORTED
-- NEVER
+To simplify this process, I created **tranjs**, a framework that enables transaction management in Node.js using a clean and intuitive `@Transactional` decorator, inspired by Java Hibernate.
+
+## LICENSE
+
+This project is licensed under the LGPL-2.1 License - see the [LICENSE](LICENSE) file for details.
