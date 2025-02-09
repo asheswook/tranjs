@@ -1,16 +1,76 @@
 import {QueryParser} from "./query";
-import { PlatformTransactionManager } from "./manager";
+import {GlobalTransactionManager, PlatformTransactionManager} from "./manager";
 import { Propagation } from "./propagation";
 import {TransactionContext} from "./context";
 import 'reflect-metadata';
+import {DatasourceSetupError} from "./error";
 
+/**
+ * Transactional decorator. Before invoking the method with this decorator, datasource should be set up. use `useTransactionManager()`.
+ * @param {Propagation} propagation
+ */
+export function Transactional(propagation: Propagation = Propagation.REQUIRED): MethodDecorator {
+    if (!GlobalTransactionManager) throw new DatasourceSetupError;
+
+    return function (
+        target: any,
+        propertyKey: string | symbol,
+        descriptor: PropertyDescriptor
+    ) {
+        const originalMethod = descriptor.value;
+
+        descriptor.value = async function (...args: any[]) {
+            return GlobalTransactionManager.executeTransaction(
+                propagation,
+                async (tx) => await originalMethod.apply(this, args),
+            );
+        };
+
+        return descriptor;
+    };
+}
+
+/**
+ * @experimental
+ */
+export function createTransactionDecorator(transactionManager: PlatformTransactionManager<TransactionContext>) {
+    return function (propagation: Propagation = Propagation.REQUIRED): MethodDecorator {
+        return function (
+            target: any,
+            propertyKey: string | symbol,
+            descriptor: PropertyDescriptor
+        ) {
+            const originalMethod = descriptor.value;
+
+            descriptor.value = async function (...args: any[]) {
+                return transactionManager.executeTransaction(
+                    propagation,
+                    async (tx) => await originalMethod.apply(this, args),
+                );
+            };
+
+            return descriptor;
+        };
+    };
+}
+
+/**
+ * @experimental
+ */
 const QueryParamKey = Symbol("QueryParam");
 
+/**
+ * @experimental
+ */
 interface QueryParameter {
     index: number;
     name: string;
 }
 
+
+/**
+ * @experimental
+ */
 export function createQueryDecorator(transactionManager: PlatformTransactionManager<TransactionContext>, parser: QueryParser) {
     return function (query: string) {
         return function <T extends Function>(target: Object, propertyKey: string | symbol, descriptor: TypedPropertyDescriptor<T>): void {
@@ -42,28 +102,9 @@ export function createQueryDecorator(transactionManager: PlatformTransactionMana
     }
 }
 
-
-export function createTransactionDecorator(transactionManager: PlatformTransactionManager<TransactionContext>) {
-    return function (propagation: Propagation = Propagation.REQUIRED): MethodDecorator {
-        return function (
-            target: any,
-            propertyKey: string | symbol,
-            descriptor: PropertyDescriptor
-        ) {
-            const originalMethod = descriptor.value;
-
-            descriptor.value = async function (...args: any[]) {
-                return transactionManager.executeTransaction(
-                    propagation,
-                    async (tx) => await originalMethod.apply(this, args),
-                );
-            };
-
-            return descriptor;
-        };
-    };
-}
-
+/**
+ * @experimental
+ */
 export function ParamDecorator(key: string): ParameterDecorator {
     return (target: Object, propertyKey: string | symbol | undefined, parameterIndex: number): void => {
         const params: QueryParameter[] = Reflect.getOwnMetadata(QueryParamKey, target, propertyKey!) || [];
