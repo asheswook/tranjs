@@ -1,9 +1,45 @@
 {
   "name": "@tranjs/core",
-  "version": "1.0.0",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "version": "1.0.5",
+  "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc -b"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asheswook/tranjs.git"
+  },
+  "keywords": [
+    "transaction",
+    "transactional",
+    "typeorm",
+    "orm",
+    "database",
+    "query"
+  ],
+  "engines": {
+    "node": ">=16.4.0"
+  },
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md"
+  ],
+  "types": "./dist/index.d.ts",
+  "author": "asheswook",
+  "license": "LGPL-2.1-only",
+  "bugs": {
+    "url": "https://github.com/asheswook/tranjs/issues"
+  },
+  "homepage": "https://github.com/asheswook/tranjs#readme",
+  "devDependencies": {
+    "typescript": "^4.5.0"
+  },
+  "dependencies": {
+    "reflect-metadata": "^0.2.2"
   }
 }
