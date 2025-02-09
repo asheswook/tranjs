@@ -1,6 +1,6 @@
 import {PlatformTransactionManager} from "@tranjs/core";
 import {MySQLConnection} from "./context";
-import {FieldPacket, Pool, QueryResult} from "mysql2/promise";
+import {Pool} from "mysql2/promise";
 
 export class MySQLTransactionManager extends PlatformTransactionManager<MySQLConnection> {
     constructor(

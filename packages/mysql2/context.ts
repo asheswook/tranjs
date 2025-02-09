@@ -1,10 +1,10 @@
 import { TransactionContext } from "@tranjs/core";
-import { Pool, PoolConnection } from "mysql2/promise";
+import {FieldPacket, Pool, PoolConnection, QueryResult} from "mysql2/promise";
 
-export class MySQLConnection implements TransactionContext {
+export class MySQLConnection implements TransactionContext<[QueryResult, FieldPacket[]]> {
     constructor(public connection: PoolConnection) {}
 
-    async execute(query: string, params?: any[]): Promise<any> {
+    async execute(query: string, params?: any[]): Promise<[QueryResult, FieldPacket[]]> {
         return this.connection.execute(query, params)
     }
 }
