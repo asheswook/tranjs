@@ -15,11 +15,10 @@ export function Transactional(propagation: Propagation = Propagation.REQUIRED): 
         propertyKey: string | symbol,
         descriptor: PropertyDescriptor
     ) {
-        if (!GlobalTransactionManager) throw new DatasourceSetupError;
-
         const originalMethod = descriptor.value;
 
         descriptor.value = async function (...args: any[]) {
+            if (!GlobalTransactionManager) throw new DatasourceSetupError;
             return GlobalTransactionManager.executeTransaction(
                 propagation,
                 async (tx) => await originalMethod.apply(this, args),
