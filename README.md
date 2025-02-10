@@ -10,30 +10,15 @@ It is designed to provide reliable and intuitive transaction management for miss
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
 * The [example](/example) contains a simple example of how to use the TranJS framework.
-* Native supported drivers are available at [here](/docs/drivers.md). Also, [you can implement driver by yourself](/docs/self-implement-guide.md).
+* Supported drivers are available at [here](/docs/drivers.md).
 
 If you have any questions or need help, just ask!
 
 ## Installation
 
-Native supported drivers are available at [here](/docs/drivers.md).
+It should be set up for the database you want to use. See [here](/docs/drivers.md).
 
-For example, using tranjs with MySQL (mysql2):
-
-```bash
-npm install @tranjs/core @tranjs/mysql2 --save
-```
-
-### Self-Implementation Database Driver
-
-If your desired database driver isn’t available or if you prefer to roll your own,
-install only the core package:
-
-```bash
-npm install @tranjs/core --save
-```
-
-Then you can refer to the [guide](/docs/self-implement-guide.md) to implement your own driver.
+Also, you can refer to the [self-implementation](/docs/self-implementation.md) guide if you want to implement the driver yourself.
 
 ## Usage
 
