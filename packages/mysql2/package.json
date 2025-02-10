@@ -10,5 +10,8 @@
   "dependencies": {
     "@tranjs/core": "^1.0.9",
     "mysql2": "*"
+  },
+  "publishConfig": {
+    "@scope:registry": "https://npm.pkg.github.com"
   }
 }
