@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/core",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
     "build": "tsc -b"

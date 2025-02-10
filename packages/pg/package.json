@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/pg",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "TranJS driver for pg. (PostgreSQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
