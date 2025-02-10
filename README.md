@@ -45,16 +45,16 @@ class MyService {
         await this.depositMoney("Chansu", 100);
     }
 
-    @Transactional(Propagination.MANDATORY)
+    @Transactional(Propagation.MANDATORY)
     private async depositMoney(userId: string, amount: number) {
         console.log("Execute Query", userId, amount);
-        ctx().execute("UPDATE user SET balance = balance + ? WHERE id = ?", [amount, userId]);
+        await ctx().execute("UPDATE user SET balance = balance + ? WHERE id = ?", [amount, userId]);
     }
 
-    @Transactional(Propagination.MANDATORY)
+    @Transactional(Propagation.MANDATORY)
     private async withdrawMoney(userId: string, amount: number) {
         console.log("Execute Query", userId, amount);
-        ctx().execute("UPDATE user SET balance = balance - ? WHERE id = ?", [amount, userId]);
+        await ctx().execute("UPDATE user SET balance = balance - ? WHERE id = ?", [amount, userId]);
     }
 }
 ```
