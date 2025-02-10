@@ -8,7 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@tranjs/core": "^1.0.8",
+    "@tranjs/core": "^1.0.9",
     "@types/pg": "^8.11.11",
     "pg": "*"
   }
