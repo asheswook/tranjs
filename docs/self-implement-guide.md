@@ -21,7 +21,6 @@ import {
     PlatformTransactionManager,
     TransactionContext,
     Propagation,
-    AsyncLocal,
 } from '@tranjs/core';
 
 class CustomDatabaseConnection implements TransactionContext {
@@ -57,3 +56,15 @@ class CustomDriverTransactionManager extends PlatformTransactionManager<CustomDa
     }
 }
 ```
+
+## Step 3: Use Your Custom Driver
+
+After implementing your custom driver, you can use it in your application by calling `useTransactionManager` with an instance of your custom driver:
+
+```typescript
+import { useTransactionManager } from '@tranjs/core';
+
+useTransactionManager(new CustomDriverTransactionManager(args));
+```
+
+That’s it! You’ve successfully implemented a custom driver for TranJS.

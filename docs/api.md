@@ -1,19 +1,26 @@
 # TranJS API Documentation
 
-## Transaction
+## Decorator
 
 - `@Transactional`
     - Declares that a method should be executed within a transaction.
     - Accepts an optional propagation option (default is `REQUIRED`).
 
-- ~~`@Query`~~ **(Experimental)**
-    - ~~Associates an SQL query with a method.~~
-    - ~~Enables parameter binding through the use of `@Param`.~~
+## Usage
 
-- ~~`@Param`~~ **(Experimental)**
-    - ~~Binds method parameters to SQL query parameters.~~
+### 1. Initialize the transaction manager
 
-### Usage
+```typescript
+import { useTransactionManager } from "@tranjs/core";
+
+useTransactionManager(new YOUR_TX_MANAGER());
+```
+
+Put `YOUR_TX_MANAGER` that you want to use. If you want to use Native supported drivers, see [Native Drivers for TranJS](/docs/drivers.md).
+
+Or you can implement your own driver. See [Self-Implementation Database Driver](/docs/self-implement-guide.md).
+
+### 2. Use `@Transactional` decorator
 
 ```typescript
 import { Transactional, ctx } from '@tranjs/core';
@@ -31,23 +38,6 @@ class MyService {
 }
 ```
 
-### ~~With `@Query` and `@Param`~~ (Experimental)
-
-```typescript
-import { Transactional, Query, Param } from '@tranjs/mysql2';
-
-class MyService {
-    @Transactional()
-    @Query("INSERT INTO user (id, name) VALUES (:id, :name)")
-    async createUser(
-        @Param('id') id: string,
-        @Param('name') name: string,
-    ) {}
-}
-```
-
-**This feature is under development and not yet available.**
-
 ## Propagations
 
 | Propagation Type | Supported | Description                                                                             |
@@ -64,6 +54,10 @@ You can import `Propagation` from `@tranjs/core` to use it.
 ```typescript
 import { Propagation } from "@tranjs/core";
 ```
+
+## Using Multiple Datasources
+
+Using multiple datasources is not supported yet, but planned for a future release. See this [issue](https://github.com/asheswook/tranjs/issues/1#issue-2840465733).
 
 ## Exceptions
 
