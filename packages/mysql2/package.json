@@ -1,6 +1,7 @@
 {
   "name": "@tranjs/mysql2",
   "version": "1.0.2",
+  "description": "TranJS driver for mysql2.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
