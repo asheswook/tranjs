@@ -12,7 +12,5 @@
     "@types/pg": "^8.11.11",
     "pg": "*"
   },
-  "publishConfig": {
-    "@scope:registry": "https://npm.pkg.github.com"
-  }
+  "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61"
 }

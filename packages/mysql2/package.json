@@ -11,7 +11,5 @@
     "@tranjs/core": "^1.0.15",
     "mysql2": "*"
   },
-  "publishConfig": {
-    "@scope:registry": "https://npm.pkg.github.com"
-  }
+  "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61"
 }

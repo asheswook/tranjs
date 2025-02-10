@@ -42,7 +42,5 @@
   "dependencies": {
     "reflect-metadata": "^0.2.2"
   },
-  "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
-  }
+  "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61"
 }
