@@ -10,13 +10,13 @@ import {DatasourceSetupError} from "./error";
  * @param {Propagation} propagation
  */
 export function Transactional(propagation: Propagation = Propagation.REQUIRED): MethodDecorator {
-    if (!GlobalTransactionManager) throw new DatasourceSetupError;
-
     return function (
         target: any,
         propertyKey: string | symbol,
         descriptor: PropertyDescriptor
     ) {
+        if (!GlobalTransactionManager) throw new DatasourceSetupError;
+
         const originalMethod = descriptor.value;
 
         descriptor.value = async function (...args: any[]) {

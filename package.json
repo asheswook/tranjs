@@ -38,6 +38,6 @@
     "reflect-metadata": "^0.2.2"
   },
   "publishConfig": {
-    "@scope:registry": "https://npm.pkg.github.com"
+    "registry": "https://npm.pkg.github.com"
   }
 }
