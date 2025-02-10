@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/mysql2",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "TranJS driver for mysql2. (MySQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,7 +8,7 @@
     "build": "tsc"
   },
   "dependencies": {
-    "@tranjs/core": "^1.0.12",
+    "@tranjs/core": "^1.0.13",
     "mysql2": "*"
   },
   "publishConfig": {
