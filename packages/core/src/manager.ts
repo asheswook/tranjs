@@ -30,7 +30,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     private async executeNewTransaction<ReturnType extends any>(
         callback: (tx: Tx) => Promise<ReturnType>
-    ): Promise<any> {
+    ): Promise<ReturnType> {
         const newTx = await this.beginTransaction();
         return AsyncLocal.Run(newTx, async () => {
             try {
