@@ -1,5 +1,3 @@
-export type TransactionContextConstructor = new <ReturnType = any>(...args: any[]) => TransactionContext<ReturnType>;
-
 export interface TransactionContext<ReturnType = any> {
     /**
      * Execute a query.
