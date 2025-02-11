@@ -1,6 +1,5 @@
 import {GlobalTransactionManager, PlatformTransactionManager} from "./manager";
 import { Propagation } from "./propagation";
-import 'reflect-metadata';
 import {DatasourceSetupError} from "./error";
 
 export type PromiseMethodDecorator = <T>(target: any, propertyKey: (string | symbol), descriptor: TypedPropertyDescriptor<(...args: any[]) => Promise<T>>) => (void | TypedPropertyDescriptor<(...args: any[]) => Promise<T>>);
