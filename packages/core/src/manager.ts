@@ -1,7 +1,7 @@
-import {TransactionContext} from "./context";
-import {Propagation} from "./propagation";
-import {AsyncLocal} from "./asyncLocal";
-import {IllegalTransactionStateException, UnsupportedTransactionPropagationException} from "./error";
+import { TransactionContext } from "./context";
+import { Propagation } from "./propagation";
+import { AsyncLocal } from "./asyncLocal";
+import { IllegalTransactionStateException, UnsupportedTransactionPropagationException } from "./error";
 
 export let GlobalTransactionManager: PlatformTransactionManager<TransactionContext>;
 
@@ -28,9 +28,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     protected abstract rollbackTransaction(tx: Tx): Promise<void>;
 
-    private async executeNewTransaction<ReturnType extends any>(
-        callback: (tx: Tx) => Promise<ReturnType>
-    ): Promise<ReturnType> {
+    private async executeNewTransaction(
+        callback: (tx: Tx) => Promise<ReturnType<Tx['execute']>>
+    ): Promise<ReturnType<Tx['execute']>> {
         const newTx = await this.beginTransaction();
         return AsyncLocal.Run(newTx, async () => {
             try {
@@ -44,10 +44,10 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         });
     }
 
-    public async executeTransaction<ReturnType extends any>(
+    public async executeTransaction(
         propagation: Propagation = Propagation.REQUIRED,
-        callback: (tx: Tx) => Promise<ReturnType>,
-    ): Promise<any> {
+        callback: (tx: Tx) => ReturnType<Tx['execute']>,
+    ): Promise<ReturnType<Tx['execute']>> {
         const existingTx = this.getCurrentTransaction();
 
         switch (propagation) {
