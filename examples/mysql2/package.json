@@ -1,0 +1,17 @@
+{
+  "name": "basic_usage",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "ts-node main.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@tranjs/core": "^1.0.17",
+    "@tranjs/mysql2": "^1.0.14",
+    "mysql2": "^3.12.0"
+  }
+}
