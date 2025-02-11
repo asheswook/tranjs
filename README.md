@@ -9,6 +9,12 @@ It is designed to provide reliable and intuitive transaction management for miss
 
 **This framework is now experimental and under development. Please feel free to contribute or provide feedback.**
 
+## Features
+- ✅ **Effortless Declarative Transactions** – Manage complex DB transactions with a single line of code!
+- ⚡ **TypeScript Native** – Seamless and powerful TypeScript support for the best development experience!
+- 🛠️ **No Dependencies, Lightweight (40KB)** – Runs fast with zero unnecessary bloat!
+- 🔄 **Flexible Transaction Propagation** – Supports propagation modes like `MANDATORY`, `REQUIRES_NEW`.
+
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
 * The [example](/examples) contains a simple example of how to use the TranJS framework.
@@ -52,11 +58,6 @@ Execute Query Jaewook 100
 Execute Query Chansu 100
 Commit Transaction (id: ae8wml5i78rt) # Transaction committed when transfer() finished
 ```
-
-## Feature
-* Provide declarative database transaction
-* Typescript Native
-* No dependencies
 
 ## The reason why made this
 While developing software requiring robust transaction management, I needed a way to group multiple query executions into a single transaction. Initially, I used anonymous functions, referred to as _Executables_, to achieve this. However, this approach was complex, required extra boilerplate code, and made it difficult for new developers to understand.
