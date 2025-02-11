@@ -4,7 +4,8 @@
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
     "build": "lerna run build",
-    "publish": "npm run build && lerna publish"
+    "test": "lerna run test",
+    "publish": "lerna run test && npm run build && lerna publish"
   },
   "repository": {
     "type": "git",

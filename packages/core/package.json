@@ -3,7 +3,8 @@
   "version": "1.0.16",
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "test": "jest"
   },
   "repository": {
     "type": "git",
