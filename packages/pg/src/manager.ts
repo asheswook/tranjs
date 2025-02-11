@@ -1,8 +1,15 @@
-import { PlatformTransactionManager } from "@tranjs/core";
 import { PostgreSQLConnection } from "./context";
 import { Pool } from "pg";
+import * as core from "@tranjs/core";
 
-export class PostgreSQLTransactionManager extends PlatformTransactionManager<PostgreSQLConnection> {
+export function usePostgreSQLTransactionManager(pool: Pool) {
+    const manager = new PostgreSQLTransactionManager(pool)
+    core.useTransactionManager(manager)
+}
+
+export const ctx = core.ctx<PostgreSQLConnection>;
+
+export class PostgreSQLTransactionManager extends core.PlatformTransactionManager<PostgreSQLConnection> {
     constructor(
         private readonly pool: Pool
     ) {

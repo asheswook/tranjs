@@ -1,8 +1,15 @@
-import {PlatformTransactionManager} from "@tranjs/core";
 import {MySQLConnection} from "./context";
 import {Pool} from "mysql2/promise";
+import * as core from "@tranjs/core";
 
-export class MySQLTransactionManager extends PlatformTransactionManager<MySQLConnection> {
+export function useMySQLTransactionManager(pool: Pool) {
+    const manager = new MySQLTransactionManager(pool)
+    core.useTransactionManager(manager)
+}
+
+export const ctx = core.ctx<MySQLConnection>;
+
+export class MySQLTransactionManager extends core.PlatformTransactionManager<MySQLConnection> {
     constructor(
         private readonly pool: Pool
     ) {
