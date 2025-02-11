@@ -10,10 +10,10 @@ It is designed to provide reliable and intuitive transaction management for miss
 **This framework is now experimental and under development. Please feel free to contribute or provide feedback.**
 
 ## Features
-- ✅ **Effortless Declarative Transactions** – Manage complex DB transactions with a single line of code!  
-- ⚡ **TypeScript Native** – Seamless and powerful TypeScript support for the best development experience!  
-- 🛠️ **No Dependencies, Lightweight (15KB)** – Runs fast with zero unnecessary bloat!
-- 🔄 **Flexible Transaction Propagation** – Supports propagation modes like `MANDATORY`, `REQUIRES_NEW`.
+- ✅ **Effortless Declarative Transactions**  
+- ⚡ **TypeScript Native**
+- 🛠️ **No Dependencies, Lightweight (15KB)**
+- 🔄 **Flexible Transaction Propagation**
 
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
