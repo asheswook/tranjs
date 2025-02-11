@@ -12,7 +12,7 @@ It is designed to provide reliable and intuitive transaction management for miss
 ## Features
 - ✅ **Effortless Declarative Transactions** – Manage complex DB transactions with a single line of code!
 - ⚡ **TypeScript Native** – Seamless and powerful TypeScript support for the best development experience!
-- 🛠️ **No Dependencies, Lightweight (40KB)** – Runs fast with zero unnecessary bloat!
+- 🛠️ **No Dependencies, Lightweight (15KB)** – Runs fast with zero unnecessary bloat!
 - 🔄 **Flexible Transaction Propagation** – Supports propagation modes like `MANDATORY`, `REQUIRES_NEW`.
 
 ## Getting Started
