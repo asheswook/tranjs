@@ -20,7 +20,7 @@ If you have any questions or need help, just ask!
 
 It should be set up for the database you want to use. See [here](/docs/drivers.md).
 
-Also, you can refer to the [self-implementation](/docs/self-implementation.md) guide if you want to implement the driver yourself.
+Also, you can refer to the [self-implementation](/docs/self-implement-guide.md) guide if you want to implement the driver yourself.
 
 ## Usage
 
