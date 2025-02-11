@@ -9,7 +9,7 @@ It is designed to provide reliable and intuitive transaction management for miss
 
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
-* The [example](/example) contains a simple example of how to use the TranJS framework.
+* The [example](/examples) contains a simple example of how to use the TranJS framework.
 * Supported drivers are available at [here](/docs/drivers.md).
 
 If you have any questions or need help, just ask!
