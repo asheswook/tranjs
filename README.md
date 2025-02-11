@@ -1,5 +1,7 @@
 # TranJS
 
+[![Test](https://github.com/asheswook/tranjs/actions/workflows/test.yml/badge.svg)](https://github.com/asheswook/tranjs/actions/workflows/test.yml)
+
 **Node.js Transaction Management Framework**
 
 TranJS is a transaction management framework for Node.js, inspired by Java Hibernate's `@Transactional` annotation.
