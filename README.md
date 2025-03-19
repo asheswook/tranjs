@@ -14,7 +14,7 @@ It is designed to provide reliable and intuitive transaction management for miss
 
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
-* Supported drivers are available at [here](/docs/drivers.md).
+* Native supported drivers are available at [here](/docs/drivers.md).
 * The [example](/examples) contains a simple example of how to use the TranJS framework.
 
 ## Usage
@@ -55,6 +55,29 @@ It should be set up for the database you want to use. See [here](/docs/drivers.m
 > [!NOTE]
 > If the driver you want to use does not exist, [you can implement it on your own.](/docs/self-implement-guide.md)
 
-## LICENSE
+## Contribute
+
+TranJS welcomes contributions from the community to enhance its functionality and usability. Here’s how you can contribute:
+
+1. **Report Issues**  
+   If you encounter bugs or have suggestions for improvements, feel free to open an issue in the repository.
+
+2. **Submit Pull Requests**  
+   Fork the repository, create a new branch for your changes, and submit a pull request. Ensure your code adheres to the project's coding standards and includes relevant tests.
+
+3. **Implement Drivers**  
+   If the driver you need is not available, you can implement it yourself using the [self-implement guide](/docs/self-implement-guide.md).
+
+4. **Improve Documentation**  
+   Contributions to the documentation are always appreciated—whether it's fixing typos, adding examples, or clarifying complex concepts.
+
+5. **Collaborate and Review**  
+   Participate in discussions, review pull requests, and provide constructive feedback to other contributors.
+
+## License
 
 This project is licensed under the LGPL-2.1 License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgement
+
+* [Spring JPA](https://github.com/spring-projects/spring-data-jpa)
