@@ -28,9 +28,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     protected abstract rollbackTransaction(tx: Tx): Promise<void>;
 
-    private async executeNewTransaction(
-        callback: (tx: Tx) => Promise<ReturnType<Tx['execute']>>
-    ): Promise<ReturnType<Tx['execute']>> {
+    private async executeNewTransaction<Return>(
+        callback: (tx: Tx) => Promise<Return> | Return,
+    ): Promise<Return> {
         const newTx = await this.beginTransaction();
         return AsyncLocal.Run(newTx, async () => {
             try {
@@ -44,46 +44,46 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         });
     }
 
-    public async executeTransaction(
+    public async executeTransaction<Return>(
         propagation: Propagation = Propagation.REQUIRED,
-        callback: (tx: Tx) => ReturnType<Tx['execute']>,
-    ): Promise<ReturnType<Tx['execute']>> {
+        callback: (tx: Tx) => Return | Promise<Return>,
+    ): Promise<Return> {
         const existingTx = this.getCurrentTransaction();
 
         switch (propagation) {
             case Propagation.REQUIRES_NEW:
-                // 무조건 신규 트랜잭션을 시작합니다.
+                // Always starts a new transaction
                 return this.executeNewTransaction(callback);
 
             case Propagation.REQUIRED:
-                // 기존 트랜잭션이 있으면 재사용, 없으면 신규 트랜잭션을 시작합니다.
+                // Reuse tx if exists, or starts new tx if not exists
                 return existingTx ? callback(existingTx) : this.executeNewTransaction(callback);
 
             case Propagation.MANDATORY:
                 if (!existingTx) {
-                    // 기존 트랜잭션이 없으면 예외를 던집니다.
+                    // If no existing transaction, throw an exception
                     throw new IllegalTransactionStateException(propagation);
                 }
                 return callback(existingTx);
 
             // case Propagation.SUPPORTS:
-            //     // 기존 트랜잭션이 있을 경우만 콜백을 실행합니다.
+            //     // If an existing transaction is present, use it; otherwise, execute without a transaction
             //     if (existingTx) {
             //         return callback(existingTx);
             //     }
-            //     // 기존 트랜잭션이 없을 경우 동작 정의가 없으므로 오류 처리합니다.
+            //     // No transaction context, execute without a transaction (implementation needed)
             //     throw new Error("Not implemented");
             //
             // case Propagation.NOT_SUPPORTED:
-            //     // 트랜잭션 없이 실행해야 하는 경우 (구현 필요)
+            //     // If an existing transaction is present, suspend it; otherwise, execute without a transaction
             //     throw new Error("Not implemented");
             //
             // case Propagation.NEVER:
             //     if (existingTx) {
-            //         // 트랜잭션이 존재하면 예외를 던집니다.
+            //         // If an existing transaction is present, throw an exception
             //         throw new IllegalTransactionStateException(propagation);
             //     }
-            //     // 트랜잭션이 없을 경우 실행 (구현 필요)
+            //     // No transaction context, execute without a transaction (implementation needed)
             //     throw new Error("Not implemented");
 
             default:
