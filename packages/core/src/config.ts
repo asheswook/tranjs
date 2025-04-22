@@ -1,4 +1,4 @@
-import {Propagation} from "./propagation";
+import { Propagation } from "./propagation";
 
 export interface TransactionConfig {
     // /**

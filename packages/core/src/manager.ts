@@ -1,4 +1,4 @@
-import {MetadataWrappedTransaction, TransactionContext} from "./context";
+import { MetadataWrappedTransaction, TransactionContext } from "./context";
 import { Propagation } from "./propagation";
 import { AsyncLocal } from "./asyncLocal";
 import { IllegalTransactionStateException, UnsupportedTransactionPropagationException } from "./error";

@@ -1,4 +1,4 @@
-import {Propagation} from "./propagation";
+import { Propagation } from "./propagation";
 
 export class IllegalTransactionStateException extends Error {
     constructor(propagation: string) {

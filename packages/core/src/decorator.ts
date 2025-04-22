@@ -1,6 +1,6 @@
-import {GlobalTransactionManager} from "./manager";
+import { GlobalTransactionManager } from "./manager";
 import { Propagation } from "./propagation";
-import {DatasourceSetupError} from "./error";
+import { DatasourceSetupError } from "./error";
 
 export type PromiseMethodDecorator = <T>(target: any, propertyKey: (string | symbol), descriptor: TypedPropertyDescriptor<(...args: any[]) => Promise<T>>) => (void | TypedPropertyDescriptor<(...args: any[]) => Promise<T>>);
 
