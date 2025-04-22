@@ -7,8 +7,8 @@ export let GlobalTransactionManager: PlatformTransactionManager<TransactionConte
 
 /**
  * @deprecated
- * Do not use this `ctx()` directly.
- * Use `ctx()` of **each driver** instead.
+ * Do not use this `ctx()` directly. This is not type safe.
+ * Use `ctx()` of **EACH DRIVER** instead.
  * @example
  * ```ts
  * import { ctx } from "@tranjs/mysql2";
