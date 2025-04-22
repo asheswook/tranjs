@@ -8,10 +8,10 @@
     "strict": true,                                      /* Enable all strict type-checking options. */
     "skipLibCheck": true,                                 /* Skip type checking all .d.ts files. */
     "outDir": "dist",
-    "noImplicitAny": false,
-    "noUnusedLocals": false,
+    "noImplicitAny": true,
+    "noUnusedLocals": true,
     "emitDecoratorMetadata": true,
-    "useUnknownInCatchVariables": false,
+    "useUnknownInCatchVariables": true,
     "allowJs": false,
     "declaration": true
   },
