@@ -1,41 +1,73 @@
-import {MySQLConnection} from "./context";
-import {Pool} from "mysql2/promise";
+import * as mysql2 from "mysql2/promise";
 import * as core from "@tranjs/core";
+import { PoolConnection } from "./context";
+import {MetadataWrappedTransaction} from "@tranjs/core";
+import {AsyncLocal} from "@tranjs/core/dist/asyncLocal";
 
-export function useMySQLTransactionManager(pool: Pool) {
+const DRIVER_NAME = Symbol('mysql2');
+
+export function useMySQLTransactionManager(pool: mysql2.Pool) {
     const manager = new MySQLTransactionManager(pool)
     core.useTransactionManager(manager)
 }
 
-export const ctx = core.ctx<MySQLConnection>;
+/**
+ * Get the current transaction context.
+ * Use in the @Transactional method.
+ * @example
+ * ```ts
+ * import { Transactional } from "@tranjs/core";
+ * import { ctx } from "@tranjs/mysql2";
+ *
+ * class MyService {
+ *   @Transactional()
+ *   async myMethod() {
+ *     const res = await ctx().query("SELECT * FROM users");
+ *   }
+ * }
+ * ```
+ */
+export const ctx = () => {
+    const context = AsyncLocal.Context;
+    if (!context) throw new Error("Transaction context not initialized");
+    if (context.metadata.driverName !== DRIVER_NAME) throw new Error("Transaction context not initialized");
+    return context.transaction as PoolConnection;
+}
 
-export class MySQLTransactionManager extends core.PlatformTransactionManager<MySQLConnection> {
+export class MySQLTransactionManager extends core.PlatformTransactionManager<PoolConnection> {
     constructor(
-        private readonly pool: Pool
+        private readonly pool: mysql2.Pool
     ) {
         super();
     }
 
-    protected async beginTransaction(): Promise<MySQLConnection> {
+    protected async beginTransaction(): Promise<MetadataWrappedTransaction<PoolConnection>> {
         const connection = await this.pool.getConnection()
         await connection.beginTransaction()
 
-        return new MySQLConnection(connection)
+        return {
+            metadata: {
+                driverName: DRIVER_NAME,
+            },
+            transaction: connection,
+        } satisfies MetadataWrappedTransaction<PoolConnection>;
     }
 
-    protected async commitTransaction(tx: MySQLConnection): Promise<void> {
+    protected async commitTransaction(tx: PoolConnection): Promise<void> {
         try {
-            await tx.connection.commit()
+            // TODO: dangerous type assertion
+            await (tx as mysql2.PoolConnection).commit()
         } finally {
-            tx.connection.release()
+            (tx as mysql2.PoolConnection).release()
         }
     }
 
-    protected async rollbackTransaction(tx: MySQLConnection): Promise<void> {
+    protected async rollbackTransaction(tx: PoolConnection): Promise<void> {
         try {
-            await tx.connection.rollback()
+            // TODO: dangerous type assertion
+            await (tx as mysql2.PoolConnection).rollback()
         } finally {
-            tx.connection.release()
+            (tx as mysql2.PoolConnection).release()
         }
     }
 }
