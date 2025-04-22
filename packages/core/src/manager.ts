@@ -1,12 +1,26 @@
-import { TransactionContext } from "./context";
+import {MetadataWrappedTransaction, TransactionContext} from "./context";
 import { Propagation } from "./propagation";
 import { AsyncLocal } from "./asyncLocal";
 import { IllegalTransactionStateException, UnsupportedTransactionPropagationException } from "./error";
 
 export let GlobalTransactionManager: PlatformTransactionManager<TransactionContext>;
 
+/**
+ * @deprecated
+ * Do not use this `ctx()` directly.
+ * Use `ctx()` of **each driver** instead.
+ * @example
+ * ```ts
+ * import { ctx } from "@tranjs/mysql2";
+ * ```
+ */
 export function ctx<Tx extends TransactionContext>(): Tx {
-    return AsyncLocal.Context as Tx;
+    const context = AsyncLocal.Context;
+    if (!context) {
+        throw new Error("No transaction context available");
+    }
+
+    return context.transaction as Tx;
 }
 
 export function useTransactionManager<Tx extends TransactionContext>(
@@ -19,10 +33,10 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     protected constructor() {}
 
     getCurrentTransaction(): Tx | undefined {
-        return AsyncLocal.Context as Tx;
+        return AsyncLocal.Context?.transaction as Tx;
     }
 
-    protected abstract beginTransaction(): Promise<Tx>;
+    protected abstract beginTransaction(): Promise<MetadataWrappedTransaction<Tx>>;
 
     protected abstract commitTransaction(tx: Tx): Promise<void>;
 
@@ -34,11 +48,11 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         const newTx = await this.beginTransaction();
         return AsyncLocal.Run(newTx, async () => {
             try {
-                const result = await callback(newTx);
-                await this.commitTransaction(newTx);
+                const result = await callback(newTx.transaction);
+                await this.commitTransaction(newTx.transaction);
                 return result;
             } catch (error) {
-                await this.rollbackTransaction(newTx);
+                await this.rollbackTransaction(newTx.transaction);
                 throw error;
             }
         });

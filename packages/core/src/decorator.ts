@@ -1,4 +1,4 @@
-import {GlobalTransactionManager, PlatformTransactionManager} from "./manager";
+import {GlobalTransactionManager} from "./manager";
 import { Propagation } from "./propagation";
 import {DatasourceSetupError} from "./error";
 
