@@ -2,31 +2,20 @@
 
 [![Test](https://github.com/asheswook/tranjs/actions/workflows/test.yml/badge.svg)](https://github.com/asheswook/tranjs/actions/workflows/test.yml)
 
-**Node.js Transaction Management Framework**
+TranJS is a transaction management framework which provides declaretive transaction, without any ORMs.
 
-TranJS is a transaction management framework for Node.js, inspired by Java Hibernate's `@Transactional` annotation.
 It is designed to provide reliable and intuitive transaction management for mission-critical safety applications and general-purpose applications.
 
-**This framework is now experimental and under development. Please feel free to contribute or provide feedback.**
-
 ## Features
-- ✅ **Effortless Declarative Transactions**  
+- ✅ **Declarative Transaction via Decorator**
 - ⚡ **TypeScript Native**
 - 🛠️ **No Dependencies, Lightweight (15KB)**
-- 🔄 **Flexible Transaction Propagation**
+- 🚀 **Easy to Use, No Boilerplate Code**
 
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
+* Native supported drivers are available at [here](/docs/drivers.md).
 * The [example](/examples) contains a simple example of how to use the TranJS framework.
-* Supported drivers are available at [here](/docs/drivers.md).
-
-If you have any questions or need help, just ask!
-
-## Installation
-
-It should be set up for the database you want to use. See [here](/docs/drivers.md).
-
-Also, you can refer to the [self-implementation](/docs/self-implement-guide.md) guide if you want to implement the driver yourself.
 
 ## Usage
 
@@ -59,11 +48,37 @@ Execute Query Chansu 100
 Commit Transaction (id: ae8wml5i78rt) # Transaction committed when transfer() finished
 ```
 
-## The reason why made this
-While developing software requiring robust transaction management, I needed a way to group multiple query executions into a single transaction. Initially, I used anonymous functions, referred to as _Executables_, to achieve this. However, this approach was complex, required extra boilerplate code, and made it difficult for new developers to understand.
+## Installation
 
-To simplify this process, I created **tranjs**, a framework that enables transaction management in Node.js using a clean and intuitive `@Transactional` decorator, inspired by Java Hibernate.
+It should be set up for the database you want to use. See [here](/docs/drivers.md).
 
-## LICENSE
+> [!NOTE]
+> If the driver you want to use does not exist, [you can implement it on your own.](/docs/self-implement-guide.md)
+
+## Contribute
+
+TranJS welcomes contributions from the community to enhance its functionality and usability. Here’s how you can contribute:
+
+1. **Report Issues**  
+   If you encounter bugs or have suggestions for improvements, feel free to open an issue in the repository.
+
+2. **Submit Pull Requests**  
+   Fork the repository, create a new branch for your changes, and submit a pull request. Ensure your code adheres to the project's coding standards and includes relevant tests.
+
+3. **Implement Drivers**  
+   If the driver you need is not available, you can implement it yourself using the [self-implement guide](/docs/self-implement-guide.md).
+
+4. **Improve Documentation**  
+   Contributions to the documentation are always appreciated—whether it's fixing typos, adding examples, or clarifying complex concepts.
+
+5. **Collaborate and Review**  
+   Participate in discussions, review pull requests, and provide constructive feedback to other contributors.
+
+## License
 
 This project is licensed under the LGPL-2.1 License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgement
+
+* [Spring Framework](https://github.com/spring-projects/spring-framework)
+* [Hibernate](https://github.com/hibernate/hibernate-orm)

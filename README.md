@@ -10,8 +10,8 @@ It is designed to provide reliable and intuitive transaction management for miss
 - ✅ **Declarative Transaction via Decorator**
 - ⚡ **TypeScript Native**
 - 🛠️ **No Dependencies, Lightweight (15KB)**
-- 🔄 **Flexible Transaction Propagation**
-
+- 🚀 **Easy to Use, No Boilerplate Code**
+  
 ## Getting Started
 * API Documentation is available at [here](/docs/api.md).
 * Native supported drivers are available at [here](/docs/drivers.md).
@@ -80,4 +80,5 @@ This project is licensed under the LGPL-2.1 License - see the [LICENSE](LICENSE)
 
 ## Acknowledgement
 
-* [Spring JPA](https://github.com/spring-projects/spring-data-jpa)
+* [Spring Framework](https://github.com/spring-projects/spring-framework)
+* [Hibernate](https://github.com/hibernate/hibernate-orm)
