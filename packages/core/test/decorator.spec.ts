@@ -1,10 +1,15 @@
-import {Transactional, Propagation, PlatformTransactionManager, useTransactionManager, DatasourceSetupError, TransactionContext} from "../src";
+import { Transactional, Propagation, PlatformTransactionManager, useTransactionManager, DatasourceSetupError, TransactionContext } from "../src";
+
+const MockManagerSymbol = Symbol('MockManager');
 
 class MockManager extends PlatformTransactionManager<TransactionContext> {
     constructor() {
         super();
     }
-    beginTransaction = jest.fn();
+    beginTransaction = jest.fn().mockResolvedValue({
+        transaction: {} as TransactionContext,
+        metadata: { driverName: MockManagerSymbol },
+    });
     commitTransaction = jest.fn();
     rollbackTransaction = jest.fn();
 }

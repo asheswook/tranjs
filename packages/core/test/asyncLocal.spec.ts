@@ -1,5 +1,5 @@
-import {AsyncLocal} from "../src/asyncLocal";
-import {TransactionContext} from "../src";
+import { AsyncLocal } from "../src/asyncLocal";
+import { MetadataWrappedTransaction, TransactionContext } from "../src";
 
 describe('AsyncLocal', () => {
     describe('Context', () => {
@@ -10,7 +10,7 @@ describe('AsyncLocal', () => {
 
     describe('Run()', () => {
         it('should set context accessible within callback', () => {
-            const mockContext = { execute: jest.fn() } as unknown as TransactionContext;
+            const mockContext = { transaction: {}, metadata: { driverName: 'mock' } } satisfies MetadataWrappedTransaction<TransactionContext>;
 
             AsyncLocal.Run(mockContext, () => {
                 expect(AsyncLocal.Context).toBe(mockContext);
@@ -20,8 +20,8 @@ describe('AsyncLocal', () => {
         });
         
         it('should set the context within nested Run calls', () => {
-            const mockContext1 = { execute: jest.fn() } as unknown as TransactionContext;
-            const mockContext2 = { execute: jest.fn() } as unknown as TransactionContext;
+            const mockContext1 = { transaction: {}, metadata: { driverName: 'mock' } } satisfies MetadataWrappedTransaction<TransactionContext>;
+            const mockContext2 = { transaction: {}, metadata: { driverName: 'mock' } } satisfies MetadataWrappedTransaction<TransactionContext>;
 
             AsyncLocal.Run(mockContext1, () => {
                 expect(AsyncLocal.Context).toBe(mockContext1);
