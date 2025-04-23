@@ -1,7 +1,7 @@
 import * as pg from "pg";
 import * as core from "@tranjs/core";
 import { PoolClient } from "./context";
-import { MetadataWrappedTransaction } from "@tranjs/core";
+import {MetadataWrappedTransaction, TransactionContextMixingError} from "@tranjs/core";
 import { AsyncLocal } from "@tranjs/core/dist/asyncLocal";
 
 const DRIVER_NAME = Symbol('pg');
@@ -20,7 +20,7 @@ export function usePostgreSQLTransactionManager(pool: pg.Pool) {
  * import { ctx } from "@tranjs/pg";
  *
  * class MyService {
- *   @Transactional()
+ *   ⁣@Transactional()
  *   async myMethod() {
  *     const res = await ctx().query("SELECT * FROM users");
  *   }
@@ -30,7 +30,7 @@ export function usePostgreSQLTransactionManager(pool: pg.Pool) {
 export const ctx = () => {
     const context = AsyncLocal.Context;
     if (!context) throw new Error("Transaction context not initialized");
-    if (context.metadata.driverName !== DRIVER_NAME) throw new Error("Transaction context not initialized");
+    if (context.metadata.driverName !== DRIVER_NAME) throw new TransactionContextMixingError(context.metadata.driverName, DRIVER_NAME);
     return context.transaction as PoolClient;
 }
 

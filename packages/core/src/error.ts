@@ -20,3 +20,10 @@ export class DatasourceSetupError extends Error {
         this.name = 'TransactionDatasourceSetupError';
     }
 }
+
+export class TransactionContextMixingError extends Error {
+    constructor(currentDriver: string | Symbol, transactionDriver: string | Symbol) {
+        super(`Transaction context mixing error: Current active context driver is '${currentDriver.toString()}', but tried to use ctx() of '${transactionDriver.toString()}'.`);
+        this.name = 'TransactionContextMixingError';
+    }
+}

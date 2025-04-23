@@ -70,3 +70,6 @@ Using multiple datasources is not supported yet, but planned for a future releas
 
 - **UnsupportedTransactionPropagationException**
   - Thrown when an unsupported propagation type is used.
+
+- **TransactionContextMixingError**
+  - Thrown mixed `ctx()` use when current transaction context is different from the one that started the transaction.

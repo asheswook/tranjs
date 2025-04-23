@@ -1,8 +1,8 @@
 import * as mysql2 from "mysql2/promise";
 import * as core from "@tranjs/core";
 import { PoolConnection } from "./context";
-import {MetadataWrappedTransaction} from "@tranjs/core";
-import {AsyncLocal} from "@tranjs/core/dist/asyncLocal";
+import {MetadataWrappedTransaction, TransactionContextMixingError} from "@tranjs/core";
+import { AsyncLocal } from "@tranjs/core/dist/asyncLocal";
 
 const DRIVER_NAME = Symbol('mysql2');
 
@@ -20,7 +20,7 @@ export function useMySQLTransactionManager(pool: mysql2.Pool) {
  * import { ctx } from "@tranjs/mysql2";
  *
  * class MyService {
- *   @Transactional()
+ *   ⁣@Transactional()
  *   async myMethod() {
  *     const res = await ctx().query("SELECT * FROM users");
  *   }
@@ -30,7 +30,7 @@ export function useMySQLTransactionManager(pool: mysql2.Pool) {
 export const ctx = () => {
     const context = AsyncLocal.Context;
     if (!context) throw new Error("Transaction context not initialized");
-    if (context.metadata.driverName !== DRIVER_NAME) throw new Error("Transaction context not initialized");
+    if (context.metadata.driverName !== DRIVER_NAME) throw new TransactionContextMixingError(context.metadata.driverName, DRIVER_NAME);
     return context.transaction as PoolConnection;
 }
 
