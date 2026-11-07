@@ -5,12 +5,20 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc -b",
+    "test": "jest --runInBand"
   },
   "dependencies": {
     "@tranjs/core": "^1.0.22",
     "@types/pg": "^8.11.11",
     "pg": "*"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testRegex": ".*\\.spec\\.ts$",
+    "moduleFileExtensions": ["js", "json", "ts"],
+    "transform": { "^.+\\.ts$": "ts-jest" },
+    "testTimeout": 30000
   },
   "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61",
   "devDependencies": {
