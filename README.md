@@ -7,7 +7,11 @@ TranJS is a transaction management framework which provides declaretive transact
 It is designed to provide reliable and intuitive transaction management for mission-critical safety applications and general-purpose applications.
 
 ## Features
-- ✅ **Declarative Transaction via Decorator**
+- ✅ **Declarative Transaction via Decorator** (`@Transactional`) or function (`runInTransaction`)
+- 🔁 **All 7 Spring Propagations** including `NESTED` (savepoint)
+- 🎛️ **Isolation level, read-only, timeout**
+- 🗄️ **Multiple datasources**
+- 🪝 **`afterCommit` / `afterRollback` hooks**
 - ⚡ **TypeScript Native**
 - 🛠️ **No Dependencies, Lightweight (15KB)**
 - 🚀 **Easy to Use, No Boilerplate Code**

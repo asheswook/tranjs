@@ -79,12 +79,33 @@ import { ctx } from "@tranjs/pg";
 class MyService {
     @Transactional()
     async method() {
-        await ctx().execute("SELECT 1;")
+        await ctx().query("SELECT 1;")
     }
 }
 ```
 
 That’s it! You’re ready to use TranJS with PostgreSQL.
+
+## Driver Features
+
+| | mysql2 | pg |
+|---|:-:|:-:|
+| Isolation level | `SET TRANSACTION ISOLATION LEVEL` | `BEGIN ISOLATION LEVEL` |
+| Read-only | `START TRANSACTION READ ONLY` | `BEGIN READ ONLY` |
+| DB-side timeout | X | `SET LOCAL statement_timeout` |
+| NESTED (savepoint) | O | O |
+| Multiple datasources | `useMySQLTransactionManager(pool, name)` / `ctx(name)` | `usePostgreSQLTransactionManager(pool, name)` / `ctx(name)` |
+
+## Development
+
+Driver tests run against real databases:
+
+```bash
+docker compose up -d
+npm run build && npm test
+```
+
+Override the connection strings with `PG_URL` and `MYSQL_URL`.
 
 ## Custom Driver
 

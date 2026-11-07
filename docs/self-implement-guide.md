@@ -18,44 +18,65 @@ Below is an example implementation:
 
 ```typescript
 import {
+    MetadataWrappedTransaction,
     PlatformTransactionManager,
     TransactionContext,
-    Propagation,
+    TransactionOptions,
 } from '@tranjs/core';
 
-class CustomDatabaseConnection implements TransactionContext {
-    constructor(
-        public readonly connection: any,
-    ) {}
-
-    async execute(query: string, params: any[]): Promise<any> {
-        // Implement your logic to execute the query with the given parameters.
-    }
+interface CustomConnection extends TransactionContext {
+    query(sql: string, params?: any[]): Promise<any>;
 }
 
-class CustomDriverTransactionManager extends PlatformTransactionManager<CustomDatabaseConnection> {
-    protected constructor(...args: any[]) { // Implement constructor
+const DRIVER_NAME = Symbol('custom');
+
+class CustomDriverTransactionManager extends PlatformTransactionManager<CustomConnection> {
+    constructor(private readonly pool: any) {
         super();
     }
 
-    protected async beginTransaction(): Promise<TransactionContext> {
-        console.log('Custom Begin Transaction');
-        // Implement your logic to initialize and return a new transaction context.
-        const tx: TransactionContext = { /* ...initialize transaction context... */};
-        return tx;
+    // Required
+    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<CustomConnection>> {
+        const connection = await this.pool.getConnection();
+        try {
+            // Apply options.isolationLevel / options.readOnly / options.timeout as your DB supports them.
+            await connection.query('BEGIN');
+        } catch (error) {
+            connection.release();   // release the connection if begin fails
+            throw error;
+        }
+        return { transaction: connection, metadata: { driverName: DRIVER_NAME } };
     }
 
-    protected async commitTransaction(tx: TransactionContext): Promise<void> {
-        console.log('Custom Commit Transaction');
-        // Implement commit operation for the transaction.
+    // Required. If commit fails, roll back and release the connection here. The core does not call rollback after a failed commit.
+    protected async commitTransaction(tx: CustomConnection): Promise<void> {
+        try {
+            await tx.query('COMMIT');
+        } catch (error) {
+            try { await tx.query('ROLLBACK'); } catch {}
+            throw error;
+        } finally {
+            (tx as any).release();
+        }
     }
 
-    protected async rollbackTransaction(tx: TransactionContext): Promise<void> {
-        console.log('Custom Rollback Transaction');
-        // Implement rollback operation for the transaction.
+    // Required
+    protected async rollbackTransaction(tx: CustomConnection): Promise<void> {
+        try {
+            await tx.query('ROLLBACK');
+        } finally {
+            (tx as any).release();
+        }
     }
+
+    // Optional: implement only if you support Propagation.NESTED. Otherwise it throws NestedTransactionNotSupportedError.
+    protected async createSavepoint(tx: CustomConnection, name: string) { await tx.query(`SAVEPOINT ${name}`); }
+    protected async rollbackToSavepoint(tx: CustomConnection, name: string) { await tx.query(`ROLLBACK TO SAVEPOINT ${name}`); }
+    protected async releaseSavepoint(tx: CustomConnection, name: string) { await tx.query(`RELEASE SAVEPOINT ${name}`); }
 }
 ```
+
+Read the current transaction with `manager.getCurrentTransaction()`. Like the native drivers, you can expose a type-safe `ctx()` based on it.
 
 ## Step 3: Use Your Custom Driver
 
@@ -64,7 +85,8 @@ After implementing your custom driver, you can use it in your application by cal
 ```typescript
 import { useTransactionManager } from '@tranjs/core';
 
-useTransactionManager(new CustomDriverTransactionManager(args));
+useTransactionManager(new CustomDriverTransactionManager(pool));
+// or register under a name: useTransactionManager(manager, "secondary");
 ```
 
 That’s it! You’ve successfully implemented a custom driver for TranJS.
