@@ -39,7 +39,8 @@ class DummyTransactionManager extends PlatformTransactionManager<DummyTx> {
 // do not depend on the former cross-datasource transaction joining bug.
 function withOwnedContext<T>(manager: DummyTransactionManager, context: MetadataWrappedTransaction<DummyTx>, callback: () => T): T {
     return AsyncLocal.RunFrame({
-        txs: new Map([[manager, { context, active: true, savepointCounter: 0, afterCommit: [], afterRollback: [] }]]),
+        txs: new Map([[manager, { context, active: true, rollbackOnly: false, savepointCounter: 0, afterCommit: [], afterRollback: [] }]]),
+        scopes: new Map([[manager, { nestedOpen: false }]]),
         current: context,
     }, callback);
 }

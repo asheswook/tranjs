@@ -4,7 +4,8 @@ import {
     getTransactionManager, GlobalTransactionManager, IllegalTransactionStateException, IsolationLevel,
     Logger, MetadataWrappedTransaction, NestedTransactionNotSupportedError, NoTransactionContextError,
     PlatformTransactionManager, Propagation, runInTransaction, Transactional, TransactionOptions,
-    TransactionTimeoutError, useTransactionManager,
+    TransactionTimeoutError, useTransactionManager, ConcurrentNestedTransactionError,
+    InvalidIsolationLevelError, UnexpectedRollbackError,
 } from "../src";
 
 interface Tx { id: number }
@@ -17,7 +18,7 @@ class RecordingManager extends PlatformTransactionManager<Tx> {
     rollbackError?: Error;
     private nextId = 0;
 
-    constructor() { super(); }
+    constructor(protected readonly handlesCommitFailure: boolean = false) { super(); }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<Tx>> {
         this.options = options;
@@ -39,11 +40,13 @@ class RecordingManager extends PlatformTransactionManager<Tx> {
 }
 
 class SavepointManager extends RecordingManager {
+    savepointRollbackError?: Error;
     protected async createSavepoint(tx: Tx, name: string): Promise<void> {
         this.events.push(`savepoint:${tx.id}:${name}`);
     }
     protected async rollbackToSavepoint(tx: Tx, name: string): Promise<void> {
         this.events.push(`rollbackTo:${tx.id}:${name}`);
+        if (this.savepointRollbackError) throw this.savepointRollbackError;
     }
     protected async releaseSavepoint(tx: Tx, name: string): Promise<void> {
         this.events.push(`release:${tx.id}:${name}`);
@@ -83,18 +86,25 @@ describe("transaction hardening", () => {
         expect(() => getTransactionManager("missing")).toThrow("missing");
     });
 
-    it("does not roll back when commit fails or run success/failure hooks", async () => {
+    it.each([false, true])("preserves commit errors and runs rollback hooks with handlesCommitFailure=%s", async handlesCommitFailure => {
+        manager = new SavepointManager(handlesCommitFailure);
+        useTransactionManager(manager);
         const error = new Error("commit failed");
         manager.commitError = error;
+        const rollbackError = new Error("rollback failed");
+        manager.rollbackError = rollbackError;
+        const log = logger();
+        manager.setLogger(log);
         const commitHook = jest.fn();
         const rollbackHook = jest.fn();
         await expect(manager.executeTransaction(Propagation.REQUIRED, () => {
             afterCommit(commitHook);
             afterRollback(rollbackHook);
         })).rejects.toBe(error);
-        expect(manager.events).toEqual(["begin:1", "commit:1"]);
+        expect(manager.events).toEqual(handlesCommitFailure ? ["begin:1", "commit:1"] : ["begin:1", "commit:1", "rollback:1"]);
+        if (!handlesCommitFailure) expect(log.error).toHaveBeenCalledWith("Transaction rollback failed", rollbackError);
         expect(commitHook).not.toHaveBeenCalled();
-        expect(rollbackHook).not.toHaveBeenCalled();
+        expect(rollbackHook).toHaveBeenCalledTimes(1);
         expect(manager.getCurrentTransaction()).toBeUndefined();
     });
 
@@ -189,6 +199,65 @@ describe("transaction hardening", () => {
                 .rejects.toThrow(NestedTransactionNotSupportedError);
         });
         expect(oldManager.events).toEqual(["begin:1", "commit:1"]);
+    });
+
+    it("rejects concurrent NESTED siblings in Promise.all before creating a second savepoint", async () => {
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            const results = await Promise.all([1, 2].map(() =>
+                manager.executeTransaction(Propagation.NESTED, async () => {
+                    await Promise.resolve();
+                }).then(() => "ok", error => error)));
+            expect(results[0]).toBe("ok");
+            expect(results[1]).toBeInstanceOf(ConcurrentNestedTransactionError);
+            await manager.executeTransaction(Propagation.NESTED, () => undefined);
+        });
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1",
+            "savepoint:1:tranjs_sp_2", "release:1:tranjs_sp_2", "commit:1",
+        ]);
+    });
+
+    it("allows genuine recursive NESTED scopes", async () => {
+        await manager.executeTransaction(Propagation.REQUIRED, () =>
+            manager.executeTransaction(Propagation.NESTED, () =>
+                manager.executeTransaction(Propagation.NESTED, () => undefined)));
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "savepoint:1:tranjs_sp_2",
+            "release:1:tranjs_sp_2", "release:1:tranjs_sp_1", "commit:1",
+        ]);
+    });
+
+    it("marks failed savepoint rollback rollback-only and rolls back the physical owner with hooks", async () => {
+        const rollbackError = new Error("savepoint rollback failed");
+        manager.savepointRollbackError = rollbackError;
+        const log = logger();
+        manager.setLogger(log);
+        const rollbackHook = jest.fn();
+        const commitHook = jest.fn();
+        const nestedError = new Error("nested failed");
+        await expect(manager.executeTransaction(Propagation.REQUIRED, async () => {
+            afterCommit(commitHook);
+            afterRollback(rollbackHook);
+            await expect(manager.executeTransaction(Propagation.NESTED, () => {
+                throw nestedError;
+            })).rejects.toBe(nestedError);
+        })).rejects.toThrow(UnexpectedRollbackError);
+        expect(new UnexpectedRollbackError().message).toContain("marked rollback-only");
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "rollback:1",
+        ]);
+        expect(log.error).toHaveBeenCalledWith("Savepoint rollback failed", rollbackError);
+        expect(rollbackHook).toHaveBeenCalledTimes(1);
+        expect(commitHook).not.toHaveBeenCalled();
+    });
+
+    it("validates isolation before beginning a physical transaction", async () => {
+        const callback = jest.fn();
+        await expect(manager.executeTransaction(Propagation.REQUIRED, callback, {
+            isolationLevel: "READ COMMITTED; COMMIT; SELECT 1 --" as IsolationLevel,
+        })).rejects.toThrow(InvalidIsolationLevelError);
+        expect(manager.events).toEqual([]);
+        expect(callback).not.toHaveBeenCalled();
     });
 
     it("REQUIRES_NEW suspends before begin and restores the outer after success and rollback", async () => {

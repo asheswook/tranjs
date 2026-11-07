@@ -1,9 +1,10 @@
 import { MetadataWrappedTransaction, TransactionContext } from "./context";
 import { Propagation } from "./propagation";
 import { AsyncLocal, TransactionSynchronization, TxState } from "./asyncLocal";
-import { DEFAULT_DATASOURCE, TransactionConfig, TransactionOptions } from "./config";
+import { DEFAULT_DATASOURCE, IsolationLevel, TransactionConfig, TransactionOptions } from "./config";
 import { DatasourceSetupError, IllegalTransactionStateException, NestedTransactionNotSupportedError,
-    NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException } from "./error";
+    NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException,
+    ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError } from "./error";
 import { DefaultLogger, Logger } from "./logger";
 
 const managers = new Map<string | symbol, PlatformTransactionManager<any>>();
@@ -53,6 +54,8 @@ export function afterRollback(fn: TransactionSynchronization, datasource: string
 }
 
 export abstract class PlatformTransactionManager<Tx extends TransactionContext> {
+    protected readonly handlesCommitFailure: boolean = false;
+
     protected constructor(private logger: Logger = new DefaultLogger()) {}
 
     setLogger(logger: Logger): void {
@@ -85,13 +88,18 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         throw new NestedTransactionNotSupportedError();
     }
 
-    private inScope<R>(state: TxState | null, callback: () => R): R {
+    private inScope<R>(state: TxState | null, callback: () => R, newScope = false): R {
         const txs = new Map(AsyncLocal.Frame?.txs);
+        const scopes = new Map(AsyncLocal.Frame?.scopes);
+        if (!state) scopes.set(this, null);
+        else if (newScope || txs.get(this) !== state || !scopes.get(this)) {
+            scopes.set(this, { nestedOpen: false });
+        }
         // Map order records the most recently entered manager scope.
         txs.delete(this);
         txs.set(this, state);
         const current = Array.from(txs.values()).reverse().find(tx => tx?.active)?.context;
-        return AsyncLocal.RunFrame({ txs, current }, callback);
+        return AsyncLocal.RunFrame({ txs, scopes, current }, callback);
     }
 
     private logError(message: string, error: unknown): void {
@@ -116,9 +124,12 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     private executeNewTransaction<R>(callback: (tx: Tx) => Promise<R> | R, options?: TransactionOptions): Promise<R> {
         // Suspend before begin, too, so driver hooks cannot observe the outer tx.
         return this.inScope(null, async () => {
+            if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
+                throw new InvalidIsolationLevelError(options.isolationLevel);
+            }
             const started = Date.now();
             const context = await this.beginTransaction(options);
-            const state: TxState = { context, active: true, savepointCounter: 0, afterCommit: [], afterRollback: [] };
+            const state: TxState = { context, active: true, rollbackOnly: false, savepointCounter: 0, afterCommit: [], afterRollback: [] };
             return this.inScope(state, async () => {
                 let result: R;
                 try { result = await callback(context.transaction as Tx); }
@@ -131,8 +142,19 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     await this.rollback(state);
                     throw error;
                 }
-                // Commit failures belong to the driver: never issue a second rollback.
+                if (state.rollbackOnly) {
+                    await this.rollback(state);
+                    throw new UnexpectedRollbackError();
+                }
                 try { await this.commitTransaction(context.transaction as Tx); }
+                catch (error) {
+                    if (!this.handlesCommitFailure) await this.rollback(state);
+                    else {
+                        state.active = false;
+                        await this.inScope(null, () => this.synchronize(state.afterRollback));
+                    }
+                    throw error;
+                }
                 finally { state.active = false; }
                 await this.inScope(null, () => this.synchronize(state.afterCommit));
                 return result;
@@ -141,20 +163,28 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     }
 
     private executeNested<R>(state: TxState, callback: (tx: Tx) => R | Promise<R>): Promise<R> {
+        const parent = AsyncLocal.Frame!.scopes!.get(this)!;
+        if (parent.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
+        parent.nestedOpen = true;
         return this.inScope(state, async () => {
-            const tx = state.context.transaction as Tx;
-            const name = `tranjs_sp_${++state.savepointCounter}`;
-            await this.createSavepoint(tx, name);
-            let result: R;
-            try { result = await callback(tx); }
-            catch (error) {
-                try { await this.rollbackToSavepoint(tx, name); }
-                catch (rollbackError) { this.logError("Savepoint rollback failed", rollbackError); }
-                throw error;
-            }
-            await this.releaseSavepoint(tx, name);
-            return result;
-        });
+            try {
+                const tx = state.context.transaction as Tx;
+                const name = `tranjs_sp_${++state.savepointCounter}`;
+                await this.createSavepoint(tx, name);
+                let result: R;
+                try { result = await callback(tx); }
+                catch (error) {
+                    try { await this.rollbackToSavepoint(tx, name); }
+                    catch (rollbackError) {
+                        state.rollbackOnly = true;
+                        this.logError("Savepoint rollback failed", rollbackError);
+                    }
+                    throw error;
+                }
+                await this.releaseSavepoint(tx, name);
+                return result;
+            } finally { parent.nestedOpen = false; }
+        }, true);
     }
 
     public async executeTransaction<R>(

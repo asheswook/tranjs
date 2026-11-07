@@ -1,6 +1,8 @@
 import * as mysql2 from "mysql2/promise";
 import {
     getTransactionManager,
+    InvalidIsolationLevelError,
+    IsolationLevel,
     MetadataWrappedTransaction,
     PlatformTransactionManager,
     TransactionContextMixingError,
@@ -28,11 +30,16 @@ export const ctx = (datasource?: string | symbol): PoolConnection => {
 };
 
 export class MySQLTransactionManager extends PlatformTransactionManager<PoolConnection> {
+    protected readonly handlesCommitFailure = true;
+
     constructor(private readonly pool: mysql2.Pool) {
         super();
     }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolConnection>> {
+        if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
+            throw new InvalidIsolationLevelError(options.isolationLevel);
+        }
         const connection = await this.pool.getConnection();
         try {
             if (options?.isolationLevel) {
@@ -41,28 +48,39 @@ export class MySQLTransactionManager extends PlatformTransactionManager<PoolConn
             await connection.query(`START TRANSACTION${options?.readOnly ? " READ ONLY" : ""}`);
             return { metadata: { driverName: DRIVER_NAME }, transaction: connection };
         } catch (error) {
-            connection.release();
+            let dirty = false;
+            try { await connection.rollback(); } catch { dirty = true; }
+            if (dirty) connection.destroy();
+            else connection.release();
             throw error;
         }
     }
 
     protected async commitTransaction(tx: PoolConnection): Promise<void> {
         const connection = tx as mysql2.PoolConnection;
+        let dirty = false;
         try {
             await connection.commit();
         } catch (error) {
-            try { await connection.rollback(); } catch { /* preserve commit error */ }
+            try { await connection.rollback(); } catch { dirty = true; }
             throw error;
         } finally {
-            connection.release();
+            if (dirty) connection.destroy();
+            else connection.release();
         }
     }
 
     protected async rollbackTransaction(tx: PoolConnection): Promise<void> {
+        const connection = tx as mysql2.PoolConnection;
+        let dirty = false;
         try {
-            await (tx as mysql2.PoolConnection).rollback();
+            await connection.rollback();
+        } catch (error) {
+            dirty = true;
+            throw error;
         } finally {
-            (tx as mysql2.PoolConnection).release();
+            if (dirty) connection.destroy();
+            else connection.release();
         }
     }
 

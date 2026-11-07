@@ -31,6 +31,9 @@ interface CustomConnection extends TransactionContext {
 const DRIVER_NAME = Symbol('custom');
 
 class CustomDriverTransactionManager extends PlatformTransactionManager<CustomConnection> {
+    // Opt in because commitTransaction below handles rollback and release itself.
+    protected readonly handlesCommitFailure = true;
+
     constructor(private readonly pool: any) {
         super();
     }
@@ -48,7 +51,7 @@ class CustomDriverTransactionManager extends PlatformTransactionManager<CustomCo
         return { transaction: connection, metadata: { driverName: DRIVER_NAME } };
     }
 
-    // Required. If commit fails, roll back and release the connection here. The core does not call rollback after a failed commit.
+    // Required. With handlesCommitFailure = true, handle failed-commit cleanup here.
     protected async commitTransaction(tx: CustomConnection): Promise<void> {
         try {
             await tx.query('COMMIT');
@@ -77,6 +80,8 @@ class CustomDriverTransactionManager extends PlatformTransactionManager<CustomCo
 ```
 
 Read the current transaction with `manager.getCurrentTransaction()`. Like the native drivers, you can expose a type-safe `ctx()` based on it.
+
+By default, `protected readonly handlesCommitFailure: boolean = false` preserves legacy behavior: when commit throws, core calls `rollbackTransaction`, logs any rollback error, and rethrows the original commit error. Set it to `true` only if your commit method already rolls back and releases (or disposes of) the connection on failure, as in the example. Core runs `afterRollback` hooks in either mode. Never return a connection to the pool after a failed rollback; destroy it instead.
 
 ## Step 3: Use Your Custom Driver
 

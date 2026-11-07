@@ -1,5 +1,26 @@
 import { Propagation } from "./propagation";
 
+export class ConcurrentNestedTransactionError extends Error {
+    constructor() {
+        super("A sibling nested transaction is still open in this parent scope");
+        this.name = "ConcurrentNestedTransactionError";
+    }
+}
+
+export class UnexpectedRollbackError extends Error {
+    constructor() {
+        super("Transaction was marked rollback-only and could not be committed");
+        this.name = "UnexpectedRollbackError";
+    }
+}
+
+export class InvalidIsolationLevelError extends TypeError {
+    constructor(level: unknown) {
+        super(`Invalid transaction isolation level: ${String(level)}`);
+        this.name = "InvalidIsolationLevelError";
+    }
+}
+
 export class IllegalTransactionStateException extends Error {
     constructor(propagation: string) {
         super(`Illegal transaction state: ${propagation}`);

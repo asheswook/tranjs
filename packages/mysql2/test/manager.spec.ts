@@ -1,6 +1,7 @@
 import { createPool, PoolConnection as NativeConnection, RowDataPacket } from "mysql2/promise";
 import {
     IsolationLevel,
+    InvalidIsolationLevelError,
     PlatformTransactionManager,
     Propagation,
     runInTransaction,
@@ -151,12 +152,67 @@ describe("MySQL driver (real database)", () => {
         await runInTransaction(async () => { await ctx().query("SELECT 1"); });
     });
 
-    it("releases a connection after BEGIN configuration fails", async () => {
-        await expect(runInTransaction(async () => {}, {
-            isolationLevel: "INVALID" as IsolationLevel,
-        })).rejects.toBeDefined();
-        await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+    it("validates isolation before acquiring a connection, including direct driver use", async () => {
+        const getConnection = jest.spyOn(pool, "getConnection");
+        try {
+            await expect(runInTransaction(async () => {}, {
+                isolationLevel: "INVALID" as IsolationLevel,
+            })).rejects.toThrow(InvalidIsolationLevelError);
+            await expect((new MySQLTransactionManager(pool) as any).beginTransaction({
+                isolationLevel: "INVALID",
+            })).rejects.toThrow(InvalidIsolationLevelError);
+            expect(getConnection).not.toHaveBeenCalled();
+        } finally { getConnection.mockRestore(); }
     });
+
+    it.each(["rollback", "commit cleanup", "begin cleanup"])(
+        "destroys a dirty connection exactly once after ROLLBACK fails during %s", async path => {
+            const connection = await pool.getConnection();
+            const oldId = connection.threadId;
+            const primaryError = new Error(`injected ${path} failure`);
+            const release = jest.spyOn(connection, "release");
+            const destroy = jest.spyOn(connection, "destroy");
+            const rollback = jest.spyOn(connection, "rollback").mockRejectedValueOnce(new Error("injected ROLLBACK failure"));
+            const commit = path === "commit cleanup"
+                ? jest.spyOn(connection, "commit").mockRejectedValueOnce(primaryError) : undefined;
+            const query = connection.query.bind(connection);
+            const querySpy = path === "begin cleanup"
+                ? jest.spyOn(connection, "query").mockImplementation((async (sql: string) => {
+                    const result = await query(sql);
+                    if (sql === "START TRANSACTION") {
+                        await query(`INSERT INTO ${table} VALUES (1)`);
+                        throw primaryError;
+                    }
+                    return result;
+                }) as any) : undefined;
+            const getConnection = jest.spyOn(pool, "getConnection").mockResolvedValueOnce(connection);
+            const log = jest.spyOn(console, "error").mockImplementation(() => {});
+            try {
+                await expect(runInTransaction(async () => {
+                    await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+                    if (path === "rollback") throw primaryError;
+                })).rejects.toBe(primaryError);
+                expect(rollback).toHaveBeenCalledTimes(1);
+                expect(destroy).toHaveBeenCalledTimes(1);
+                expect(release).not.toHaveBeenCalled();
+            } finally {
+                getConnection.mockRestore();
+                querySpy?.mockRestore();
+                commit?.mockRestore();
+                rollback.mockRestore();
+                destroy.mockRestore();
+                release.mockRestore();
+                log.mockRestore();
+            }
+            await runInTransaction(async () => {
+                expect((ctx() as NativeConnection).threadId).not.toBe(oldId);
+                const [rows] = await ctx().query<RowDataPacket[]>(`SELECT id FROM ${table}`);
+                expect(rows).toEqual([]);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+            });
+            expect(await ids()).toEqual([2]);
+        },
+    );
 
     it("keeps two named datasources independent", async () => {
         await expect(runInTransaction(async () => {

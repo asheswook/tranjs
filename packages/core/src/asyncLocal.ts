@@ -8,13 +8,20 @@ export type TransactionSynchronization = () => void | Promise<void>;
 export interface TxState {
     context: MetadataWrappedTransaction<TransactionContext>;
     active: boolean;
+    rollbackOnly: boolean;
     savepointCounter: number;
     afterCommit: TransactionSynchronization[];
     afterRollback: TransactionSynchronization[];
 }
 
+/** Per-parent scope guard; distinct recursive scopes share the physical TxState. */
+export interface TransactionScope {
+    nestedOpen: boolean;
+}
+
 export interface TransactionFrame {
     txs: Map<PlatformTransactionManager<any>, TxState | null>;
+    scopes?: Map<PlatformTransactionManager<any>, TransactionScope | null>;
     current?: MetadataWrappedTransaction<TransactionContext>;
 }
 

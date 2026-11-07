@@ -1,6 +1,8 @@
 import * as pg from "pg";
 import {
     getTransactionManager,
+    InvalidIsolationLevelError,
+    IsolationLevel,
     MetadataWrappedTransaction,
     PlatformTransactionManager,
     TransactionContextMixingError,
@@ -28,11 +30,16 @@ export const ctx = (datasource?: string | symbol): PoolClient => {
 };
 
 export class PostgreSQLTransactionManager extends PlatformTransactionManager<PoolClient> {
+    protected readonly handlesCommitFailure = true;
+
     constructor(private readonly pool: pg.Pool) {
         super();
     }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolClient>> {
+        if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
+            throw new InvalidIsolationLevelError(options.isolationLevel);
+        }
         const connection = await this.pool.connect();
         try {
             let sql = "BEGIN";
@@ -49,28 +56,36 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
             return { metadata: { driverName: DRIVER_NAME }, transaction: connection };
         } catch (error) {
             // BEGIN may have succeeded before configuring statement_timeout failed.
-            try { await connection.query("ROLLBACK"); } catch { /* preserve begin error */ }
-            connection.release();
+            let releaseError: Error | undefined;
+            try { await connection.query("ROLLBACK"); }
+            catch (rollbackError) { releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
+            connection.release(releaseError);
             throw error;
         }
     }
 
     protected async commitTransaction(tx: PoolClient): Promise<void> {
+        let releaseError: Error | undefined;
         try {
             await tx.query("COMMIT");
         } catch (error) {
-            try { await tx.query("ROLLBACK"); } catch { /* preserve commit error */ }
+            try { await tx.query("ROLLBACK"); }
+            catch (rollbackError) { releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
             throw error;
         } finally {
-            (tx as pg.PoolClient).release();
+            (tx as pg.PoolClient).release(releaseError);
         }
     }
 
     protected async rollbackTransaction(tx: PoolClient): Promise<void> {
+        let releaseError: Error | undefined;
         try {
             await tx.query("ROLLBACK");
+        } catch (error) {
+            releaseError = error instanceof Error ? error : new Error(String(error));
+            throw error;
         } finally {
-            (tx as pg.PoolClient).release();
+            (tx as pg.PoolClient).release(releaseError);
         }
     }
 

@@ -1,6 +1,7 @@
 import { Pool, PoolClient as NativeClient } from "pg";
 import {
     IsolationLevel,
+    InvalidIsolationLevelError,
     PlatformTransactionManager,
     Propagation,
     runInTransaction,
@@ -130,12 +131,64 @@ describe("PostgreSQL driver (real database)", () => {
         await runInTransaction(async () => { await ctx().query("SELECT 1"); });
     });
 
-    it("releases a connection after BEGIN fails", async () => {
-        await expect(runInTransaction(async () => {}, {
-            isolationLevel: "INVALID" as IsolationLevel,
-        })).rejects.toBeDefined();
-        await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+    it("rejects injected isolation SQL before acquiring a connection without affecting data", async () => {
+        await pool.query(`INSERT INTO ${table} VALUES (1)`);
+        const connect = jest.spyOn(pool, "connect");
+        try {
+            await expect(runInTransaction(async () => {
+                await ctx().query(`DELETE FROM ${table}`);
+            }, { isolationLevel: "READ COMMITTED; COMMIT; SELECT 1 --" as IsolationLevel }))
+                .rejects.toThrow(InvalidIsolationLevelError);
+            // Direct driver use also validates before acquiring a connection.
+            await expect((new PostgreSQLTransactionManager(pool) as any).beginTransaction({
+                isolationLevel: "READ COMMITTED; COMMIT; SELECT 1 --",
+            })).rejects.toThrow(InvalidIsolationLevelError);
+            expect(connect).not.toHaveBeenCalled();
+        } finally { connect.mockRestore(); }
+        expect(await ids()).toEqual([1]);
     });
+
+    it.each(["rollback", "commit cleanup", "begin cleanup"])(
+        "disposes a dirty connection exactly once after ROLLBACK fails during %s", async path => {
+            const connection = await pool.connect();
+            const oldPid = (await connection.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+            const query = connection.query.bind(connection);
+            const rollbackError = new Error("injected ROLLBACK failure");
+            const primaryError = new Error(`injected ${path} failure`);
+            const release = jest.spyOn(connection, "release");
+            const querySpy = jest.spyOn(connection, "query").mockImplementation((async (sql: string) => {
+                if (sql === "ROLLBACK") throw rollbackError;
+                if (path === "commit cleanup" && sql === "COMMIT") throw primaryError;
+                const result = await query(sql);
+                if (path === "begin cleanup" && sql === "BEGIN") {
+                    await query(`INSERT INTO ${table} VALUES (1)`);
+                    throw primaryError;
+                }
+                return result;
+            }) as any);
+            const connect = jest.spyOn(pool, "connect").mockResolvedValueOnce(connection as never);
+            const log = jest.spyOn(console, "error").mockImplementation(() => {});
+            try {
+                await expect(runInTransaction(async () => {
+                    await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+                    if (path === "rollback") throw primaryError;
+                })).rejects.toBe(primaryError);
+                expect(release).toHaveBeenCalledTimes(1);
+                expect(release).toHaveBeenCalledWith(rollbackError);
+            } finally {
+                connect.mockRestore();
+                querySpy.mockRestore();
+                release.mockRestore();
+                log.mockRestore();
+            }
+            await runInTransaction(async () => {
+                expect((await ctx().query("SELECT pg_backend_pid() AS pid")).rows[0].pid).not.toBe(oldPid);
+                expect((await ctx().query(`SELECT id FROM ${table}`)).rows).toEqual([]);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+            });
+            expect(await ids()).toEqual([2]);
+        },
+    );
 
     it("rolls back and releases when configuration after BEGIN fails", async () => {
         await expect(runInTransaction(async () => {}, { timeout: NaN })).rejects.toThrow(RangeError);
