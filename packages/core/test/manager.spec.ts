@@ -35,6 +35,15 @@ class DummyTransactionManager extends PlatformTransactionManager<DummyTx> {
     }
 }
 
+// A context alone has no owner; associate fixtures with their manager so tests
+// do not depend on the former cross-datasource transaction joining bug.
+function withOwnedContext<T>(manager: DummyTransactionManager, context: MetadataWrappedTransaction<DummyTx>, callback: () => T): T {
+    return AsyncLocal.RunFrame({
+        txs: new Map([[manager, { context, active: true, savepointCounter: 0, afterCommit: [], afterRollback: [] }]]),
+        current: context,
+    }, callback);
+}
+
 describe("PlatformTransactionManager", () => {
     let manager: DummyTransactionManager;
     let originalContext: jest.SpyInstance;
@@ -94,10 +103,10 @@ describe("PlatformTransactionManager", () => {
         };
         originalContext.mockReturnValue(existingTx);
 
-        const result = await manager.executeTransaction(Propagation.REQUIRED, async (tx) => {
+        const result = await withOwnedContext(manager, existingTx, () => manager.executeTransaction(Propagation.REQUIRED, async (tx) => {
             expect(tx.id).toBe(999); // 기존 트랜잭션의 ID
             return "reuse";
-        });
+        }));
 
         expect(result).toBe("reuse");
         // 기존 트랜잭션 재사용시 beginTransaction, commit, rollback 호출되지 않음
@@ -146,10 +155,10 @@ describe("PlatformTransactionManager", () => {
         };
         originalContext.mockReturnValue(existingTx);
 
-        const result = await manager.executeTransaction(Propagation.MANDATORY, async (tx) => {
+        const result = await withOwnedContext(manager, existingTx, () => manager.executeTransaction(Propagation.MANDATORY, async (tx) => {
             expect(tx.id).toBe(777);
             return "mandatory";
-        });
+        }));
 
         expect(result).toBe("mandatory");
         expect(manager.beginTransactionCalls).toBe(0);
@@ -299,7 +308,7 @@ describe("PlatformTransactionManager", () => {
         });
 
         // 외부 REQUIRED + 내부 REQUIRES_NEW 테스트
-        const result = await manager.executeTransaction(Propagation.REQUIRED, async (outerTxInstance) => {
+        const result = await withOwnedContext(manager, outerTx, () => manager.executeTransaction(Propagation.REQUIRED, async (outerTxInstance) => {
             expect(outerTxInstance.id).toBe(111); // 외부 트랜잭션 ID
 
             const innerResult = await manager.executeTransaction(Propagation.REQUIRES_NEW, async (innerTxInstance) => {
@@ -308,7 +317,7 @@ describe("PlatformTransactionManager", () => {
             });
 
             return `outer-${innerResult}`;
-        });
+        }));
 
         expect(result).toBe("outer-inner");
         // 새 트랜잭션 시작은 내부 트랜잭션에 대해서만 발생

@@ -15,9 +15,31 @@ export class UnsupportedTransactionPropagationException extends Error {
 }
 
 export class DatasourceSetupError extends Error {
-    constructor() {
-        super(`Datasource is not set up. `);
+    constructor(name: string | symbol = "DEFAULT_DATASOURCE") {
+        super(`Datasource is not set up: ${String(name)}`);
         this.name = 'TransactionDatasourceSetupError';
+    }
+}
+
+export class TransactionTimeoutError extends Error {
+    constructor(timeout: number) {
+        super(`Transaction timed out after ${timeout}ms`);
+        this.name = "TransactionTimeoutError";
+    }
+}
+
+export class NestedTransactionNotSupportedError extends UnsupportedTransactionPropagationException {
+    constructor() {
+        super();
+        this.message = "Nested transactions are not supported by this transaction manager";
+        this.name = "NestedTransactionNotSupportedError";
+    }
+}
+
+export class NoTransactionContextError extends Error {
+    constructor() {
+        super("No transaction context available");
+        this.name = "NoTransactionContextError";
     }
 }
 
