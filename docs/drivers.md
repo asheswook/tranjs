@@ -28,6 +28,42 @@ class Service {
 
 Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout), including the special handling of PostgreSQL Submittables.
 
+## PostgreSQL (postgres.js)
+
+```bash
+npm install @tranjs/core @tranjs/postgres postgres
+```
+
+Requires postgres.js `^4.1.0` (`>=4.1.0 <5`). Create one `postgres()` instance at startup and register it:
+
+```typescript
+import { Transactional } from "@tranjs/core";
+import { ctx, usePostgresTransactionManager } from "@tranjs/postgres";
+import postgres from "postgres";
+
+const sql = postgres(process.env.PG_URL!);
+usePostgresTransactionManager(sql);
+
+class Service {
+    @Transactional()
+    async read() {
+        return ctx()`SELECT 1`;
+    }
+}
+```
+
+`ctx(datasource?)` returns the connection reserved for the current transaction, typed as `TransactionSql`. Write queries on it as usual (``ctx()`SELECT ...` `` or `ctx().unsafe(...)`). Custom types are preserved on both `typed` and its `types` alias; use `ctx<{ bigint: bigint }>()` or `TransactionSql<{ bigint: bigint }>` when the registered connection has that custom type. TranJS releases the connection when the transaction ends, so `ctx()` has no `release()`, `begin()` or dispose methods (don't use it with `using`). Don't send `BEGIN`, `COMMIT` or `ROLLBACK` yourself either.
+
+For direct registration, pass `new PostgresTransactionManager(sql)` to `useTransactionManager`. Both registration helpers accept an optional datasource name as their second argument.
+
+If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` so the failure isn't silent. Use `Propagation.NESTED` if a step should be allowed to fail.
+
+postgres.js has no per-query timeout, so a transaction `timeout` is enforced by cancelling the running query when the deadline passes; this surfaces as `TransactionTimeoutError`. Batch queries have the same deadline checks at construction and first execution, and the same cancellation behavior, as normal queries. `cursor()`, `forEach()`, `stream()` and `readable()` are only checked before they start and are not cancelled mid-way. Finish them inside the transaction.
+
+Your own postgres.js options, such as `query_timeout`, are left as they are.
+
+After a failed commit or rollback, the connection is returned to postgres.js, which closes broken connections and connections still inside a transaction.
+
 ## MySQL (mysql2)
 
 ```bash
@@ -71,7 +107,7 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 Enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in the Worker configuration and register once at module scope, not in the request handler. The examples assume a Hyperdrive binding named `HYPERDRIVE`.
 
-Connection-per-transaction managers use no application-side pool. Each physical transaction resolves a config object, synchronous factory, or async factory, opens a connection, and calls `end()` automatically on completion, including failures. Use `runInTransaction` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
+Connection-per-transaction managers do not share an application-side pool between transactions. Each physical transaction resolves its configuration, opens a connection, and calls `end()` automatically on completion, including failures. Use `runInTransaction` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
 
 ### PostgreSQL
 
@@ -96,6 +132,19 @@ This manager creates a fresh `pg.Client`, not a `pg.Pool`. For direct registrati
 | No session advisory locks | Transaction-scoped advisory locks |
 | No `LISTEN` / `NOTIFY` | Another messaging mechanism |
 | No SQL `PREPARE` | Queries without SQL-level preparation |
+
+### PostgreSQL (postgres.js)
+
+```typescript
+import { env } from "cloudflare:workers";
+import { usePostgresConnectionPerTransaction } from "@tranjs/postgres";
+
+usePostgresConnectionPerTransaction(() => env.HYPERDRIVE.connectionString);
+```
+
+The argument can be a connection string, postgres.js options, or a function returning either. Each transaction opens its own connection and closes it when the transaction ends. The same Hyperdrive session-state limits as for `pg` apply: no `SET` outside a transaction, no session advisory locks, no `LISTEN`/`NOTIFY`, no SQL `PREPARE`.
+
+The built CommonJS package works on Node.js 18, 20.10 and 22 without `require(ESM)` support. Loading the package does not load postgres.js; connection-per-transaction mode lazily loads and caches it with native `import("postgres")`. The import remains visible to bundlers so they can select postgres.js's `workerd` export for Workers; no `eval` or generated function is used. CommonJS applications creating their own pool can use `const { default: postgres } = await import("postgres")` inside an async function.
 
 ### MySQL
 
@@ -148,3 +197,11 @@ npm run build && npm test
 ```
 
 Override test connection strings with `PG_URL` and `MYSQL_URL`. To add another driver, see the [custom driver guide](self-implement-guide.md).
+
+After building, run the real-database CommonJS smoke test on Node.js 18, 20.10 and 22 (with `--no-experimental-require-module` on 22):
+
+```bash
+bash scripts/test/postgres-node-compat.sh --all
+```
+
+With no arguments it uses the current `node`. Pass a runner to select one version, for example `bash scripts/test/postgres-node-compat.sh npx -y node@20.10.0`.

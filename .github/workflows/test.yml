@@ -42,6 +42,8 @@ jobs:
           node-version: 20
       - run: npm install
       - run: npm run build
+      - name: Built postgres.js CommonJS compatibility (Node 18, 20.10, 22 without require(ESM))
+        run: bash scripts/test/postgres-node-compat.sh --all
       - run: npm test
       - name: Smoke test published legacy drivers
         run: npm run test:legacy
