@@ -10,3 +10,14 @@ export type PoolConnection = Omit<
     'commit' |
     'rollback'
 >;
+
+/** Common query surface for helpers accepting either transaction mode. */
+export type TransactionConnection = Omit<
+    Types.Connection,
+    'connect' |
+    'end' |
+    'destroy' |
+    'beginTransaction' |
+    'commit' |
+    'rollback'
+>;

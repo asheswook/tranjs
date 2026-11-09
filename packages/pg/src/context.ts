@@ -5,3 +5,6 @@ export type PoolClient = Omit<
     'connect' |
     'release'
 >
+
+/** Common query surface for helpers accepting either transaction mode. */
+export type TransactionClient = Omit<Types.Client, 'connect'>;

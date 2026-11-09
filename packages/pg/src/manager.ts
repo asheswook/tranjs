@@ -3,6 +3,7 @@ import {
     getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
+    Logger,
     MetadataWrappedTransaction,
     PlatformTransactionManager,
     TransactionContextMixingError,
@@ -18,10 +19,18 @@ export function usePostgreSQLTransactionManager(pool: pg.Pool, name?: string | s
     useTransactionManager(manager, name);
 }
 
+/** Register once at startup/module scope; config is resolved for each physical transaction. */
+export function usePostgreSQLClientPerTransaction(
+    config: pg.ClientConfig | (() => pg.ClientConfig | Promise<pg.ClientConfig>),
+    name?: string | symbol,
+) {
+    useTransactionManager(new PostgreSQLClientPerTransactionManager(config), name);
+}
+
 /** Get this datasource's active PostgreSQL transaction. */
 export const ctx = (datasource?: string | symbol): PoolClient => {
     const manager = getTransactionManager(datasource);
-    if (!(manager instanceof PostgreSQLTransactionManager)) {
+    if (!(manager instanceof PostgreSQLTransactionManager) && !(manager instanceof PostgreSQLClientPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
     const transaction = manager.getCurrentTransaction();
@@ -29,12 +38,8 @@ export const ctx = (datasource?: string | symbol): PoolClient => {
     return manager.wrapConnection(transaction);
 };
 
-export class PostgreSQLTransactionManager extends PlatformTransactionManager<PoolClient> {
+abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClient> {
     private readonly wrappers = new WeakMap<PoolClient, PoolClient>();
-
-    constructor(private readonly pool: pg.Pool) {
-        super();
-    }
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
@@ -79,6 +84,32 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
         return wrapper;
     }
 
+    protected async commitTransaction(tx: PoolClient): Promise<void> {
+        await tx.query("COMMIT");
+    }
+
+    protected async rollbackTransaction(tx: PoolClient): Promise<void> {
+        await tx.query("ROLLBACK");
+    }
+
+    protected async createSavepoint(tx: PoolClient, name: string): Promise<void> {
+        await tx.query(`SAVEPOINT ${name}`);
+    }
+
+    protected async rollbackToSavepoint(tx: PoolClient, name: string): Promise<void> {
+        await tx.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    }
+
+    protected async releaseSavepoint(tx: PoolClient, name: string): Promise<void> {
+        await tx.query(`RELEASE SAVEPOINT ${name}`);
+    }
+}
+
+export class PostgreSQLTransactionManager extends PostgreSQLManagerBase {
+    constructor(private readonly pool: pg.Pool) {
+        super();
+    }
+
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolClient>> {
         if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
             throw new InvalidIsolationLevelError(options.isolationLevel);
@@ -100,27 +131,64 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
         }
     }
 
-    protected async commitTransaction(tx: PoolClient): Promise<void> {
-        await tx.query("COMMIT");
-    }
-
-    protected async rollbackTransaction(tx: PoolClient): Promise<void> {
-        await tx.query("ROLLBACK");
-    }
-
     protected async releaseTransaction(tx: PoolClient, failed: boolean): Promise<void> {
         (tx as pg.PoolClient).release(failed ? new Error("Transaction completion failed") : undefined);
     }
+}
 
-    protected async createSavepoint(tx: PoolClient, name: string): Promise<void> {
-        await tx.query(`SAVEPOINT ${name}`);
+/** A fresh Client for each physical transaction, suitable for Workers + Hyperdrive. */
+export class PostgreSQLClientPerTransactionManager extends PostgreSQLManagerBase {
+    private readonly ended = new WeakSet<PoolClient>();
+    private cleanupLogger: Logger = console;
+
+    constructor(private readonly config: pg.ClientConfig | (() => pg.ClientConfig | Promise<pg.ClientConfig>)) {
+        super();
     }
 
-    protected async rollbackToSavepoint(tx: PoolClient, name: string): Promise<void> {
-        await tx.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    public setLogger(logger: Logger): void {
+        super.setLogger(logger);
+        this.cleanupLogger = logger;
     }
 
-    protected async releaseSavepoint(tx: PoolClient, name: string): Promise<void> {
-        await tx.query(`RELEASE SAVEPOINT ${name}`);
+    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolClient>> {
+        if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
+            throw new InvalidIsolationLevelError(options.isolationLevel);
+        }
+        const config = typeof this.config === "function" ? await this.config() : this.config;
+        const client = new pg.Client(config);
+        // pg marks the client unqueryable on connection errors. Handle its event
+        // as well, including while user code is awaiting non-database work.
+        // Keep this harmless listener through/after end for late socket events.
+        client.on("error", () => {});
+        // Preserve the historical ctx() type; runtime clients share the query API.
+        const transaction = client as unknown as PoolClient;
+        try {
+            await client.connect();
+        } catch (error) {
+            await this.releaseTransaction(transaction, true);
+            throw error;
+        }
+        try {
+            let sql = "BEGIN";
+            if (options?.isolationLevel) sql += ` ISOLATION LEVEL ${options.isolationLevel}`;
+            if (options?.readOnly) sql += " READ ONLY";
+            await client.query(sql);
+            return { metadata: { driverName: DRIVER_NAME }, transaction };
+        } catch (error) {
+            // BEGIN may have succeeded before the driver reported an error.
+            try { await client.query("ROLLBACK"); } catch {}
+            await this.releaseTransaction(transaction, true);
+            throw error;
+        }
+    }
+
+    protected async releaseTransaction(tx: PoolClient, _failed: boolean): Promise<void> {
+        if (this.ended.has(tx)) return;
+        this.ended.add(tx);
+        try { await tx.end(); }
+        catch (error) {
+            // Neither cleanup nor a custom logger may mask the transaction outcome.
+            try { this.cleanupLogger.error("PostgreSQL client cleanup failed", error); } catch {}
+        }
     }
 }
