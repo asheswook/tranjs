@@ -25,26 +25,10 @@ async function main() {
         api = require("@tranjs/pg");
         api.usePostgreSQLClientPerTransaction({ connectionString });
     } else if (driver === "postgres") {
-        const imported = require("postgres");
-        const postgres = imported.default ?? imported;
+        const { default: postgres } = await import("postgres");
         const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
         admin = postgres(url, { max: 1, onnotice: false });
-        // Intercept the built driver's factory import, not the ESM namespace's
-        // read-only default export. All connections and queries remain real.
-        const Module = require("node:module");
-        const load = Module._load;
-        const factory = Object.assign((...args) => {
-            const sql = postgres(...args);
-            const end = sql.end.bind(sql);
-            sql.end = (...options) => { poolEnd++; return end(...options); };
-            return sql;
-        }, postgres);
-        Module._load = function (request, ...args) {
-            return request === "postgres" ? { ...imported, __esModule: true, default: factory }
-                : load.call(this, request, ...args);
-        };
-        try { api = require("@tranjs/postgres"); }
-        finally { Module._load = load; }
+        api = require("@tranjs/postgres");
         api.usePostgresConnectionPerTransaction(url);
     } else {
         const mysql = require("mysql2/promise");
@@ -54,6 +38,16 @@ async function main() {
         api.useMySQLConnectionPerTransaction(config);
     }
     const manager = getTransactionManager();
+    if (driver === "postgres") {
+        // Native dynamic import bypasses Module._load. Instrument the owner pool
+        // at the manager's cleanup boundary without replacing its factory.
+        const cleanup = manager.end.bind(manager);
+        manager.end = async sql => {
+            const end = sql.end.bind(sql);
+            sql.end = (...options) => { poolEnd++; return end(...options); };
+            await cleanup(sql);
+        };
+    }
     manager.setLogger({ error() {}, warn() {}, info() {}, debug() {} });
     const ready = deferred();
     const resume = deferred();

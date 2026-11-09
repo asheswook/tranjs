@@ -28,6 +28,7 @@ export type MySQLCtxUnchanged = Expect<Equal<ReturnType<typeof mysqlCtx>, Legacy
 export type PostgresReservedAlias = Expect<Equal<TransactionSql, postgres.ReservedSql>>;
 export type PostgresCtxReserved = Expect<Equal<ReturnType<typeof postgresCtx>, postgres.ReservedSql>>;
 export type PostgresCtxTransactionSql = Expect<Equal<ReturnType<typeof postgresCtx>, TransactionSql>>;
+export type PostgresCustomTypes = Expect<Equal<TransactionSql<{ bigint: bigint }>, postgres.ReservedSql<{ bigint: bigint }>>>;
 
 // This is compiled, not executed: cover old consumers and both new helper types.
 export function consumerChecks(pgClient: pg.Client, pgPoolClient: pg.PoolClient,
@@ -63,6 +64,8 @@ export function postgresConsumerChecks(sql: postgres.Sql, reserved: postgres.Res
     void postgresCtx()`SELECT 1`.cursor(2);
     void postgresCtx()`SELECT 1`.forEach(row => { void row; });
     void postgresCtx().unsafe("COPY (SELECT 1) TO STDOUT").readable();
+    const typed = postgresCtx<{ bigint: bigint }>();
+    void typed`SELECT ${typed.typed.bigint(BigInt(42))}, ${typed.types.bigint(BigInt(42))}`;
     void new PostgresTransactionManager(sql);
     usePostgresTransactionManager(sql, Symbol("postgres"));
     void new PostgresConnectionPerTransactionManager("postgres://localhost/test");

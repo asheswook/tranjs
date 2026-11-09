@@ -34,7 +34,7 @@ Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`
 npm install @tranjs/core @tranjs/postgres postgres
 ```
 
-Requires postgres.js 4.x. Create one `postgres()` instance at startup and register it:
+Requires postgres.js `^4.1.0` (`>=4.1.0 <5`). Create one `postgres()` instance at startup and register it:
 
 ```typescript
 import { Transactional } from "@tranjs/core";
@@ -52,13 +52,13 @@ class Service {
 }
 ```
 
-`ctx(datasource?)` returns the connection reserved for the current transaction, typed as `TransactionSql`. Write queries on it as usual (``ctx()`SELECT ...` `` or `ctx().unsafe(...)`). Don't call `sql.begin()`, `release()` or transaction statements on it; TranJS manages those.
+`ctx(datasource?)` returns the connection reserved for the current transaction, typed as `TransactionSql`. Write queries on it as usual (``ctx()`SELECT ...` `` or `ctx().unsafe(...)`). Custom types are preserved on both `typed` and its `types` alias; use `ctx<{ bigint: bigint }>()` or `TransactionSql<{ bigint: bigint }>` when the registered connection has that custom type. Don't call `sql.begin()`, `release()` or transaction statements on it; TranJS manages those.
 
 For direct registration, pass `new PostgresTransactionManager(sql)` to `useTransactionManager`. Both registration helpers accept an optional datasource name as their second argument.
 
 If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` so the failure isn't silent. Use `Propagation.NESTED` if a step should be allowed to fail.
 
-postgres.js has no per-query timeout, so a transaction `timeout` is enforced by cancelling the running query when the deadline passes; this surfaces as `TransactionTimeoutError`. `cursor()`, `forEach()`, `stream()` and `readable()` are only checked before they start and are not cancelled mid-way. Finish them inside the transaction.
+postgres.js has no per-query timeout, so a transaction `timeout` is enforced by cancelling the running query when the deadline passes; this surfaces as `TransactionTimeoutError`. Batch queries have the same deadline checks at construction and first execution, and the same cancellation behavior, as normal queries. `cursor()`, `forEach()`, `stream()` and `readable()` are only checked before they start and are not cancelled mid-way. Finish them inside the transaction.
 
 Your own postgres.js options, such as `query_timeout`, are left as they are.
 
@@ -144,6 +144,8 @@ usePostgresConnectionPerTransaction(() => env.HYPERDRIVE.connectionString);
 
 The argument can be a connection string, postgres.js options, or a function returning either. Each transaction opens its own connection and closes it when the transaction ends. The same Hyperdrive session-state limits as for `pg` apply: no `SET` outside a transaction, no session advisory locks, no `LISTEN`/`NOTIFY`, no SQL `PREPARE`.
 
+The built CommonJS package works on Node.js 18, 20.10 and 22 without `require(ESM)` support. Loading the package does not load postgres.js; connection-per-transaction mode lazily loads and caches it with native `import("postgres")`. The import remains visible to bundlers so they can select postgres.js's `workerd` export for Workers; no `eval` or generated function is used. CommonJS applications creating their own pool can use `const { default: postgres } = await import("postgres")` inside an async function.
+
 ### MySQL
 
 Use `mysql2 >= 3.13.0` with `disableEval: true`:
@@ -195,3 +197,11 @@ npm run build && npm test
 ```
 
 Override test connection strings with `PG_URL` and `MYSQL_URL`. To add another driver, see the [custom driver guide](self-implement-guide.md).
+
+After building, run the real-database CommonJS smoke test on Node.js 18, 20.10 and 22 (with `--no-experimental-require-module` on 22):
+
+```bash
+bash scripts/test/postgres-node-compat.sh --all
+```
+
+With no arguments it uses the current `node`. Pass a runner to select one version, for example `bash scripts/test/postgres-node-compat.sh npx -y node@20.10.0`.

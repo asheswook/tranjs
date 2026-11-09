@@ -13,7 +13,10 @@ import {
     UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
-import { ctx, PostgresTransactionManager, TransactionAbortedError, usePostgresTransactionManager } from "../src";
+import {
+    ctx, PostgresTransactionManager, TransactionAbortedError,
+    usePostgresTransactionManager, usePostgresConnectionPerTransaction,
+} from "../src";
 
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
 const table = "tranjs_postgres_driver_test";
@@ -379,6 +382,75 @@ describe("postgres.js pool manager (real database)", () => {
             expect(() => ctx().unsafe("ignored").stream(() => {})).toThrow(".stream has been renamed to .forEach");
             expect(stream).toHaveBeenCalledTimes(1);
         }, { timeout: 1000 });
+    });
+
+    it.each(["pool", "connection"])("preserves custom typed helpers and the types alias in %s mode", async mode => {
+        const types = { bigint: postgres.BigInt };
+        const custom = postgres(url, { max: 1, onnotice: false, types });
+        if (mode === "pool") usePostgresTransactionManager(custom);
+        else {
+            const parsed = new URL(url);
+            usePostgresConnectionPerTransaction({
+                host: parsed.hostname, port: Number(parsed.port || 5432),
+                user: decodeURIComponent(parsed.username), password: decodeURIComponent(parsed.password),
+                database: decodeURIComponent(parsed.pathname.slice(1)), types, onnotice: false,
+            });
+        }
+        try {
+            await runInTransaction(async () => {
+                const transaction = ctx<{ bigint: bigint }>();
+                expect(transaction.typed).toBe(raw().typed);
+                expect(transaction.types).toBe(transaction.typed);
+                const value = BigInt("9007199254740993");
+                const [row] = await transaction`SELECT ${transaction.typed.bigint(value)} AS typed,
+                    ${transaction.types.bigint(value)} AS alias, ${transaction.typed(value, 20)} AS callable`;
+                expect(row).toEqual({ typed: value, alias: value, callable: value });
+            });
+        } finally { await custom.end(); }
+    });
+
+    it.each(["pool", "connection"])("runs lazy batches normally in %s mode", async mode => {
+        if (mode === "connection") usePostgresConnectionPerTransaction(url);
+        await runInTransaction(async () => {
+            const transaction = ctx();
+            const queries = [transaction`SELECT 1 AS value`, transaction.unsafe("SELECT 2 AS value")];
+            const batch = transaction.batch(queries);
+            expect((await batch).map(rows => rows[0].value)).toEqual([1, 2]);
+            expect(queries).toHaveLength(2);
+        }, { timeout: 1000 });
+    });
+
+    it.each(["pool", "connection"])("cancels a running batch at the deadline in %s mode", async mode => {
+        if (mode === "connection") usePostgresConnectionPerTransaction(url);
+        let cancel!: jest.SpyInstance;
+        await expect(runInTransaction(async () => {
+            const nativeBatch = jest.spyOn(raw(), "batch");
+            const transaction = ctx();
+            const pending = transaction.batch([transaction`SELECT 1`, transaction`SELECT pg_sleep(0.5)`]);
+            cancel = jest.spyOn(nativeBatch.mock.results[0].value, "cancel");
+            await expect(pending).rejects.toThrow(TransactionTimeoutError);
+            expect(cancel).toHaveBeenCalledTimes(1);
+        }, { timeout: 100 })).rejects.toThrow(TransactionTimeoutError);
+        expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(["pool", "connection"])("rejects a lazy batch awaited after expiry before dispatch in %s mode", async mode => {
+        if (mode === "connection") usePostgresConnectionPerTransaction(url);
+        await expect(runInTransaction(async () => {
+            const nativeBatch = jest.spyOn(raw(), "batch");
+            const transaction = ctx();
+            const pending = transaction.batch([transaction`SELECT pg_sleep(0.5)`]);
+            const native = nativeBatch.mock.results[0].value;
+            const then = jest.spyOn(native, "then");
+            const cancel = jest.spyOn(native, "cancel");
+            const clock = jest.spyOn(Date, "now").mockReturnValue(Date.now() + 20000);
+            try {
+                await expect((async () => await pending)()).rejects.toThrow(TransactionTimeoutError);
+                expect(then).not.toHaveBeenCalled();
+                expect(cancel).not.toHaveBeenCalled();
+                expect(native.executed).toBe(false);
+            } finally { clock.mockRestore(); }
+        }, { timeout: 10000 })).rejects.toThrow(UnexpectedRollbackError);
     });
 
     it.each(["tagged", "unsafe", "then", "execute", "cursor", "forEach", "readable"])(

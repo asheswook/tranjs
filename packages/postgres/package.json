@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@tranjs/core": "^1.1.0",
-    "postgres": "*"
+    "postgres": "^4.1.0"
   },
   "jest": {
     "testEnvironment": "node",
@@ -20,7 +20,7 @@
     "moduleFileExtensions": ["js", "json", "ts"],
     "transform": {
       "/node_modules/postgres/.+\\.js$": "<rootDir>/../../scripts/test/postgres-transform.cjs",
-      "^.+\\.ts$": "ts-jest"
+      "^.+\\.ts$": ["ts-jest", { "tsconfig": { "module": "commonjs", "moduleResolution": "node" } }]
     },
     "transformIgnorePatterns": ["/node_modules/(?!postgres/)"],
     "testTimeout": 30000

@@ -1,4 +1,4 @@
-import postgres from "postgres";
+import type postgres from "postgres" with { "resolution-mode": "import" };
 import {
     getTransactionManager,
     InvalidIsolationLevelError,
@@ -15,6 +15,13 @@ import { TransactionAbortedError } from "./errors";
 
 const DRIVER_NAME = Symbol("postgres");
 
+let factory: Promise<typeof postgres> | undefined;
+function loadPostgres(): Promise<typeof postgres> {
+    // Keep this native import visible to Workers bundlers and usable from CJS
+    // on Node 18, without relying on synchronous require(ESM) support.
+    return factory ??= import("postgres").then(module => module.default);
+}
+
 export type PostgresConnectionConfig = string | postgres.Options<{}>;
 export type PostgresConnectionConfigSource = PostgresConnectionConfig |
     (() => PostgresConnectionConfig | Promise<PostgresConnectionConfig>);
@@ -28,7 +35,9 @@ export function usePostgresConnectionPerTransaction(config: PostgresConnectionCo
     useTransactionManager(new PostgresConnectionPerTransactionManager(config), name);
 }
 
-export const ctx = (datasource?: string | symbol): TransactionSql => {
+export function ctx<T extends Record<string, unknown> = {}>(datasource?: string | symbol): TransactionSql<T>;
+export function ctx(datasource?: string | symbol): TransactionSql;
+export function ctx(datasource?: string | symbol): TransactionSql {
     const manager = getTransactionManager(datasource);
     if (!(manager instanceof PostgresTransactionManager) && !(manager instanceof PostgresConnectionPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
@@ -36,11 +45,12 @@ export const ctx = (datasource?: string | symbol): TransactionSql => {
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
     return manager.wrapConnection(transaction);
-};
+}
 
 abstract class PostgresManagerBase extends PlatformTransactionManager<TransactionSql> {
     private readonly wrappers = new WeakMap<TransactionSql, TransactionSql>();
     private readonly queries = new WeakMap<object, object>();
+    private readonly nativeQueries = new WeakMap<object, object>();
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
@@ -54,11 +64,22 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
             },
             get: (target, property) => {
                 const value = Reflect.get(target, property, target);
-                if (property === "unsafe" || property === "file") return (...args: any[]) => {
-                    this.checkDeadline();
-                    return this.wrapQuery(value.apply(target, args));
-                };
-                return typeof value === "function" ? value.bind(target) : value;
+                if (property === "unsafe" || property === "file" || property === "batch") return new Proxy(value, {
+                    apply: (fn, _receiver, args) => {
+                        this.checkDeadline();
+                        if (property === "batch" && Array.isArray(args[0])) {
+                            // postgres.js settles/handles each part internally. Give it
+                            // native queries so its own catch handlers cannot hit an
+                            // expired wrapper deadline while settling a failed batch.
+                            args[0] = args[0].map(part => this.nativeQueries.get(part) ?? part);
+                        }
+                        return this.wrapQuery(Reflect.apply(fn, target, args));
+                    },
+                });
+                // ReservedSql helpers are closure-based, not this-dependent methods.
+                // In particular typed/types carry custom serializer properties and
+                // share identity; binding them would erase those properties.
+                return value;
             },
         });
         this.wrappers.set(connection, wrapper);
@@ -96,27 +117,29 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
         };
         const wrapper = new Proxy(query, {
             get: (target, property) => {
-                if (property === "then") return (...args: any[]) => execute().then(...args);
-                if (property === "catch") return (...args: any[]) => execute().catch(...args);
-                if (property === "finally") return (...args: any[]) => execute().finally(...args);
-                if (property === "execute") return () => { execute(); return wrapper; };
                 const value = Reflect.get(target, property, target);
                 if (typeof value !== "function") return value;
-                // These APIs own their cursor/stream lifecycle. Check before dispatch,
-                // but do not arm cancellation or intercept their results or callbacks.
-                if (["cursor", "forEach", "stream", "readable", "writable"].includes(String(property))) {
-                    return (...args: any[]) => {
-                        this.checkDeadline();
-                        return value.apply(target, args);
-                    };
-                }
-                return (...args: any[]) => {
-                    const result = value.apply(target, args);
-                    return result === target ? wrapper : this.wrapQuery(result);
-                };
+                // Callable proxies retain any properties on the original function.
+                return new Proxy(value, {
+                    apply: (fn, _receiver, args) => {
+                        if (property === "then") return execute().then(...args);
+                        if (property === "catch") return execute().catch(...args);
+                        if (property === "finally") return execute().finally(...args);
+                        if (property === "execute") { execute(); return wrapper; }
+                        // These APIs own their cursor/stream lifecycle. Check before
+                        // dispatch, without cancellation or result interception.
+                        if (["cursor", "forEach", "stream", "readable", "writable"].includes(String(property))) {
+                            this.checkDeadline();
+                            return Reflect.apply(fn, target, args);
+                        }
+                        const result = Reflect.apply(fn, target, args);
+                        return result === target ? wrapper : this.wrapQuery(result);
+                    },
+                });
             },
         });
         this.queries.set(query, wrapper);
+        this.nativeQueries.set(wrapper, query);
         return wrapper;
     }
 
@@ -201,6 +224,7 @@ export class PostgresConnectionPerTransactionManager extends PostgresManagerBase
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<TransactionSql>> {
         const begin = this.beginSql(options);
         const config = typeof this.config === "function" ? await this.config() : this.config;
+        const postgres = await loadPostgres();
         const sql = typeof config === "string" ? postgres(config, { max: 1 }) : postgres({ ...config, max: 1 });
         let connection: TransactionSql;
         try { connection = await sql.reserve(); }
