@@ -11,6 +11,7 @@ It is designed to provide reliable and intuitive transaction management for miss
 - 🔁 **All 7 Spring Propagations** including `NESTED` (savepoint)
 - 🎛️ **Isolation level, read-only, timeout**
 - 🗄️ **Multiple datasources**
+- ☁️ **Cloudflare Workers + Hyperdrive** via [PostgreSQL client-per-transaction mode](/docs/drivers.md#cloudflare-workers--hyperdrive)
 - 🪝 **`afterCommit` / `afterRollback` hooks**
 - ⚡ **TypeScript Native**
 - 🛠️ **No Dependencies, Lightweight (15KB)**

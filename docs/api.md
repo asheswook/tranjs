@@ -22,6 +22,11 @@ The decorator keeps the method's `this`, its `name`, and its `reflect-metadata` 
 
 ### 1. Initialize the transaction manager
 
+> [!WARNING]
+> **Register transaction managers once (at startup / module scope). Re-registering inside a request handler breaks concurrent requests.**
+>
+> Registration replaces the shared manager for that datasource, while active transaction contexts are keyed by the original manager instance. Concurrent requests that call `ctx()` after replacement resolve the new manager instead and fail with "Transaction context not initialized".
+
 ```typescript
 import { useTransactionManager } from "@tranjs/core";
 

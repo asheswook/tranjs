@@ -86,6 +86,28 @@ class MyService {
 
 That’s it! You’re ready to use TranJS with PostgreSQL.
 
+### Cloudflare Workers + Hyperdrive
+
+Use `pg >= 8.16.3` and enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in your Worker configuration. Register the manager **once at module scope**, not inside the request handler:
+
+```ts
+import { env } from "cloudflare:workers";
+import { usePostgreSQLClientPerTransaction } from "@tranjs/pg";
+
+usePostgreSQLClientPerTransaction(() => ({ connectionString: env.HYPERDRIVE.connectionString }));
+```
+
+Use `runInTransaction` / `@Transactional` and `ctx()` as usual. This mode uses no `pg.Pool`: it resolves the config (or async config factory) and opens a new `pg.Client` for each physical transaction, then calls `end()` automatically on completion, including failures. No `end()` is needed in user code. Joined and `NESTED` scopes reuse the current client; `REQUIRES_NEW` opens another one. For direct registration, use `new PostgreSQLClientPerTransactionManager(config)` with `useTransactionManager`; both registration helpers accept an optional datasource name.
+
+[Hyperdrive uses transaction-mode pooling](https://developers.cloudflare.com/hyperdrive/configuration/connection-pooling/), so session state cannot be relied on between transactions:
+
+- `SET` outside a transaction does not persist; use transaction-local settings inside the transaction.
+- No session advisory locks (use transaction-scoped advisory locks instead).
+- No `LISTEN` / `NOTIFY`.
+- No SQL `PREPARE`.
+
+On Node without Hyperdrive, this mode opens a new database connection per physical transaction; prefer the existing `Pool` manager there to reuse connections.
+
 ## Driver Features
 
 | | mysql2 | pg |
