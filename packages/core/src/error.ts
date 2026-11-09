@@ -1,5 +1,15 @@
 import { Propagation } from "./propagation";
 
+export class TransactionSystemError extends Error {
+    readonly cause: unknown;
+
+    constructor(cause: unknown, public readonly applicationError: unknown) {
+        super("Transaction rollback failed after application error");
+        this.name = "TransactionSystemError";
+        this.cause = cause;
+    }
+}
+
 export class ConcurrentNestedTransactionError extends Error {
     constructor() {
         super("A sibling nested transaction is still open in this parent scope");

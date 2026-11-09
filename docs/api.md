@@ -65,6 +65,8 @@ class MyService {
 
 Propagation is tracked per datasource. A `REQUIRED` method on datasource B never joins a transaction that is open on datasource A.
 
+Spring semantics apply: an error escaping a joined `REQUIRED`, `MANDATORY`, or `SUPPORTS` scope marks the physical transaction **rollback-only**, even if the caller catches it. The owner then rolls back and throws `UnexpectedRollbackError` instead of committing. A caught `REQUIRES_NEW` failure is independent; a caught `NESTED` failure that successfully rolls back to its savepoint does not mark the outer transaction. Errors caught inside the same method do not cross a transactional scope and do not mark rollback-only.
+
 ## Isolation Level, Read-only, Timeout
 
 ```typescript
@@ -76,8 +78,11 @@ import { IsolationLevel } from "@tranjs/core";
 These options apply only when a new physical transaction begins (`REQUIRED` without an existing transaction, `REQUIRES_NEW`, `NESTED` without an existing transaction). A method that joins an existing transaction inherits its settings.
 
 `timeout` (ms):
-- After the method finishes, if more time has passed than `timeout`, the transaction is rolled back and `TransactionTimeoutError` is thrown instead of committing.
-- The value is also passed to the driver. `@tranjs/pg` sets `SET LOCAL statement_timeout`; `@tranjs/mysql2` does not apply a DB-side timeout.
+- A non-negative finite duration establishing a deadline for the physical transaction (including begin). Joined and savepoint scopes inherit it; `REQUIRES_NEW` has its own deadline.
+- Before every `ctx().query()` (and MySQL `ctx().execute()`), the deadline is checked. Once expired, it marks rollback-only and throws `TransactionTimeoutError` without sending the query.
+- The remaining duration, not the original duration, is passed as PostgreSQL `query_timeout` or MySQL query/execute `timeout`. Existing shorter per-query timeouts are preserved. Use the driver's `ctx()` wrapper rather than a raw connection to get these checks.
+- These are client-side query timeouts, not server-side cancellation. A running statement can finish before the queued rollback completes; transaction completion may therefore take longer than the deadline. PostgreSQL no longer sets `SET LOCAL statement_timeout` at begin.
+- The deadline is also checked after the callback before commit. It does not interrupt arbitrary JavaScript or other I/O. If rollback fails, `TransactionSystemError` is thrown instead.
 
 ## Functional API
 
@@ -132,8 +137,11 @@ The same works with `useTransactionManager(manager, name)` and `getTransactionMa
 
 ## Error Handling
 
-- If the method throws, the transaction is rolled back and **the original error** is rethrown. If the rollback also fails, the rollback error is sent to the manager's logger (`manager.setLogger(logger)`, `console` by default).
-- If `COMMIT` fails, the driver rolls back and releases the connection; the commit error is thrown.
+- If an owning callback throws and rollback succeeds, **the original error** is rethrown. Joined failures mark rollback-only before rethrowing; catching one in the owner does not restore commit eligibility.
+- If an owner finishes normally but is rollback-only, it rolls back, runs `afterRollback` hooks, and throws `UnexpectedRollbackError`. Use `REQUIRES_NEW` for independent work, or `NESTED` for savepoint-isolated failures; do not catch joined failures expecting to commit.
+- If rollback fails after an application error, timeout, or rollback-only decision, `TransactionSystemError` is thrown with message `"Transaction rollback failed after application error"`, `cause` containing the rollback error, and `applicationError` containing the original error (`TransactionTimeoutError` / `UnexpectedRollbackError` for those decisions). The original error is also logged via `manager.setLogger(logger)` (`console` by default). Rollback hooks still run.
+- If `COMMIT` fails, core does **not** attempt rollback. It runs `afterRollback` hooks and rethrows the commit error; these hooks do not guarantee the database rolled back a failed commit. Native drivers dispose of the connection because its outcome may be uncertain. Do not blindly retry non-idempotent work.
+- Physical completion always calls the optional driver `releaseTransaction(tx, failed)` hook exactly once. Native drivers release on successful completion and dispose on failed commit/rollback.
 
 ## Exceptions
 
@@ -146,6 +154,12 @@ The same works with `useTransactionManager(manager, name)` and `getTransactionMa
 
 - **TransactionTimeoutError**
   - Thrown when a transaction exceeds its `timeout`. The transaction is rolled back.
+
+- **UnexpectedRollbackError**
+  - Thrown when a rollback-only transaction's owner attempts to commit after catching a joined failure (or a savepoint rollback failed).
+
+- **TransactionSystemError**
+  - Thrown when physical rollback fails; inspect `cause` and `applicationError` for both errors.
 
 - **NestedTransactionNotSupportedError**
   - Thrown on `NESTED` inside a transaction when the manager does not implement savepoints.

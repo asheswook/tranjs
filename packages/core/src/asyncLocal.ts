@@ -9,6 +9,8 @@ export interface TxState {
     context: MetadataWrappedTransaction<TransactionContext>;
     active: boolean;
     rollbackOnly: boolean;
+    deadline?: number;
+    timeout?: number;
     savepointCounter: number;
     afterCommit: TransactionSynchronization[];
     afterRollback: TransactionSynchronization[];

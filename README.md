@@ -59,6 +59,17 @@ It should be set up for the database you want to use. See [here](/docs/drivers.m
 > [!NOTE]
 > If the driver you want to use does not exist, [you can implement it on your own.](/docs/self-implement-guide.md)
 
+## Behaviour changes in 1.1.0
+
+These intentional breaking behaviour changes align with Spring `@Transactional`:
+
+- **Joined failures mark rollback-only.** An error escaping joined `REQUIRED`, `MANDATORY`, or `SUPPORTS` makes the owner roll back with `UnexpectedRollbackError`, even if it catches that error. Migrate catch-and-continue flows to `REQUIRES_NEW` for independent transactions or `NESTED` for savepoints. Locally caught errors are unaffected.
+- **Rollback failure exposes both errors.** `TransactionSystemError.cause` is the rollback error and `.applicationError` is the original application/timeout/rollback-only error, which is also logged. Update error handlers that previously expected the original error after failed rollback.
+- **No rollback after failed commit.** Core runs rollback hooks, rethrows the commit error, and calls the optional `releaseTransaction(tx, failed)` exactly once. Native drivers dispose on failed commit/rollback. Custom drivers may move connection cleanup into the new hook, or keep cleanup inside `commitTransaction`/`rollbackTransaction` with the default no-op hook (never both). If your `commitTransaction` relied on core calling rollback after a failed commit, roll back inside `commitTransaction` instead. A failed commit can have an uncertain outcome; retry cautiously.
+- **Timeouts are deadlines.** Native `ctx()` query/execute calls check the remaining transaction budget and pass it as a per-query client timeout, with a final check before commit. PostgreSQL now uses `query_timeout`, not begin-time `SET LOCAL statement_timeout`; MySQL also enforces query/execute timeouts. Use the driver `ctx()` wrapper rather than a raw connection. This does not cancel arbitrary JavaScript or guarantee server-side statement cancellation; rollback can finish after the deadline.
+
+See [API error handling and timeout details](/docs/api.md) and the [custom driver migration guide](/docs/self-implement-guide.md).
+
 ## Contribute
 
 TranJS welcomes contributions from the community to enhance its functionality and usability. Here’s how you can contribute:

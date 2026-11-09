@@ -2,10 +2,12 @@ import { createPool, PoolConnection as NativeConnection, RowDataPacket } from "m
 import {
     IsolationLevel,
     InvalidIsolationLevelError,
+    getTransactionManager,
     PlatformTransactionManager,
     Propagation,
     runInTransaction,
     TransactionContextMixingError,
+    TransactionTimeoutError,
     useTransactionManager,
 } from "@tranjs/core";
 import { ctx, MySQLTransactionManager, useMySQLTransactionManager } from "../src";
@@ -130,26 +132,72 @@ describe("MySQL driver (real database)", () => {
         expect(await ids()).toEqual([]);
     });
 
-    it("rolls back after COMMIT failure and releases exactly once", async () => {
+    it("destroys after COMMIT failure exactly once without attempting rollback", async () => {
         const commitError = new Error("injected COMMIT failure");
         let release: jest.SpyInstance | undefined;
         let rollback: jest.SpyInstance | undefined;
         let commit: jest.SpyInstance | undefined;
+        let destroy: jest.SpyInstance | undefined;
         await expect(runInTransaction(async () => {
-            const connection = ctx() as NativeConnection;
+            const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
             await connection.query(`INSERT INTO ${table} VALUES (1)`);
             release = jest.spyOn(connection, "release");
             rollback = jest.spyOn(connection, "rollback");
+            destroy = jest.spyOn(connection, "destroy");
             // MySQL has no deferred constraints; fail COMMIT on a real checked-out connection.
             commit = jest.spyOn(connection, "commit").mockRejectedValueOnce(commitError);
         })).rejects.toBe(commitError);
-        expect(release).toHaveBeenCalledTimes(1);
-        expect(rollback).toHaveBeenCalledTimes(1);
+        expect(release).not.toHaveBeenCalled();
+        expect(rollback).not.toHaveBeenCalled();
+        expect(destroy).toHaveBeenCalledTimes(1);
         commit?.mockRestore();
         rollback?.mockRestore();
         release?.mockRestore();
+        destroy?.mockRestore();
         expect(await ids()).toEqual([]);
         await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+    });
+
+    it.each(["query string", "query options", "execute string", "execute options"])(
+        "times out a slow %s and rolls back", async format => {
+            await expect(runInTransaction(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+                const sql = "SELECT SLEEP(?)";
+                const options = { sql, timeout: 5000 };
+                if (format === "query string") await ctx().query(sql, [0.2]);
+                if (format === "query options") await ctx().query(options, [0.2]);
+                if (format === "execute string") await ctx().execute(sql, [0.2]);
+                if (format === "execute options") await ctx().execute(options, [0.2]);
+                expect(options.timeout).toBe(5000);
+            }, { timeout: 50 })).rejects.toThrow(TransactionTimeoutError);
+            expect(await ids()).toEqual([]);
+        },
+    );
+
+    it("merges query options without mutation and keeps methods bound", async () => {
+        await runInTransaction(async () => {
+            const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
+            const query = jest.spyOn(connection, "query");
+            const execute = jest.spyOn(connection, "execute");
+            const config = { sql: "SELECT ? AS value", timeout: 5000, rowsAsArray: true };
+            try {
+                const [rows] = await ctx().query(config, [42]);
+                expect(rows).toEqual([[42]]);
+                await new Promise(resolve => setTimeout(resolve, 15));
+                const [executed] = await ctx().execute(config, [43]);
+                expect(executed).toEqual([[43]]);
+                const first = (query.mock.calls[0][0] as any).timeout;
+                const second = (execute.mock.calls[0][0] as any).timeout;
+                expect(first).toBeGreaterThan(second);
+                expect(first).toBeLessThanOrEqual(1000);
+                expect(config.timeout).toBe(5000);
+                await ctx().query({ ...config, timeout: 200 }, [44]);
+                expect((query.mock.calls[1][0] as any).timeout).toBe(200);
+                expect(ctx().threadId).toBe(connection.threadId);
+                const ping = ctx().ping;
+                await ping();
+            } finally { query.mockRestore(); execute.mockRestore(); }
+        }, { timeout: 1000 });
     });
 
     it("validates isolation before acquiring a connection, including direct driver use", async () => {
@@ -166,13 +214,14 @@ describe("MySQL driver (real database)", () => {
     });
 
     it.each(["rollback", "commit cleanup", "begin cleanup"])(
-        "destroys a dirty connection exactly once after ROLLBACK fails during %s", async path => {
+        "destroys a dirty connection exactly once after %s failure", async path => {
             const connection = await pool.getConnection();
             const oldId = connection.threadId;
             const primaryError = new Error(`injected ${path} failure`);
             const release = jest.spyOn(connection, "release");
             const destroy = jest.spyOn(connection, "destroy");
-            const rollback = jest.spyOn(connection, "rollback").mockRejectedValueOnce(new Error("injected ROLLBACK failure"));
+            const rollbackError = new Error("injected ROLLBACK failure");
+            const rollback = jest.spyOn(connection, "rollback").mockRejectedValueOnce(rollbackError);
             const commit = path === "commit cleanup"
                 ? jest.spyOn(connection, "commit").mockRejectedValueOnce(primaryError) : undefined;
             const query = connection.query.bind(connection);
@@ -188,11 +237,15 @@ describe("MySQL driver (real database)", () => {
             const getConnection = jest.spyOn(pool, "getConnection").mockResolvedValueOnce(connection);
             const log = jest.spyOn(console, "error").mockImplementation(() => {});
             try {
-                await expect(runInTransaction(async () => {
+                const result = runInTransaction(async () => {
                     await ctx().query(`INSERT INTO ${table} VALUES (1)`);
                     if (path === "rollback") throw primaryError;
-                })).rejects.toBe(primaryError);
-                expect(rollback).toHaveBeenCalledTimes(1);
+                });
+                if (path === "rollback") await expect(result).rejects.toMatchObject({
+                    name: "TransactionSystemError", cause: rollbackError, applicationError: primaryError,
+                });
+                else await expect(result).rejects.toBe(primaryError);
+                expect(rollback).toHaveBeenCalledTimes(path === "commit cleanup" ? 0 : 1);
                 expect(destroy).toHaveBeenCalledTimes(1);
                 expect(release).not.toHaveBeenCalled();
             } finally {

@@ -4,7 +4,7 @@ import { AsyncLocal, TransactionSynchronization, TxState } from "./asyncLocal";
 import { DEFAULT_DATASOURCE, IsolationLevel, TransactionConfig, TransactionOptions } from "./config";
 import { DatasourceSetupError, IllegalTransactionStateException, NestedTransactionNotSupportedError,
     NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException,
-    ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError } from "./error";
+    ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError } from "./error";
 import { DefaultLogger, Logger } from "./logger";
 
 const managers = new Map<string | symbol, PlatformTransactionManager<any>>();
@@ -54,8 +54,6 @@ export function afterRollback(fn: TransactionSynchronization, datasource: string
 }
 
 export abstract class PlatformTransactionManager<Tx extends TransactionContext> {
-    protected readonly handlesCommitFailure: boolean = false;
-
     protected constructor(private logger: Logger = new DefaultLogger()) {}
 
     setLogger(logger: Logger): void {
@@ -75,6 +73,20 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     protected abstract beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<Tx>>;
     protected abstract commitTransaction(tx: Tx): Promise<void>;
     protected abstract rollbackTransaction(tx: Tx): Promise<void>;
+
+    /** Called once after completion; failed means COMMIT or ROLLBACK threw. */
+    protected async releaseTransaction(tx: Tx, failed: boolean): Promise<void> {}
+
+    protected getRemainingTimeout(): number | undefined {
+        const state = this.currentState();
+        if (state?.deadline === undefined) return undefined;
+        const remaining = state.deadline - Date.now();
+        if (remaining <= 0) {
+            state.rollbackOnly = true;
+            throw new TransactionTimeoutError(state.timeout!);
+        }
+        return remaining;
+    }
 
     protected async createSavepoint(tx: Tx, name: string): Promise<void> {
         throw new NestedTransactionNotSupportedError();
@@ -114,11 +126,16 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         }
     }
 
-    private async rollback(state: TxState): Promise<void> {
+    private async rollback(state: TxState, applicationError: unknown): Promise<void> {
         try { await this.rollbackTransaction(state.context.transaction as Tx); }
-        catch (error) { this.logError("Transaction rollback failed", error); }
-        finally { state.active = false; }
-        await this.inScope(null, () => this.synchronize(state.afterRollback));
+        catch (error) {
+            this.logError("Transaction application error before rollback failure", applicationError);
+            throw new TransactionSystemError(error, applicationError);
+        }
+        finally {
+            state.active = false;
+            await this.inScope(null, () => this.synchronize(state.afterRollback));
+        }
     }
 
     private executeNewTransaction<R>(callback: (tx: Tx) => Promise<R> | R, options?: TransactionOptions): Promise<R> {
@@ -127,37 +144,43 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
                 throw new InvalidIsolationLevelError(options.isolationLevel);
             }
+            if (options?.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout < 0)) {
+                throw new RangeError("Transaction timeout must be a non-negative finite number");
+            }
             const started = Date.now();
             const context = await this.beginTransaction(options);
-            const state: TxState = { context, active: true, rollbackOnly: false, savepointCounter: 0, afterCommit: [], afterRollback: [] };
+            const state: TxState = {
+                context, active: true, rollbackOnly: false, savepointCounter: 0, afterCommit: [], afterRollback: [],
+                timeout: options?.timeout,
+                deadline: options?.timeout === undefined ? undefined : started + options.timeout,
+            };
             return this.inScope(state, async () => {
-                let result: R;
-                try { result = await callback(context.transaction as Tx); }
-                catch (error) {
-                    await this.rollback(state);
-                    throw error;
-                }
-                if (options?.timeout !== undefined && Date.now() - started > options.timeout) {
-                    const error = new TransactionTimeoutError(options.timeout);
-                    await this.rollback(state);
-                    throw error;
-                }
-                if (state.rollbackOnly) {
-                    await this.rollback(state);
-                    throw new UnexpectedRollbackError();
-                }
-                try { await this.commitTransaction(context.transaction as Tx); }
-                catch (error) {
-                    if (!this.handlesCommitFailure) await this.rollback(state);
-                    else {
+                let failed = false;
+                try {
+                    let result: R;
+                    try {
+                        result = await callback(context.transaction as Tx);
+                        this.getRemainingTimeout();
+                        if (state.rollbackOnly) throw new UnexpectedRollbackError();
+                    } catch (error) {
+                        try { await this.rollback(state, error); }
+                        catch (rollbackError) { failed = true; throw rollbackError; }
+                        throw error;
+                    }
+                    try { await this.commitTransaction(context.transaction as Tx); }
+                    catch (error) {
+                        failed = true;
                         state.active = false;
                         await this.inScope(null, () => this.synchronize(state.afterRollback));
+                        throw error;
                     }
-                    throw error;
+                    state.active = false;
+                    await this.inScope(null, () => this.synchronize(state.afterCommit));
+                    return result;
+                } finally {
+                    state.active = false;
+                    await this.releaseTransaction(context.transaction as Tx, failed);
                 }
-                finally { state.active = false; }
-                await this.inScope(null, () => this.synchronize(state.afterCommit));
-                return result;
             });
         });
     }
@@ -193,7 +216,13 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         options?: TransactionOptions,
     ): Promise<R> {
         const state = this.currentState();
-        const join = () => this.inScope(state!, () => callback(state!.context.transaction as Tx));
+        const join = () => this.inScope(state!, async () => {
+            try { return await callback(state!.context.transaction as Tx); }
+            catch (error) {
+                state!.rollbackOnly = true;
+                throw error;
+            }
+        });
         const withoutTransaction = () => this.inScope(null, () => callback(undefined as unknown as Tx));
         switch (propagation) {
             case Propagation.REQUIRES_NEW:

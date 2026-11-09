@@ -5,7 +5,7 @@ import {
     Logger, MetadataWrappedTransaction, NestedTransactionNotSupportedError, NoTransactionContextError,
     PlatformTransactionManager, Propagation, runInTransaction, Transactional, TransactionOptions,
     TransactionTimeoutError, useTransactionManager, ConcurrentNestedTransactionError,
-    InvalidIsolationLevelError, UnexpectedRollbackError,
+    InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError,
 } from "../src";
 
 interface Tx { id: number }
@@ -18,7 +18,9 @@ class RecordingManager extends PlatformTransactionManager<Tx> {
     rollbackError?: Error;
     private nextId = 0;
 
-    constructor(protected readonly handlesCommitFailure: boolean = false) { super(); }
+    constructor() { super(); }
+
+    checkDeadline() { return this.getRemainingTimeout(); }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<Tx>> {
         this.options = options;
@@ -86,9 +88,7 @@ describe("transaction hardening", () => {
         expect(() => getTransactionManager("missing")).toThrow("missing");
     });
 
-    it.each([false, true])("preserves commit errors and runs rollback hooks with handlesCommitFailure=%s", async handlesCommitFailure => {
-        manager = new SavepointManager(handlesCommitFailure);
-        useTransactionManager(manager);
+    it("preserves commit errors without rollback and runs rollback hooks", async () => {
         const error = new Error("commit failed");
         manager.commitError = error;
         const rollbackError = new Error("rollback failed");
@@ -101,14 +101,14 @@ describe("transaction hardening", () => {
             afterCommit(commitHook);
             afterRollback(rollbackHook);
         })).rejects.toBe(error);
-        expect(manager.events).toEqual(handlesCommitFailure ? ["begin:1", "commit:1"] : ["begin:1", "commit:1", "rollback:1"]);
-        if (!handlesCommitFailure) expect(log.error).toHaveBeenCalledWith("Transaction rollback failed", rollbackError);
+        expect(manager.events).toEqual(["begin:1", "commit:1"]);
+        expect(log.error).not.toHaveBeenCalled();
         expect(commitHook).not.toHaveBeenCalled();
         expect(rollbackHook).toHaveBeenCalledTimes(1);
         expect(manager.getCurrentTransaction()).toBeUndefined();
     });
 
-    it("preserves the original callback error when rollback fails and reports it to the logger", async () => {
+    it("throws TransactionSystemError with both errors when rollback fails and logs the application error", async () => {
         const error = new Error("original");
         const rollbackError = new Error("rollback failed");
         const log = logger();
@@ -118,9 +118,106 @@ describe("transaction hardening", () => {
         await expect(manager.executeTransaction(Propagation.REQUIRED, () => {
             afterRollback(hook);
             throw error;
-        })).rejects.toBe(error);
-        expect(log.error).toHaveBeenCalledWith("Transaction rollback failed", rollbackError);
+        })).rejects.toMatchObject({
+            name: "TransactionSystemError",
+            message: "Transaction rollback failed after application error",
+            cause: rollbackError, applicationError: error,
+        });
+        expect(log.error).toHaveBeenCalledWith("Transaction application error before rollback failure", error);
         expect(hook).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([Propagation.REQUIRED, Propagation.MANDATORY, Propagation.SUPPORTS])(
+        "%s joined failure marks rollback-only even when caught by the owner", async propagation => {
+            const error = new Error("joined failure");
+            const commitHook = jest.fn();
+            const rollbackHook = jest.fn();
+            // Spring semantics: joined failure marks rollback-only
+            await expect(manager.executeTransaction(Propagation.REQUIRED, async () => {
+                afterCommit(commitHook);
+                afterRollback(rollbackHook);
+                await expect(manager.executeTransaction(propagation, () => { throw error; })).rejects.toBe(error);
+            })).rejects.toThrow(UnexpectedRollbackError);
+            expect(manager.events).toEqual(["begin:1", "rollback:1"]);
+            expect(commitHook).not.toHaveBeenCalled();
+            expect(rollbackHook).toHaveBeenCalledTimes(1);
+        },
+    );
+
+    it("does not mark rollback-only for an error caught within the same callback", async () => {
+        await manager.executeTransaction(Propagation.REQUIRED, () => {
+            try { throw new Error("handled locally"); } catch {}
+        });
+        expect(manager.events).toEqual(["begin:1", "commit:1"]);
+    });
+
+    it.each([Propagation.SUPPORTS, Propagation.NOT_SUPPORTED, Propagation.NEVER])(
+        "%s without a transaction simply rethrows failures", async propagation => {
+            const error = new Error("no transaction");
+            await expect(manager.executeTransaction(propagation, () => { throw error; })).rejects.toBe(error);
+            expect(manager.events).toEqual([]);
+        },
+    );
+
+    it.each(["timeout", "rollback-only"])("wraps rollback failure after %s", async reason => {
+        const rollbackError = new Error("rollback failed");
+        manager.rollbackError = rollbackError;
+        manager.setLogger(logger());
+        let now = 100;
+        jest.spyOn(Date, "now").mockImplementation(() => now);
+        const result = manager.executeTransaction(Propagation.REQUIRED, async () => {
+            if (reason === "timeout") now += 11;
+            else await manager.executeTransaction(Propagation.REQUIRED, () => { throw new Error("joined"); }).catch(() => {});
+        }, reason === "timeout" ? { timeout: 10 } : undefined);
+        await expect(result).rejects.toBeInstanceOf(TransactionSystemError);
+        await expect(result).rejects.toMatchObject({
+            cause: rollbackError,
+            applicationError: expect.any(reason === "timeout" ? TransactionTimeoutError : UnexpectedRollbackError),
+        });
+        expect(manager.events).toEqual(["begin:1", "rollback:1"]);
+    });
+
+    it.each(["commit", "rollback", "commit failure", "rollback failure"])(
+        "releases exactly once after %s with the completion failure flag", async path => {
+            class ReleasingManager extends RecordingManager {
+                protected async releaseTransaction(tx: Tx, failed: boolean) {
+                    this.events.push(`release:${tx.id}:${failed}`);
+                }
+            }
+            const releasing = new ReleasingManager();
+            releasing.setLogger(logger());
+            if (path === "commit failure") releasing.commitError = new Error("commit failed");
+            if (path === "rollback failure") releasing.rollbackError = new Error("rollback failed");
+            const result = releasing.executeTransaction(Propagation.REQUIRED, () => {
+                if (path.startsWith("rollback")) throw new Error("application error");
+            });
+            if (path === "commit") await expect(result).resolves.toBeUndefined();
+            else await expect(result).rejects.toThrow();
+            expect(releasing.events).toEqual([
+                "begin:1", path.startsWith("commit") ? "commit:1" : "rollback:1",
+                `release:1:${path.endsWith("failure")}`,
+            ]);
+        },
+    );
+
+    it.each(["commit failure", "rollback"])("legacy-style manager releases once on %s", async path => {
+        class LegacyManager extends RecordingManager {
+            releases = 0;
+            protected async commitTransaction(tx: Tx) {
+                try { await super.commitTransaction(tx); } finally { this.releases++; }
+            }
+            protected async rollbackTransaction(tx: Tx) {
+                try { await super.rollbackTransaction(tx); } finally { this.releases++; }
+            }
+        }
+        const legacy = new LegacyManager();
+        const error = new Error(path);
+        if (path === "commit failure") legacy.commitError = error;
+        await expect(legacy.executeTransaction(Propagation.REQUIRED, () => {
+            if (path === "rollback") throw error;
+        })).rejects.toBe(error);
+        expect(legacy.releases).toBe(1);
+        expect(legacy.events).toEqual(["begin:1", path === "rollback" ? "rollback:1" : "commit:1"]);
     });
 
     it("SUPPORTS runs without a tx or joins the current physical transaction", async () => {
@@ -295,6 +392,36 @@ describe("transaction hardening", () => {
         }, { timeout: 10 })).rejects.toThrow(TransactionTimeoutError);
         expect(manager.events).toEqual(["begin:1", "rollback:1"]);
         expect(hook).toHaveBeenCalledTimes(1);
+    });
+
+    it("checks the remaining deadline before a query and rolls back even if the timeout is caught", async () => {
+        let now = 100;
+        jest.spyOn(Date, "now").mockImplementation(() => now);
+        const query = jest.fn(() => manager.checkDeadline());
+        expect(manager.checkDeadline()).toBeUndefined();
+        await expect(manager.executeTransaction(Propagation.REQUIRED, () => {
+            expect(manager.checkDeadline()).toBe(10);
+            now += 4;
+            expect(manager.checkDeadline()).toBe(6);
+            now += 6;
+            expect(query).toThrow(TransactionTimeoutError);
+        }, { timeout: 10 })).rejects.toThrow(TransactionTimeoutError);
+        expect(manager.events).toEqual(["begin:1", "rollback:1"]);
+    });
+
+    it("inherits deadlines in joined scopes and suspends them for REQUIRES_NEW", async () => {
+        let now = 100;
+        jest.spyOn(Date, "now").mockImplementation(() => now);
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            now += 4;
+            await manager.executeTransaction(Propagation.REQUIRED, () => {
+                expect(manager.checkDeadline()).toBe(6);
+            }, { timeout: 1000 });
+            await manager.executeTransaction(Propagation.REQUIRES_NEW, () => {
+                expect(manager.checkDeadline()).toBeUndefined();
+            });
+            expect(manager.checkDeadline()).toBe(6);
+        }, { timeout: 10 });
     });
 
     it("keeps datasource transactions independent and exposes the innermost active scope", async () => {

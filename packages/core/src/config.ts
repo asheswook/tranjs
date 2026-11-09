@@ -12,7 +12,7 @@ export const DEFAULT_DATASOURCE: unique symbol = Symbol("DEFAULT_DATASOURCE");
 export interface TransactionOptions {
     isolationLevel?: IsolationLevel;
     readOnly?: boolean;
-    /** Transaction timeout in milliseconds (checked before commit). */
+    /** Physical transaction deadline in milliseconds; checked before queries and commit. */
     timeout?: number;
 }
 

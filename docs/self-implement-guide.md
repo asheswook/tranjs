@@ -31,9 +31,6 @@ interface CustomConnection extends TransactionContext {
 const DRIVER_NAME = Symbol('custom');
 
 class CustomDriverTransactionManager extends PlatformTransactionManager<CustomConnection> {
-    // Opt in because commitTransaction below handles rollback and release itself.
-    protected readonly handlesCommitFailure = true;
-
     constructor(private readonly pool: any) {
         super();
     }
@@ -42,34 +39,36 @@ class CustomDriverTransactionManager extends PlatformTransactionManager<CustomCo
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<CustomConnection>> {
         const connection = await this.pool.getConnection();
         try {
-            // Apply options.isolationLevel / options.readOnly / options.timeout as your DB supports them.
+            // Apply options.isolationLevel / options.readOnly as your DB supports them.
             await connection.query('BEGIN');
         } catch (error) {
-            connection.release();   // release the connection if begin fails
+            // Begin owns its cleanup because core has not received the connection yet.
+            try { await connection.query('ROLLBACK'); connection.release(); }
+            catch { connection.destroy(); }
             throw error;
         }
         return { transaction: connection, metadata: { driverName: DRIVER_NAME } };
     }
 
-    // Required. With handlesCommitFailure = true, handle failed-commit cleanup here.
+    // Required: only send COMMIT. Core never calls rollback after a commit failure.
     protected async commitTransaction(tx: CustomConnection): Promise<void> {
-        try {
-            await tx.query('COMMIT');
-        } catch (error) {
-            try { await tx.query('ROLLBACK'); } catch {}
-            throw error;
-        } finally {
-            (tx as any).release();
-        }
+        await tx.query('COMMIT');
     }
 
     // Required
     protected async rollbackTransaction(tx: CustomConnection): Promise<void> {
-        try {
-            await tx.query('ROLLBACK');
-        } finally {
-            (tx as any).release();
-        }
+        await tx.query('ROLLBACK');
+    }
+
+    // Optional (default no-op). Called exactly once in core's finally block.
+    protected async releaseTransaction(tx: CustomConnection, failed: boolean): Promise<void> {
+        if (failed) (tx as any).destroy();
+        else (tx as any).release();
+    }
+
+    // Expose this for a ctx() query wrapper to check before each query.
+    public checkDeadline(): number | undefined {
+        return this.getRemainingTimeout();
     }
 
     // Optional: implement only if you support Propagation.NESTED. Otherwise it throws NestedTransactionNotSupportedError.
@@ -81,7 +80,13 @@ class CustomDriverTransactionManager extends PlatformTransactionManager<CustomCo
 
 Read the current transaction with `manager.getCurrentTransaction()`. Like the native drivers, you can expose a type-safe `ctx()` based on it.
 
-By default, `protected readonly handlesCommitFailure: boolean = false` preserves legacy behavior: when commit throws, core calls `rollbackTransaction`, logs any rollback error, and rethrows the original commit error. Set it to `true` only if your commit method already rolls back and releases (or disposes of) the connection on failure, as in the example. Core runs `afterRollback` hooks in either mode. Never return a connection to the pool after a failed rollback; destroy it instead.
+The lifecycle is begin → callback → commit or rollback → `releaseTransaction` in a `finally` block. `failed` is true only when commit or rollback throws (an application error with successful rollback gives `false`). Never return a connection with an uncertain completion outcome to the pool; dispose of it instead. Begin failures must clean up within `beginTransaction` itself. Keep release hooks reliable: a thrown cleanup error can replace the pending error.
+
+Core never calls rollback after a commit failure; it runs `afterRollback` hooks and rethrows the commit error. When physical rollback fails, core logs the original error and throws `TransactionSystemError` with the rollback error as `cause` and the original as `applicationError`.
+
+Existing published drivers that release inside commit/rollback can keep doing so with the default no-op release hook: core will not roll back after failed commit and double-release. When migrating, move cleanup to `releaseTransaction` and remove it from commit/rollback; never do both.
+
+For deadlines, expose `getRemainingTimeout()` through a public method and call it immediately before each query in your type-safe `ctx()` wrapper. Pass its remaining milliseconds to the driver’s per-query timeout, preserving any shorter user timeout and query arguments. It returns `undefined` without a deadline; once expired it marks rollback-only and throws `TransactionTimeoutError`. Bind other methods to the real connection. Core also checks the deadline before commit, but cannot interrupt arbitrary callback code. Native drivers show Proxy-based examples.
 
 ## Step 3: Use Your Custom Driver
 

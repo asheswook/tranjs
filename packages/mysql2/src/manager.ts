@@ -26,14 +26,43 @@ export const ctx = (datasource?: string | symbol): PoolConnection => {
     }
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
-    return transaction;
+    return manager.wrapConnection(transaction);
 };
 
 export class MySQLTransactionManager extends PlatformTransactionManager<PoolConnection> {
-    protected readonly handlesCommitFailure = true;
+    private readonly wrappers = new WeakMap<PoolConnection, PoolConnection>();
 
     constructor(private readonly pool: mysql2.Pool) {
         super();
+    }
+
+    public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
+
+    public wrapConnection(connection: PoolConnection): PoolConnection {
+        let wrapper = this.wrappers.get(connection);
+        if (wrapper) return wrapper;
+        wrapper = new Proxy(connection, {
+            get: (target, property) => {
+                const value = Reflect.get(target, property, target);
+                if (property !== "query" && property !== "execute") {
+                    return typeof value === "function" ? value.bind(target) : value;
+                }
+                return (...args: any[]) => {
+                    const remaining = this.checkDeadline();
+                    if (remaining === undefined) return value.apply(target, args);
+                    const config = typeof args[0] === "string" ? { sql: args[0] } : args[0];
+                    const timeout = typeof config.timeout === "number" && config.timeout > 0
+                        ? Math.min(config.timeout, remaining) : remaining;
+                    args[0] = { ...config, timeout };
+                    return value.apply(target, args).catch((error: unknown) => {
+                        this.checkDeadline();
+                        throw error;
+                    });
+                };
+            },
+        });
+        this.wrappers.set(connection, wrapper);
+        return wrapper;
     }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolConnection>> {
@@ -57,31 +86,17 @@ export class MySQLTransactionManager extends PlatformTransactionManager<PoolConn
     }
 
     protected async commitTransaction(tx: PoolConnection): Promise<void> {
-        const connection = tx as mysql2.PoolConnection;
-        let dirty = false;
-        try {
-            await connection.commit();
-        } catch (error) {
-            try { await connection.rollback(); } catch { dirty = true; }
-            throw error;
-        } finally {
-            if (dirty) connection.destroy();
-            else connection.release();
-        }
+        await (tx as mysql2.PoolConnection).commit();
     }
 
     protected async rollbackTransaction(tx: PoolConnection): Promise<void> {
+        await (tx as mysql2.PoolConnection).rollback();
+    }
+
+    protected async releaseTransaction(tx: PoolConnection, failed: boolean): Promise<void> {
         const connection = tx as mysql2.PoolConnection;
-        let dirty = false;
-        try {
-            await connection.rollback();
-        } catch (error) {
-            dirty = true;
-            throw error;
-        } finally {
-            if (dirty) connection.destroy();
-            else connection.release();
-        }
+        if (failed) connection.destroy();
+        else connection.release();
     }
 
     protected async createSavepoint(tx: PoolConnection, name: string): Promise<void> {

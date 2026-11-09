@@ -2,10 +2,12 @@ import { Pool, PoolClient as NativeClient } from "pg";
 import {
     IsolationLevel,
     InvalidIsolationLevelError,
+    getTransactionManager,
     PlatformTransactionManager,
     Propagation,
     runInTransaction,
     TransactionContextMixingError,
+    TransactionTimeoutError,
     useTransactionManager,
 } from "@tranjs/core";
 import { ctx, PostgreSQLTransactionManager, usePostgreSQLTransactionManager } from "../src";
@@ -112,17 +114,46 @@ describe("PostgreSQL driver (real database)", () => {
         expect(await ids()).toEqual([]);
     });
 
-    it("sets a transaction-local statement timeout", async () => {
-        await runInTransaction(async () => {
-            expect((await ctx().query("SHOW statement_timeout")).rows[0].statement_timeout).toBe("2s");
-        }, { timeout: 2000 });
+    it.each(["string", "config", "callback"])("times out a slow %s query and rolls back", async format => {
+        await expect(runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            if (format === "string") await ctx().query("SELECT pg_sleep($1)", [0.2]);
+            else if (format === "config") await ctx().query({ text: "SELECT pg_sleep($1)", values: [0.2] });
+            else await new Promise((resolve, reject) => {
+                ctx().query("SELECT pg_sleep($1)", [0.2], (error, result) => error ? reject(error) : resolve(result));
+            });
+        }, { timeout: 50 })).rejects.toThrow(TransactionTimeoutError);
+        expect(await ids()).toEqual([]);
         expect((await pool.query("SHOW statement_timeout")).rows[0].statement_timeout).toBe("0");
+    });
+
+    it("passes decreasing remaining time in query configs without mutating user options", async () => {
+        await runInTransaction(async () => {
+            const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
+            const query = jest.spyOn(connection, "query");
+            const config = { text: "SELECT $1::integer AS value", values: [42], query_timeout: 5000 };
+            try {
+                expect((await ctx().query(config)).rows[0].value).toBe(42);
+                await new Promise(resolve => setTimeout(resolve, 15));
+                await ctx().query("SELECT 1");
+                const first = (query.mock.calls[0][0] as any).query_timeout;
+                const second = (query.mock.calls[1][0] as any).query_timeout;
+                expect(first).toBeGreaterThan(second);
+                expect(first).toBeLessThanOrEqual(1000);
+                expect(config.query_timeout).toBe(5000);
+                const shorter = { ...config, query_timeout: 200 };
+                await ctx().query(shorter);
+                expect((query.mock.calls[2][0] as any).query_timeout).toBe(200);
+                const escape = ctx().escapeIdentifier;
+                expect(escape('a"b')).toBe('"a""b"');
+            } finally { query.mockRestore(); }
+        }, { timeout: 1000 });
     });
 
     it("cleans up a real deferred-constraint COMMIT failure exactly once", async () => {
         let release: jest.SpyInstance | undefined;
         await expect(runInTransaction(async () => {
-            release = jest.spyOn(ctx() as NativeClient, "release");
+            release = jest.spyOn(getTransactionManager().getCurrentTransaction() as NativeClient, "release");
             await ctx().query(`INSERT INTO ${table} VALUES (1), (1)`);
         })).rejects.toMatchObject({ code: "23505" });
         expect(release).toHaveBeenCalledTimes(1);
@@ -149,7 +180,7 @@ describe("PostgreSQL driver (real database)", () => {
     });
 
     it.each(["rollback", "commit cleanup", "begin cleanup"])(
-        "disposes a dirty connection exactly once after ROLLBACK fails during %s", async path => {
+        "disposes a dirty connection exactly once after %s failure", async path => {
             const connection = await pool.connect();
             const oldPid = (await connection.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
             const query = connection.query.bind(connection);
@@ -169,12 +200,19 @@ describe("PostgreSQL driver (real database)", () => {
             const connect = jest.spyOn(pool, "connect").mockResolvedValueOnce(connection as never);
             const log = jest.spyOn(console, "error").mockImplementation(() => {});
             try {
-                await expect(runInTransaction(async () => {
+                const result = runInTransaction(async () => {
                     await ctx().query(`INSERT INTO ${table} VALUES (1)`);
                     if (path === "rollback") throw primaryError;
-                })).rejects.toBe(primaryError);
+                });
+                if (path === "rollback") await expect(result).rejects.toMatchObject({
+                    name: "TransactionSystemError", cause: rollbackError, applicationError: primaryError,
+                });
+                else await expect(result).rejects.toBe(primaryError);
                 expect(release).toHaveBeenCalledTimes(1);
-                expect(release).toHaveBeenCalledWith(rollbackError);
+                expect(release).toHaveBeenCalledWith(expect.any(Error));
+                if (path === "commit cleanup") {
+                    expect(querySpy.mock.calls.filter(([sql]) => sql === "ROLLBACK")).toHaveLength(0);
+                }
             } finally {
                 connect.mockRestore();
                 querySpy.mockRestore();
@@ -190,7 +228,7 @@ describe("PostgreSQL driver (real database)", () => {
         },
     );
 
-    it("rolls back and releases when configuration after BEGIN fails", async () => {
+    it("rejects invalid timeout configuration before BEGIN", async () => {
         await expect(runInTransaction(async () => {}, { timeout: NaN })).rejects.toThrow(RangeError);
         await runInTransaction(async () => { await ctx().query("SELECT 1"); });
     });

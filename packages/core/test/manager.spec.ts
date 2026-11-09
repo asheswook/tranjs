@@ -1,4 +1,4 @@
-import { ctx, IllegalTransactionStateException, MetadataWrappedTransaction, PlatformTransactionManager, Propagation, TransactionContext, UnsupportedTransactionPropagationException, useTransactionManager } from "../src";
+import { ctx, IllegalTransactionStateException, MetadataWrappedTransaction, PlatformTransactionManager, Propagation, TransactionContext, UnexpectedRollbackError, UnsupportedTransactionPropagationException, useTransactionManager } from "../src";
 import { AsyncLocal } from "../src/asyncLocal";
 
 // Dummy transaction 타입 정의
@@ -228,6 +228,18 @@ describe("PlatformTransactionManager", () => {
             })
         ).rejects.toThrow("fail");
 
+        expect(manager.commitCalls).toBe(0);
+        expect(manager.rollbackCalls).toBe(1);
+    });
+
+    test("caught joined REQUIRED failure rolls back instead of committing", async () => {
+        // Spring semantics: joined failure marks rollback-only
+        await expect(manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, () => {
+                throw new Error("joined failure");
+            }).catch(() => {});
+        })).rejects.toThrow(UnexpectedRollbackError);
+        expect(manager.beginTransactionCalls).toBe(1);
         expect(manager.commitCalls).toBe(0);
         expect(manager.rollbackCalls).toBe(1);
     });

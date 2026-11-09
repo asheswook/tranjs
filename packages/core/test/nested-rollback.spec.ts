@@ -5,6 +5,7 @@ import {
     TransactionContext,
     useTransactionManager,
     Transactional,
+    UnexpectedRollbackError,
 } from "../src";
 
 interface DummyTx extends TransactionContext {
@@ -277,6 +278,23 @@ describe("Nested @Transactional Rollback", () => {
     });
 
     describe("nested rollback via @Transactional decorator", () => {
+        it("rolls back when decorated outer catches a joined inner method error", async () => {
+            class Service {
+                @Transactional(Propagation.REQUIRED)
+                async outer() {
+                    try { await this.inner(); } catch {}
+                    return "not committed";
+                }
+
+                @Transactional(Propagation.REQUIRED)
+                async inner() { throw new Error("joined failure"); }
+            }
+
+            // Spring semantics: joined failure marks rollback-only
+            await expect(new Service().outer()).rejects.toThrow(UnexpectedRollbackError);
+            expect(manager.events).toEqual(["begin:1", "rollback:1"]);
+        });
+
         it("rolls back outer when decorated inner method throws", async () => {
             class Service {
                 @Transactional(Propagation.REQUIRED)

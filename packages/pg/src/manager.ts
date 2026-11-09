@@ -26,14 +26,58 @@ export const ctx = (datasource?: string | symbol): PoolClient => {
     }
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
-    return transaction;
+    return manager.wrapConnection(transaction);
 };
 
 export class PostgreSQLTransactionManager extends PlatformTransactionManager<PoolClient> {
-    protected readonly handlesCommitFailure = true;
+    private readonly wrappers = new WeakMap<PoolClient, PoolClient>();
 
     constructor(private readonly pool: pg.Pool) {
         super();
+    }
+
+    public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
+
+    public wrapConnection(connection: PoolClient): PoolClient {
+        let wrapper = this.wrappers.get(connection);
+        if (wrapper) return wrapper;
+        wrapper = new Proxy(connection, {
+            get: (target, property) => {
+                const value = Reflect.get(target, property, target);
+                if (property !== "query") return typeof value === "function" ? value.bind(target) : value;
+                return (...args: any[]) => {
+                    const remaining = this.checkDeadline();
+                    if (remaining === undefined) return value.apply(target, args);
+                    const config = args[0];
+                    const timeout = typeof config?.query_timeout === "number" && config.query_timeout > 0
+                        ? Math.min(config.query_timeout, remaining) : remaining;
+                    // pg supports query_timeout at runtime, though QueryConfig's types omit it.
+                    args[0] = typeof config === "string" ? { text: config, query_timeout: timeout }
+                        : typeof config?.submit === "function"
+                            ? new Proxy(config, { get: (query, key) => key === "query_timeout" ? timeout : Reflect.get(query, key) })
+                            : { ...config, query_timeout: timeout };
+                    const deadlineError = (error: unknown) => {
+                        if (error) {
+                            try { this.checkDeadline(); } catch (timeoutError) { return timeoutError; }
+                        }
+                        return error;
+                    };
+                    const last = args.length - 1;
+                    if (typeof args[last] === "function") {
+                        const callback = args[last];
+                        args[last] = (error: unknown, ...results: any[]) => callback(deadlineError(error), ...results);
+                    } else if (typeof args[0]?.callback === "function") {
+                        const callback = args[0].callback;
+                        args[0].callback = (error: unknown, ...results: any[]) => callback(deadlineError(error), ...results);
+                    }
+                    const result = value.apply(target, args);
+                    return result && typeof result.then === "function"
+                        ? result.catch((error: unknown) => { throw deadlineError(error); }) : result;
+                };
+            },
+        });
+        this.wrappers.set(connection, wrapper);
+        return wrapper;
     }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<PoolClient>> {
@@ -46,16 +90,9 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
             if (options?.isolationLevel) sql += ` ISOLATION LEVEL ${options.isolationLevel}`;
             if (options?.readOnly) sql += " READ ONLY";
             await connection.query(sql);
-            if (options?.timeout !== undefined) {
-                // PostgreSQL's SET grammar does not accept bind parameters here.
-                if (!Number.isFinite(options.timeout) || options.timeout < 0) {
-                    throw new RangeError("Transaction timeout must be a non-negative finite number");
-                }
-                await connection.query(`SET LOCAL statement_timeout = ${Math.ceil(options.timeout)}`);
-            }
             return { metadata: { driverName: DRIVER_NAME }, transaction: connection };
         } catch (error) {
-            // BEGIN may have succeeded before configuring statement_timeout failed.
+            // BEGIN may have succeeded before the driver reported an error.
             let releaseError: Error | undefined;
             try { await connection.query("ROLLBACK"); }
             catch (rollbackError) { releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
@@ -65,28 +102,15 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
     }
 
     protected async commitTransaction(tx: PoolClient): Promise<void> {
-        let releaseError: Error | undefined;
-        try {
-            await tx.query("COMMIT");
-        } catch (error) {
-            try { await tx.query("ROLLBACK"); }
-            catch (rollbackError) { releaseError = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
-            throw error;
-        } finally {
-            (tx as pg.PoolClient).release(releaseError);
-        }
+        await tx.query("COMMIT");
     }
 
     protected async rollbackTransaction(tx: PoolClient): Promise<void> {
-        let releaseError: Error | undefined;
-        try {
-            await tx.query("ROLLBACK");
-        } catch (error) {
-            releaseError = error instanceof Error ? error : new Error(String(error));
-            throw error;
-        } finally {
-            (tx as pg.PoolClient).release(releaseError);
-        }
+        await tx.query("ROLLBACK");
+    }
+
+    protected async releaseTransaction(tx: PoolClient, failed: boolean): Promise<void> {
+        (tx as pg.PoolClient).release(failed ? new Error("Transaction completion failed") : undefined);
     }
 
     protected async createSavepoint(tx: PoolClient, name: string): Promise<void> {
