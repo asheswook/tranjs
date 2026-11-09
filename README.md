@@ -123,10 +123,6 @@ MySQL is supported the same way, but Hyperdrive ignores MySQL isolation levels, 
 - [Writing your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
 
-## Upgrading from 1.0.x
-
-1.1.0 changed several behaviours to match Spring, notably the rollback-only rule above. See the [1.1.0 release notes](https://github.com/asheswook/tranjs/releases/tag/%40tranjs/core%401.1.0) before upgrading.
-
 ## Contributing
 
 Issues and pull requests are welcome. To run the tests locally:
