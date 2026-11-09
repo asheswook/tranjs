@@ -8,6 +8,7 @@ import {
     runInTransaction,
     TransactionContextMixingError,
     TransactionTimeoutError,
+    UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
 import { ctx, MySQLTransactionManager, useMySQLTransactionManager } from "../src";
@@ -191,14 +192,62 @@ describe("MySQL driver (real database)", () => {
                 expect(first).toBeGreaterThan(second);
                 expect(first).toBeLessThanOrEqual(1000);
                 expect(config.timeout).toBe(5000);
-                await ctx().query({ ...config, timeout: 200 }, [44]);
-                expect((query.mock.calls[1][0] as any).timeout).toBe(200);
+                const shorter = { ...config, timeout: 200 };
+                await ctx().query(shorter, [44]);
+                expect((query.mock.calls[1][0] as any).timeout).toBeGreaterThan(200);
+                expect((query.mock.calls[1][0] as any).timeout).toBeLessThanOrEqual(second);
+                expect(shorter.timeout).toBe(200);
                 expect(ctx().threadId).toBe(connection.threadId);
                 const ping = ctx().ping;
                 await ping();
             } finally { query.mockRestore(); execute.mockRestore(); }
         }, { timeout: 1000 });
     });
+
+    it.each(["query", "execute"] as const)("passes %s options through untouched without a deadline", async method => {
+        await runInTransaction(async () => {
+            const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
+            const operation = jest.spyOn(connection, method);
+            const config = { sql: "SELECT ? AS value", timeout: 200, rowsAsArray: true };
+            const values = [42];
+            try {
+                const [rows] = await (method === "query" ? ctx().query(config, values) : ctx().execute(config, values));
+                expect(rows).toEqual([[42]]);
+                expect(operation.mock.calls[0][0]).toBe(config);
+                expect(operation.mock.calls[0][1]).toBe(values);
+                expect(config.timeout).toBe(200);
+            } finally { operation.mockRestore(); }
+        });
+    });
+
+    it.each(["query", "execute"] as const)(
+        "translates an early %s driver timer, but preserves network errors after the deadline", async method => {
+            const now = Date.now();
+            const clock = jest.spyOn(Date, "now").mockReturnValue(now);
+            try {
+                for (const timer of [true, false]) {
+                    clock.mockReturnValue(now);
+                    const error = Object.assign(new Error(timer ? "Query inactivity timeout" : "connection reset"), {
+                        code: timer ? "PROTOCOL_SEQUENCE_TIMEOUT" : "ECONNRESET",
+                    });
+                    await expect(runInTransaction(async () => {
+                        const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
+                        const operation = jest.spyOn(connection, method).mockImplementationOnce((() => {
+                            if (!timer) clock.mockReturnValue(now + 1001);
+                            return Promise.reject(error);
+                        }) as any);
+                        try {
+                            const result = method === "query" ? ctx().query("SELECT 1") : ctx().execute("SELECT 1");
+                            if (timer) {
+                                await expect(result).rejects.toThrow(TransactionTimeoutError);
+                                expect(Date.now()).toBe(now); // Timer fired before the wall-clock deadline.
+                            } else await expect(result).rejects.toBe(error);
+                        } finally { operation.mockRestore(); }
+                    }, { timeout: 1000 })).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
+                }
+            } finally { clock.mockRestore(); }
+        },
+    );
 
     it("validates isolation before acquiring a connection, including direct driver use", async () => {
         const getConnection = jest.spyOn(pool, "getConnection");

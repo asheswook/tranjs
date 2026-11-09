@@ -47,22 +47,18 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
                 if (property !== "query") return typeof value === "function" ? value.bind(target) : value;
                 return (...args: any[]) => {
                     const remaining = this.checkDeadline();
-                    if (remaining === undefined) return value.apply(target, args);
+                    // Submittables own their event/cursor lifecycle: do not inject pg's read timer
+                    // or intercept their callbacks/results. The owner checks the deadline at commit.
+                    if (remaining === undefined || typeof args[0]?.submit === "function") return value.apply(target, args);
                     const config = args[0];
-                    const timeout = typeof config?.query_timeout === "number" && config.query_timeout > 0
-                        ? Math.min(config.query_timeout, remaining) : remaining;
                     // pg supports query_timeout at runtime, though QueryConfig's types omit it.
-                    args[0] = typeof config === "string" ? { text: config, query_timeout: timeout }
-                        : typeof config?.submit === "function"
-                            ? new Proxy(config, { get: (query, key) => key === "query_timeout" ? timeout : Reflect.get(query, key) })
-                            : { ...config, query_timeout: timeout };
-                    const deadlineBound = timeout === remaining;
+                    args[0] = typeof config === "string" ? { text: config, query_timeout: remaining }
+                        : { ...config, query_timeout: remaining };
                     const deadlineError = (error: unknown) => {
                         if (!error) return error;
-                        if (deadlineBound && error instanceof Error && error.message === "Query read timeout") {
+                        if (error instanceof Error && error.message === "Query read timeout") {
                             return this.expireTransaction() ?? error;
                         }
-                        try { this.checkDeadline(); } catch (timeoutError) { return timeoutError; }
                         return error;
                     };
                     const last = args.length - 1;

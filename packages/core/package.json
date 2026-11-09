@@ -23,7 +23,8 @@
   },
   "main": "./dist/index.js",
   "exports": {
-    ".": "./dist/index.js"
+    ".": "./dist/index.js",
+    "./dist/asyncLocal": "./dist/asyncLocal.js"
   },
   "files": [
     "dist",

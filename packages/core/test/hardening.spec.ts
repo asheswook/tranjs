@@ -177,7 +177,7 @@ describe("transaction hardening", () => {
         expect(manager.events).toEqual(["begin:1", "rollback:1"]);
     });
 
-    it.each(["commit", "rollback", "commit failure", "rollback failure"])(
+    it.each(["success", "callback throws", "rollback throws", "commit throws", "timeout", "rollback-only", "afterCommit throws"])(
         "releases exactly once after %s with the completion failure flag", async path => {
             class ReleasingManager extends RecordingManager {
                 protected async releaseTransaction(tx: Tx, failed: boolean) {
@@ -185,18 +185,28 @@ describe("transaction hardening", () => {
                 }
             }
             const releasing = new ReleasingManager();
+            useTransactionManager(releasing);
             releasing.setLogger(logger());
-            if (path === "commit failure") releasing.commitError = new Error("commit failed");
-            if (path === "rollback failure") releasing.rollbackError = new Error("rollback failed");
-            const result = releasing.executeTransaction(Propagation.REQUIRED, () => {
-                if (path.startsWith("rollback")) throw new Error("application error");
-            });
-            if (path === "commit") await expect(result).resolves.toBeUndefined();
+            let now = 100;
+            jest.spyOn(Date, "now").mockImplementation(() => now);
+            if (path === "commit throws") releasing.commitError = new Error("commit failed");
+            if (path === "rollback throws") releasing.rollbackError = new Error("rollback failed");
+            const result = releasing.executeTransaction(Propagation.REQUIRED, async () => {
+                if (path === "callback throws" || path === "rollback throws") throw new Error("application error");
+                if (path === "timeout") now += 11;
+                if (path === "rollback-only") {
+                    await releasing.executeTransaction(Propagation.REQUIRED, () => { throw new Error("joined"); }).catch(() => {});
+                }
+                if (path === "afterCommit throws") afterCommit(() => { throw new Error("hook"); });
+            }, path === "timeout" ? { timeout: 10 } : undefined);
+            if (path === "success") await expect(result).resolves.toBeUndefined();
             else await expect(result).rejects.toThrow();
+            const commits = ["success", "commit throws", "afterCommit throws"].includes(path);
+            const failed = path === "commit throws" || path === "rollback throws";
             expect(releasing.events).toEqual([
-                "begin:1", path.startsWith("commit") ? "commit:1" : "rollback:1",
-                `release:1:${path.endsWith("failure")}`,
+                "begin:1", commits ? "commit:1" : "rollback:1", `release:1:${failed}`,
             ]);
+            expect(releasing.events.filter(event => event.startsWith("release:"))).toHaveLength(1);
         },
     );
 
@@ -298,6 +308,60 @@ describe("transaction hardening", () => {
         expect(oldManager.events).toEqual(["begin:1", "commit:1"]);
     });
 
+    it("commits the outer after a NESTED failure originating in an inner REQUIRED", async () => {
+        const error = new Error("joined inside nested");
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await expect(manager.executeTransaction(Propagation.NESTED, () =>
+                manager.executeTransaction(Propagation.REQUIRED, () => { throw error; }),
+            )).rejects.toBe(error);
+        });
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "commit:1",
+        ]);
+    });
+
+    it("rolls back the savepoint and throws UnexpectedRollbackError when NESTED catches a joined failure", async () => {
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await expect(manager.executeTransaction(Propagation.NESTED, async () => {
+                await manager.executeTransaction(Propagation.REQUIRED, () => {
+                    throw new Error("caught in nested");
+                }).catch(() => {});
+            })).rejects.toThrow(UnexpectedRollbackError);
+        });
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "commit:1",
+        ]);
+    });
+
+    it("clears even pre-existing outer rollback-only on successful savepoint rollback, matching Spring", async () => {
+        const error = new Error("nested failure");
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, () => {
+                throw new Error("outer already rollback-only");
+            }).catch(() => {});
+            await expect(manager.executeTransaction(Propagation.NESTED, () => { throw error; })).rejects.toBe(error);
+        });
+        // Spring's rollbackToSavepoint resets the whole connection flag, not just changes since the savepoint.
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "commit:1",
+        ]);
+    });
+
+    it("re-detects an expired deadline at owner commit after NESTED rollback clears rollback-only", async () => {
+        let now = 100;
+        jest.spyOn(Date, "now").mockImplementation(() => now);
+        await expect(manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await expect(manager.executeTransaction(Propagation.NESTED, () => {
+                now += 11;
+                manager.checkDeadline();
+            })).rejects.toThrow(TransactionTimeoutError);
+            expect(AsyncLocal.Frame!.txs.get(manager)!.rollbackOnly).toBe(false);
+        }, { timeout: 10 })).rejects.toThrow(TransactionTimeoutError);
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "rollback:1",
+        ]);
+    });
+
     it("rejects concurrent NESTED siblings in Promise.all before creating a second savepoint", async () => {
         await manager.executeTransaction(Propagation.REQUIRED, async () => {
             const results = await Promise.all([1, 2].map(() =>
@@ -380,6 +444,18 @@ describe("transaction hardening", () => {
         const options = { isolationLevel: IsolationLevel.SERIALIZABLE, readOnly: true, timeout: 1000 };
         await manager.executeTransaction(Propagation.REQUIRED, () => "ok", options);
         expect(manager.options).toEqual(options);
+    });
+
+    it.each([NaN, Infinity, -1, 2147483648])("rejects invalid timeout %s before beginning", async timeout => {
+        const callback = jest.fn();
+        await expect(manager.executeTransaction(Propagation.REQUIRED, callback, { timeout })).rejects.toThrow(RangeError);
+        expect(callback).not.toHaveBeenCalled();
+        expect(manager.events).toEqual([]);
+    });
+
+    it("accepts the maximum timer-safe timeout", async () => {
+        await manager.executeTransaction(Propagation.REQUIRED, () => undefined, { timeout: 2147483647 });
+        expect(manager.events).toEqual(["begin:1", "commit:1"]);
     });
 
     it("rolls back and runs rollback hooks when elapsed time exceeds timeout", async () => {
@@ -467,11 +543,11 @@ describe("transaction hardening", () => {
         expect(manager.events.filter(event => event.startsWith("commit"))).toHaveLength(3);
     });
 
-    it("runs afterCommit sequentially after commit, logs errors, and registers NESTED hooks on the outer", async () => {
+    it("runs afterCommit sequentially after commit, propagates the first error, and stops remaining hooks", async () => {
         const log = logger();
         manager.setLogger(log);
         const hookError = new Error("hook");
-        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+        await expect(manager.executeTransaction(Propagation.REQUIRED, async () => {
             afterCommit(async () => {
                 expect(manager.getCurrentTransaction()).toBeUndefined();
                 await Promise.resolve();
@@ -484,11 +560,11 @@ describe("transaction hardening", () => {
             expect(manager.events).not.toContain("nested");
             afterCommit(() => { throw hookError; });
             afterCommit(() => { manager.events.push("last"); });
-        });
+        })).rejects.toBe(hookError);
         expect(manager.events).toEqual([
-            "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "commit:1", "first", "nested", "last",
+            "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "commit:1", "first", "nested",
         ]);
-        expect(log.error).toHaveBeenCalledWith("Transaction synchronization failed", hookError);
+        expect(log.error).not.toHaveBeenCalled();
     });
 
     it("runs afterRollback sequentially after physical rollback, including hooks from failed NESTED scopes", async () => {

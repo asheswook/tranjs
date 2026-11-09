@@ -155,8 +155,8 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             if (options?.isolationLevel !== undefined && !Object.values(IsolationLevel).includes(options.isolationLevel)) {
                 throw new InvalidIsolationLevelError(options.isolationLevel);
             }
-            if (options?.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout < 0)) {
-                throw new RangeError("Transaction timeout must be a non-negative finite number");
+            if (options?.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout < 0 || options.timeout > 2147483647)) {
+                throw new RangeError("Transaction timeout must be a finite number between 0 and 2147483647 milliseconds");
             }
             const started = Date.now();
             const context = await this.beginTransaction(options);
@@ -186,7 +186,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                         throw error;
                     }
                     state.active = false;
-                    await this.inScope(null, () => this.synchronize(state.afterCommit));
+                    await this.inScope(null, async () => {
+                        for (const hook of state.afterCommit) await hook();
+                    });
                     return result;
                 } finally {
                     state.active = false;
@@ -206,9 +208,16 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                 const name = `tranjs_sp_${++state.savepointCounter}`;
                 await this.createSavepoint(tx, name);
                 let result: R;
-                try { result = await callback(tx); }
+                try {
+                    result = await callback(tx);
+                    if (state.rollbackOnly) throw new UnexpectedRollbackError();
+                }
                 catch (error) {
-                    try { await this.rollbackToSavepoint(tx, name); }
+                    try {
+                        await this.rollbackToSavepoint(tx, name);
+                        // Spring resets the entire connection flag, including pre-existing rollback-only.
+                        state.rollbackOnly = false;
+                    }
                     catch (rollbackError) {
                         state.rollbackOnly = true;
                         this.logError("Savepoint rollback failed", rollbackError);

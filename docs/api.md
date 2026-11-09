@@ -65,7 +65,9 @@ class MyService {
 
 Propagation is tracked per datasource. A `REQUIRED` method on datasource B never joins a transaction that is open on datasource A.
 
-Spring semantics apply: an error escaping a joined `REQUIRED`, `MANDATORY`, or `SUPPORTS` scope marks the physical transaction **rollback-only**, even if the caller catches it. The owner then rolls back and throws `UnexpectedRollbackError` instead of committing. A caught `REQUIRES_NEW` failure is independent; a caught `NESTED` failure that successfully rolls back to its savepoint does not mark the outer transaction. Errors caught inside the same method do not cross a transactional scope and do not mark rollback-only.
+Spring semantics apply: an error escaping a joined `REQUIRED`, `MANDATORY`, or `SUPPORTS` scope marks the physical transaction **rollback-only**, even if the caller catches it. Unless a successful savepoint rollback clears that flag, the owner then rolls back and throws `UnexpectedRollbackError` instead of committing. A caught `REQUIRES_NEW` failure is independent. Errors caught inside the same method do not cross a transactional scope and do not mark rollback-only.
+
+A successful `NESTED` rollback to a savepoint clears the **entire** `rollbackOnly` flag, including a flag set before the nested scope began. If the nested callback returns normally while rollback-only, core rolls back to the savepoint, clears the flag, and throws `UnexpectedRollbackError`. The outer callback can catch this error and commit. Clearing the flag does not extend a deadline: the owner still rechecks it before commit and rolls back if it has expired.
 
 ## Isolation Level, Read-only, Timeout
 
@@ -78,9 +80,10 @@ import { IsolationLevel } from "@tranjs/core";
 These options apply only when a new physical transaction begins (`REQUIRED` without an existing transaction, `REQUIRES_NEW`, `NESTED` without an existing transaction). A method that joins an existing transaction inherits its settings.
 
 `timeout` (ms):
-- A non-negative finite duration establishing a deadline for the physical transaction (including begin). Joined and savepoint scopes inherit it; `REQUIRES_NEW` has its own deadline.
+- A finite, non-negative duration no greater than `2147483647` ms, establishing a deadline for the physical transaction (including begin). Joined and savepoint scopes inherit it; `REQUIRES_NEW` has its own deadline.
 - Before every `ctx().query()` (and MySQL `ctx().execute()`), the deadline is checked. Once expired, it marks rollback-only and throws `TransactionTimeoutError` without sending the query.
-- The remaining duration, not the original duration, is passed as PostgreSQL `query_timeout` or MySQL query/execute `timeout`. Existing shorter per-query timeouts are preserved. Use the driver's `ctx()` wrapper rather than a raw connection to get these checks.
+- For ordinary queries, the remaining duration, not the original duration, is passed as PostgreSQL `query_timeout` or MySQL query/execute `timeout`. This always overrides user per-query timeouts and pool defaults, even shorter ones. Without a transaction deadline, user options are untouched. Use the driver's `ctx()` wrapper rather than a raw connection to get these checks.
+- PostgreSQL Submittables (`pg.Query`, `pg-query-stream`, `pg-cursor`) are checked only before dispatch and passed through untouched: no per-query timeout is injected and no execution or stream interception is added. Consume streams inside the transactional callback; the owner still checks the deadline before commit.
 - These are client-side query timeouts, not server-side cancellation. A running statement can finish before the queued rollback completes; transaction completion may therefore take longer than the deadline. PostgreSQL no longer sets `SET LOCAL statement_timeout` at begin.
 - The deadline is also checked after the callback before commit. It does not interrupt arbitrary JavaScript or other I/O. If rollback fails, `TransactionSystemError` is thrown instead.
 
@@ -114,7 +117,8 @@ async createOrder() {
 ```
 
 - Hooks attach to the current physical transaction of the datasource (2nd argument, default datasource if omitted). Inside `NESTED`, they attach to the outer transaction.
-- They run in registration order after commit or rollback finishes. A hook that throws is logged and does not affect the result.
+- `afterCommit` hooks run sequentially in registration order after commit finishes. The first error stops later hooks and propagates to the caller, but the transaction remains committed. Core does not roll back or run `afterRollback` hooks, and calls `releaseTransaction(tx, false)` exactly once.
+- `afterRollback` hooks run in registration order after rollback finishes. Their errors are logged and swallowed, allowing later hooks to run.
 - With no active transaction, `afterCommit` runs the function immediately and `afterRollback` does nothing.
 
 ## Using Multiple Datasources
@@ -137,10 +141,11 @@ The same works with `useTransactionManager(manager, name)` and `getTransactionMa
 
 ## Error Handling
 
-- If an owning callback throws and rollback succeeds, **the original error** is rethrown. Joined failures mark rollback-only before rethrowing; catching one in the owner does not restore commit eligibility.
+- If an owning callback throws and rollback succeeds, **the original error** is rethrown. Joined failures mark rollback-only before rethrowing; catching one alone does not restore commit eligibility (a successful `NESTED` savepoint rollback clears the flag as described above).
 - If an owner finishes normally but is rollback-only, it rolls back, runs `afterRollback` hooks, and throws `UnexpectedRollbackError`. Use `REQUIRES_NEW` for independent work, or `NESTED` for savepoint-isolated failures; do not catch joined failures expecting to commit.
 - If rollback fails after an application error, timeout, or rollback-only decision, `TransactionSystemError` is thrown with message `"Transaction rollback failed after application error"`, `cause` containing the rollback error, and `applicationError` containing the original error (`TransactionTimeoutError` / `UnexpectedRollbackError` for those decisions). The original error is also logged via `manager.setLogger(logger)` (`console` by default). Rollback hooks still run.
 - If `COMMIT` fails, core does **not** attempt rollback. It runs `afterRollback` hooks and rethrows the commit error; these hooks do not guarantee the database rolled back a failed commit. Native drivers dispose of the connection because its outcome may be uncertain. Do not blindly retry non-idempotent work.
+- If an `afterCommit` hook fails, its error propagates without rollback or `afterRollback` hooks. The transaction is already committed and is released once with `failed=false`.
 - Physical completion always calls the optional driver `releaseTransaction(tx, failed)` hook exactly once. Native drivers release on successful completion and dispose on failed commit/rollback.
 
 ## Exceptions
@@ -156,7 +161,7 @@ The same works with `useTransactionManager(manager, name)` and `getTransactionMa
   - Thrown when a transaction exceeds its `timeout`. The transaction is rolled back.
 
 - **UnexpectedRollbackError**
-  - Thrown when a rollback-only transaction's owner attempts to commit after catching a joined failure (or a savepoint rollback failed).
+  - Thrown when a rollback-only transaction's owner attempts to commit after catching a joined failure (or a savepoint rollback failed). Also thrown when a `NESTED` callback returns while rollback-only; successful rollback to its savepoint clears the flag, so the outer callback may catch the error and commit, subject to the owner's deadline check.
 
 - **TransactionSystemError**
   - Thrown when physical rollback fails; inspect `cause` and `applicationError` for both errors.

@@ -51,15 +51,11 @@ export class MySQLTransactionManager extends PlatformTransactionManager<PoolConn
                     const remaining = this.checkDeadline();
                     if (remaining === undefined) return value.apply(target, args);
                     const config = typeof args[0] === "string" ? { sql: args[0] } : args[0];
-                    const timeout = typeof config.timeout === "number" && config.timeout > 0
-                        ? Math.min(config.timeout, remaining) : remaining;
-                    args[0] = { ...config, timeout };
-                    const deadlineBound = timeout === remaining;
+                    args[0] = { ...config, timeout: remaining };
                     return value.apply(target, args).catch((error: any) => {
-                        if (deadlineBound && error?.code === "PROTOCOL_SEQUENCE_TIMEOUT") {
+                        if (error?.code === "PROTOCOL_SEQUENCE_TIMEOUT") {
                             throw this.expireTransaction() ?? error;
                         }
-                        this.checkDeadline();
                         throw error;
                     });
                 };

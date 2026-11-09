@@ -1,4 +1,6 @@
-import { Pool, PoolClient as NativeClient } from "pg";
+import { Pool, PoolClient as NativeClient, Query } from "pg";
+import QueryStream = require("pg-query-stream");
+import { EventEmitter } from "node:events";
 import {
     IsolationLevel,
     InvalidIsolationLevelError,
@@ -8,6 +10,7 @@ import {
     runInTransaction,
     TransactionContextMixingError,
     TransactionTimeoutError,
+    UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
 import { ctx, PostgreSQLTransactionManager, usePostgreSQLTransactionManager } from "../src";
@@ -143,12 +146,135 @@ describe("PostgreSQL driver (real database)", () => {
                 expect(config.query_timeout).toBe(5000);
                 const shorter = { ...config, query_timeout: 200 };
                 await ctx().query(shorter);
-                expect((query.mock.calls[2][0] as any).query_timeout).toBe(200);
+                expect((query.mock.calls[2][0] as any).query_timeout).toBeGreaterThan(200);
+                expect((query.mock.calls[2][0] as any).query_timeout).toBeLessThanOrEqual(second);
+                expect(shorter.query_timeout).toBe(200);
                 const escape = ctx().escapeIdentifier;
                 expect(escape('a"b')).toBe('"a""b"');
             } finally { query.mockRestore(); }
         }, { timeout: 1000 });
     });
+
+    it("passes query options and callbacks through untouched without a deadline", async () => {
+        await runInTransaction(async () => {
+            const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
+            const query = jest.spyOn(connection, "query");
+            const config = { text: "SELECT 42 AS value", query_timeout: 200 };
+            try {
+                await ctx().query(config);
+                expect(query.mock.calls[0][0]).toBe(config);
+                await new Promise<void>((resolve, reject) => {
+                    const callback = (error: Error | null) => error ? reject(error) : resolve();
+                    ctx().query(config, callback);
+                    expect(query.mock.calls[1][0]).toBe(config);
+                    expect(query.mock.calls[1][1]).toBe(callback);
+                });
+                expect(config.query_timeout).toBe(200);
+            } finally { query.mockRestore(); }
+        });
+    });
+
+    it.each(["promise", "callback", "config callback"])(
+        "translates an early driver timer in %s queries, but preserves network errors after the deadline", async format => {
+            const now = Date.now();
+            const clock = jest.spyOn(Date, "now").mockReturnValue(now);
+            try {
+                for (const timer of [true, false]) {
+                    clock.mockReturnValue(now);
+                    const error = timer ? new Error("Query read timeout")
+                        : Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
+                    await expect(runInTransaction(async () => {
+                        const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
+                        const query = jest.spyOn(connection, "query").mockImplementationOnce(((...args: any[]) => {
+                            if (!timer) clock.mockReturnValue(now + 1001);
+                            const callback = typeof args[args.length - 1] === "function"
+                                ? args[args.length - 1] : args[0].callback;
+                            if (callback) { callback(error); return; }
+                            return Promise.reject(error);
+                        }) as any);
+                        try {
+                            const result = format === "promise" ? ctx().query("SELECT 1")
+                                : new Promise((resolve, reject) => {
+                                    const callback = (error: Error | null, result: unknown) => error ? reject(error) : resolve(result);
+                                    if (format === "callback") ctx().query("SELECT 1", callback);
+                                    else ctx().query({ text: "SELECT 1", callback } as any);
+                                });
+                            if (timer) {
+                                await expect(result).rejects.toThrow(TransactionTimeoutError);
+                                expect(Date.now()).toBe(now); // Timer fired before the wall-clock deadline.
+                            } else await expect(result).rejects.toBe(error);
+                        } finally { query.mockRestore(); }
+                    }, { timeout: 1000 })).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
+                }
+            } finally { clock.mockRestore(); }
+        },
+    );
+
+    it("consumes a QueryStream inside the callback with a deadline and no lingering read timer", async () => {
+        const streamPool = new Pool({ connectionString: url, max: 1, idleTimeoutMillis: 0 });
+        usePostgreSQLTransactionManager(streamPool);
+        try {
+            await runInTransaction(async () => {
+                const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
+                const query = jest.spyOn(connection, "query");
+                const timers = jest.spyOn(global, "setTimeout");
+                const stream = new QueryStream("SELECT generate_series(1, 3) AS value");
+                const submit = jest.spyOn(stream, "submit");
+                try {
+                    expect(ctx().query(stream)).toBe(stream);
+                    const rows = [];
+                    for await (const row of stream) rows.push(row);
+                    expect(rows).toEqual([{ value: 1 }, { value: 2 }, { value: 3 }]);
+                    expect(query.mock.calls[0][0]).toBe(stream);
+                    expect(submit).toHaveBeenCalledTimes(1);
+                    expect(timers).not.toHaveBeenCalled();
+                } finally {
+                    timers.mockRestore();
+                    query.mockRestore();
+                    submit.mockRestore();
+                    stream.destroy();
+                }
+            }, { timeout: 10000 });
+        } finally {
+            await streamPool.end();
+            usePostgreSQLTransactionManager(pool);
+        }
+    });
+
+    it.each(["QueryStream", "Query"])("preserves %s SQL errors delivered by error events", async format => {
+        await expect(runInTransaction(async () => {
+            const submittable = format === "QueryStream" ? new QueryStream("SELECT FROM") : new Query("SELECT FROM");
+            await new Promise<void>((resolve, reject) => {
+                (submittable as EventEmitter).once("error", reject);
+                (submittable as EventEmitter).once("end", resolve);
+                if (submittable instanceof QueryStream) submittable.resume();
+                expect(ctx().query(submittable)).toBe(submittable);
+            });
+        }, { timeout: 1000 })).rejects.toMatchObject({ code: "42601" });
+    });
+
+    it.each(["QueryStream", "Query", "custom"])(
+        "synchronously rejects an expired %s before native query or submit dispatch", async format => {
+            await expect(runInTransaction(async () => {
+                const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
+                const submittable = format === "QueryStream" ? new QueryStream("SELECT 1")
+                    : format === "Query" ? new Query("SELECT 1") : { submit: jest.fn() };
+                const submit = jest.spyOn(submittable, "submit");
+                const query = jest.spyOn(connection, "query");
+                const clock = jest.spyOn(Date, "now").mockReturnValue(Date.now() + 2000);
+                try {
+                    expect(() => ctx().query(submittable)).toThrow(TransactionTimeoutError);
+                    expect(query).not.toHaveBeenCalled();
+                    expect(submit).not.toHaveBeenCalled();
+                } finally {
+                    clock.mockRestore(); // Expiration still marks the owner rollback-only after the clock is restored.
+                    query.mockRestore();
+                    submit.mockRestore();
+                    if (submittable instanceof QueryStream) submittable.destroy();
+                }
+            }, { timeout: 1000 })).rejects.toThrow(UnexpectedRollbackError);
+        },
+    );
 
     it("cleans up a real deferred-constraint COMMIT failure exactly once", async () => {
         let release: jest.SpyInstance | undefined;
