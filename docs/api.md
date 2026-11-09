@@ -161,7 +161,7 @@ class ReportService {
 
 ## Errors
 
-Classes are exported by `@tranjs/core` unless a driver package is named below. Database and hook errors also propagate as described above.
+All classes are exported by `@tranjs/core` except where a driver package is named.
 
 | Class | When thrown | Notes |
 |---|---|---|

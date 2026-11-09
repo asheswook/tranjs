@@ -45,7 +45,7 @@ class AccountService {
 - 🗄️ **Multiple datasources**, each with independent transactions
 - 🪝 **`afterCommit` / `afterRollback` hooks**
 - 🐘 **PostgreSQL and MySQL** through `pg` and `mysql2`, or [your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
-- ☁️ **Runs on Node.js, Bun, Deno and Cloudflare Workers** (see below)
+- ☁️ **Runs on Node.js, Bun, Deno and Cloudflare Workers**
 - ⚡ **TypeScript native**, no runtime dependencies in the core package
 
 ## Install
@@ -117,12 +117,10 @@ async placeOrder(order: Order) {
 |---|---|---|
 | Node.js | ✅ Supported | Pool mode (`usePostgreSQLTransactionManager`, `useMySQLTransactionManager`) |
 | Bun | ✅ Supported | Same as Node.js |
-| Deno | ✅ Supported | `npm:` specifiers; set `experimentalDecorators` in `deno.json` |
+| Deno | ✅ Supported | Same as Node.js, with `npm:` specifiers and `experimentalDecorators` in `deno.json` |
 | AWS Lambda, Vercel Functions (Node.js runtime) | ✅ Supported | Pool mode, registered once at module scope |
 | Cloudflare Workers | ✅ Supported | Connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) |
 | Edge runtimes without TCP sockets (e.g. Vercel Edge) | ❌ Not supported | The drivers need TCP connections |
-
-Node.js, Bun, Deno and Cloudflare Workers are tested. AWS Lambda and Vercel Functions run Node.js, so they use the Node.js setup, but they are not tested directly. Details: [Supported runtimes](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#supported-runtimes).
 
 ### Cloudflare Workers
 

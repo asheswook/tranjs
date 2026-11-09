@@ -58,14 +58,14 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 ## Supported runtimes
 
-| Runtime | Support and verification |
+| Runtime | Setup |
 |---|---|
-| Node.js | Supported, primary target. |
-| Bun 1.3 | Verified locally with the packed packages (pg pool and per-transaction mode, mysql2 pool; 50 concurrent transactions, isolation, NESTED, rollback-only, timeout). |
-| Deno 2.9 | Verified locally via `npm:` specifiers with the published 1.1.0 packages (same checks; needs `experimentalDecorators` in deno.json, which Deno marks deprecated). |
-| AWS Lambda / Vercel Functions (Node runtime) / other long-lived Node hosts | Use the pool mode and register once at module scope. Not tested on those platforms; this follows from them running Node.js. |
-| Cloudflare Workers | Supported through the connection-per-transaction mode + Hyperdrive, verified on real Workers. |
-| Edge runtimes without TCP sockets (e.g. Vercel Edge) | Not supported; the drivers need TCP. |
+| Node.js | Pool mode |
+| Bun | Pool mode |
+| Deno | Pool mode, imported with `npm:` specifiers. Set `"experimentalDecorators": true` in `deno.json` to use `@Transactional`. |
+| AWS Lambda, Vercel Functions (Node.js runtime) | Pool mode, registered once at module scope |
+| Cloudflare Workers | [Connection-per-transaction mode with Hyperdrive](#cloudflare-workers--hyperdrive) |
+| Runtimes without TCP sockets (e.g. Vercel Edge) | Not supported |
 
 ## Cloudflare Workers + Hyperdrive
 
@@ -115,26 +115,15 @@ useMySQLConnectionPerTransaction(() => ({
 }));
 ```
 
-The following Hyperdrive MySQL limitations were verified on Workers with identical SQL, independently of the packaged manager:
+Hyperdrive limits what MySQL can do:
 
-| Limitation | Consequence |
+| Limitation | What to do |
 |---|---|
-| Isolation settings are silently ignored | Neither `SET TRANSACTION` nor `SET SESSION` changes isolation. Setting it after `START` fails. `SELECT @@transaction_isolation` returns an empty result set, so it cannot detect this limitation. |
-| `START TRANSACTION READ ONLY` blocks writes but drops the connection on a violation | The error is `PROTOCOL_CONNECTION_LOST`, not `ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`; subsequent rollback also fails. |
-| Protocol prepared statements are unsupported | Use `ctx().query()`, not `ctx().execute()`. The latter fails with `ER_NO Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages`. |
-| No multi-statement queries | Issue statements separately. |
+| Isolation levels are ignored without an error, and this can't be detected at runtime | This mode rejects an explicit `isolationLevel` with `UnsupportedIsolationLevelError` before connecting. Without one, the server default (usually `REPEATABLE READ`) applies. |
+| A write in a `readOnly` transaction drops the connection instead of returning a MySQL error | The write is still blocked. The error is `TransactionSystemError` with `PROTOCOL_CONNECTION_LOST` in `applicationError`. |
+| Prepared statements aren't supported | Use `ctx().query()`, not `ctx().execute()`. |
+| No multi-statement queries | Send statements separately. |
 | No `USE` | Set the database in the connection config. |
-
-`MySQLConnectionPerTransactionManager` therefore rejects explicit isolation levels with `UnsupportedIsolationLevelError` **before connecting** by default. Without an explicit level, the server default applies; do not assume stronger guarantees. Hyperdrive cannot be detected reliably at runtime.
-
-The packaged manager, registered with `useMySQLConnectionPerTransaction` and used through `@Transactional`, was also verified on Cloudflare Workers + Hyperdrive (MySQL 8):
-
-| Check | Result |
-|---|---|
-| 1, 50, and 100 concurrent requests | All succeeded; connection id stayed constant within each transaction. |
-| Commit, rollback, `NESTED`, `REQUIRES_NEW`, deadline timeouts, `afterCommit` errors, rollback-only | Same behaviour as Node: `TransactionTimeoutError`, propagated hook errors, and `UnexpectedRollbackError` where applicable. |
-| Explicit isolation level | Rejected by default as described above. |
-| `readOnly` write | Blocked; nothing persisted. Failed rollback surfaced as `TransactionSystemError` (`"Transaction rollback failed after application error"`), with `PROTOCOL_CONNECTION_LOST` in `applicationError`. |
 
 For **direct MySQL connections only**, opt into applying isolation settings:
 
