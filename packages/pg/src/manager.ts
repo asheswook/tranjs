@@ -56,10 +56,13 @@ export class PostgreSQLTransactionManager extends PlatformTransactionManager<Poo
                         : typeof config?.submit === "function"
                             ? new Proxy(config, { get: (query, key) => key === "query_timeout" ? timeout : Reflect.get(query, key) })
                             : { ...config, query_timeout: timeout };
+                    const deadlineBound = timeout === remaining;
                     const deadlineError = (error: unknown) => {
-                        if (error) {
-                            try { this.checkDeadline(); } catch (timeoutError) { return timeoutError; }
+                        if (!error) return error;
+                        if (deadlineBound && error instanceof Error && error.message === "Query read timeout") {
+                            return this.expireTransaction() ?? error;
                         }
+                        try { this.checkDeadline(); } catch (timeoutError) { return timeoutError; }
                         return error;
                     };
                     const last = args.length - 1;

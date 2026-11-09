@@ -88,6 +88,17 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         return remaining;
     }
 
+    /**
+     * Drivers call this when a per-query timeout derived from the transaction deadline fires.
+     * Timers may fire marginally before Date.now() reaches the deadline, so this does not re-check the clock.
+     */
+    protected expireTransaction(): TransactionTimeoutError | undefined {
+        const state = this.currentState();
+        if (state?.deadline === undefined) return undefined;
+        state.rollbackOnly = true;
+        return new TransactionTimeoutError(state.timeout!);
+    }
+
     protected async createSavepoint(tx: Tx, name: string): Promise<void> {
         throw new NestedTransactionNotSupportedError();
     }
