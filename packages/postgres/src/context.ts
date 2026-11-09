@@ -3,12 +3,12 @@ import type postgres from "postgres" with { "resolution-mode": "import" };
 /**
  * The connection reserved for the current transaction, as returned by `ctx()`.
  *
- * It is postgres.js's common `ISql` interface (tagged queries, `unsafe`, helpers).
+ * It preserves postgres.js's reserved connection overloads (tagged queries, `unsafe`, helpers).
  * `begin`, `reserve`, `end`, `listen` and similar pool-level methods aren't part of it,
  * and it has no `release()` or dispose methods: TranJS releases the connection when the
  * transaction ends.
  */
-export type TransactionSql<T extends Record<string, unknown> = {}> = postgres.ISql<T> & ManagedMembers;
+export type TransactionSql<T extends Record<string, unknown> = {}> = postgres.ReservedSql<T> & ManagedMembers;
 
 /**
  * Members TranJS manages. They are typed `never` (and hidden at runtime), so calling them

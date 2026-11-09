@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Requires npm run build and a real PostgreSQL server (override with PG_URL).
+# Requires npm install, npm run build and PostgreSQL (override with PG_URL).
+# Each command tests both actual postgres.js majors, without replacing v4.
 # Examples:
 #   bash scripts/test/postgres-node-compat.sh --all
 #   bash scripts/test/postgres-node-compat.sh npx -y node@18
@@ -9,7 +10,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 run() {
-    "$@" --unhandled-rejections=strict "$script_dir/postgres-node-compat.cjs"
+    POSTGRES_MAJOR=4 "$@" --unhandled-rejections=strict "$script_dir/postgres-node-compat.cjs"
+    node "$script_dir/postgres-v3.cjs" --compat "$@"
 }
 
 if [[ "${1:-}" == "--all" ]]; then
