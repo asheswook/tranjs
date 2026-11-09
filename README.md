@@ -1,102 +1,144 @@
 # TranJS
 
 [![Test](https://github.com/asheswook/tranjs/actions/workflows/test.yml/badge.svg)](https://github.com/asheswook/tranjs/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/@tranjs/core)](https://www.npmjs.com/package/@tranjs/core)
 
-TranJS is a transaction management framework which provides declaretive transaction, without any ORMs. 
+Declarative transactions for Node.js without an ORM. You write SQL with your usual driver (`pg` or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
 
-It is designed to provide reliable and intuitive transaction management for mission-critical safety applications and general-purpose applications.
+```ts
+import { Transactional, Propagation } from "@tranjs/core";
+import { ctx } from "@tranjs/pg";
 
-## Features
-- ✅ **Declarative Transaction via Decorator** (`@Transactional`) or function (`runInTransaction`)
-- 🔁 **All 7 Spring Propagations** including `NESTED` (savepoint)
-- 🎛️ **Isolation level, read-only, timeout**
-- 🗄️ **Multiple datasources**
-- 🪝 **`afterCommit` / `afterRollback` hooks**
-- ⚡ **TypeScript Native**
-- 🛠️ **No Dependencies, Lightweight (15KB)**
-- 🚀 **Easy to Use, No Boilerplate Code**
-  
-## Getting Started
-* API Documentation is available at [here](/docs/api.md).
-* Native supported drivers are available at [here](/docs/drivers.md).
-* The [example](/examples) contains a simple example of how to use the TranJS framework.
-
-## Usage
-
-```typescript
-class MyService {
+class AccountService {
     @Transactional()
     async transfer(from: string, to: string, amount: number) {
-        await this.withdrawMoney("Jaewook", 100);
-        await this.depositMoney("Chansu", 100);
+        await this.withdraw(from, amount);
+        await this.deposit(to, amount);
+    }   // commits here, or rolls back both updates if anything threw
+
+    @Transactional(Propagation.MANDATORY)
+    private async withdraw(id: string, amount: number) {
+        await ctx().query("UPDATE accounts SET balance = balance - $1 WHERE id = $2", [amount, id]);
     }
 
     @Transactional(Propagation.MANDATORY)
-    private async depositMoney(userId: string, amount: number) {
-        console.log("Execute Query", userId, amount);
-        await ctx().execute("UPDATE user SET balance = balance + ? WHERE id = ?", [amount, userId]);
-    }
-
-    @Transactional(Propagation.MANDATORY)
-    private async withdrawMoney(userId: string, amount: number) {
-        console.log("Execute Query", userId, amount);
-        await ctx().execute("UPDATE user SET balance = balance - ? WHERE id = ?", [amount, userId]);
+    private async deposit(id: string, amount: number) {
+        await ctx().query("UPDATE accounts SET balance = balance + $1 WHERE id = $2", [amount, id]);
     }
 }
 ```
 
+`ctx()` returns the connection of the current transaction, so nested calls share it without passing it around.
+
+## Install
+
 ```bash
-Start Transaction (id: ae8wml5i78rt) # Transaction started at transfer()
-Execute Query Jaewook 100
-Execute Query Chansu 100
-Commit Transaction (id: ae8wml5i78rt) # Transaction committed when transfer() finished
+# PostgreSQL
+npm install @tranjs/core @tranjs/pg pg
+
+# MySQL
+npm install @tranjs/core @tranjs/mysql2 mysql2
 ```
 
-## Installation
+Enable decorators in `tsconfig.json`:
 
-It should be set up for the database you want to use. See [here](/docs/drivers.md).
+```json
+{ "compilerOptions": { "experimentalDecorators": true } }
+```
 
-> [!NOTE]
-> If the driver you want to use does not exist, [you can implement it on your own.](/docs/self-implement-guide.md)
+Register a transaction manager once at startup:
 
-## Behaviour changes in 1.1.0
+```ts
+import { Pool } from "pg";
+import { usePostgreSQLTransactionManager } from "@tranjs/pg";
 
-These intentional breaking behaviour changes align with Spring `@Transactional`:
+usePostgreSQLTransactionManager(new Pool({ connectionString: process.env.DATABASE_URL }));
+```
 
-- **Joined failures mark rollback-only.** An error escaping joined `REQUIRED`, `MANDATORY`, or `SUPPORTS` makes the owner roll back with `UnexpectedRollbackError`, even if it catches that error. Migrate catch-and-continue flows to `REQUIRES_NEW` for independent transactions or `NESTED` for savepoints. Locally caught errors are unaffected.
-- **Successful savepoint rollback clears rollback-only.** `NESTED` rollback to a savepoint resets the entire `rollbackOnly` flag, even if it was already set before entering the nested scope. If the nested callback returns while rollback-only, core rolls back to the savepoint, clears the flag, and throws `UnexpectedRollbackError`; the outer callback can catch it and commit. An expired deadline is still rechecked by the owner before commit.
-- **Rollback failure exposes both errors.** `TransactionSystemError.cause` is the rollback error and `.applicationError` is the original application/timeout/rollback-only error, which is also logged. Update error handlers that previously expected the original error after failed rollback.
-- **No rollback after failed commit.** Core runs rollback hooks, rethrows the commit error, and calls the optional `releaseTransaction(tx, failed)` exactly once. Native drivers dispose on failed commit/rollback. Custom drivers may move connection cleanup into the new hook, or keep cleanup inside `commitTransaction`/`rollbackTransaction` with the default no-op hook (never both). If your `commitTransaction` relied on core calling rollback after a failed commit, roll back inside `commitTransaction` instead. A failed commit can have an uncertain outcome; retry cautiously.
-- **Timeouts are deadlines.** `timeout` must be finite, nonnegative, and at most `2147483647` ms. Native `ctx()` query/execute calls check the remaining transaction budget and pass it as a per-query client timeout, always overriding user PostgreSQL `query_timeout` / MySQL `timeout` and pool defaults, even shorter ones. Without a transaction deadline, user options are untouched. PostgreSQL now uses `query_timeout`, not begin-time `SET LOCAL statement_timeout`. Use the driver `ctx()` wrapper rather than a raw connection. This does not cancel arbitrary JavaScript or guarantee server-side statement cancellation; rollback can finish after the deadline.
-- **PostgreSQL Submittables pass through untouched.** `pg.Query`, `pg-query-stream`, and `pg-cursor` get only a deadline check before dispatch, without per-query timeout injection or interception. The owner still checks before commit; consume streams inside the transactional callback.
-- **Commit-hook errors propagate after commit.** `afterCommit` hooks run sequentially and stop at the first error, which is propagated. The transaction remains committed: no rollback or `afterRollback` hooks run, and release happens once with `failed=false`. `afterRollback` errors remain logged and swallowed.
+```ts
+import { createPool } from "mysql2/promise";
+import { useMySQLTransactionManager } from "@tranjs/mysql2";
 
-See [API error handling and timeout details](/docs/api.md) and the [custom driver migration guide](/docs/self-implement-guide.md).
+useMySQLTransactionManager(createPool(process.env.DATABASE_URL!));
+```
 
-## Contribute
+Register managers once, not inside a request handler. Re-registering per request breaks concurrent requests.
 
-TranJS welcomes contributions from the community to enhance its functionality and usability. Here’s how you can contribute:
+## Features
 
-1. **Report Issues**  
-   If you encounter bugs or have suggestions for improvements, feel free to open an issue in the repository.
+- **`@Transactional` or `runInTransaction`**: use the decorator on class methods, or wrap any function.
+- **All seven propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, and `NESTED` (savepoints).
+- **Isolation level, read-only and timeout** per transaction.
+- **Multiple datasources**, each with independent transactions.
+- **`afterCommit` / `afterRollback` hooks**, for example to publish an event only after the data is committed.
+- **Cloudflare Workers + Hyperdrive** through a connection-per-transaction mode.
+- **No runtime dependencies** in the core package.
 
-2. **Submit Pull Requests**  
-   Fork the repository, create a new branch for your changes, and submit a pull request. Ensure your code adheres to the project's coding standards and includes relevant tests.
+## Without decorators
 
-3. **Implement Drivers**  
-   If the driver you need is not available, you can implement it yourself using the [self-implement guide](/docs/self-implement-guide.md).
+```ts
+import { runInTransaction, IsolationLevel } from "@tranjs/core";
+import { ctx } from "@tranjs/pg";
 
-4. **Improve Documentation**  
-   Contributions to the documentation are always appreciated—whether it's fixing typos, adding examples, or clarifying complex concepts.
+const order = await runInTransaction(async () => {
+    const { rows } = await ctx().query("INSERT INTO orders (user_id) VALUES ($1) RETURNING *", [userId]);
+    return rows[0];
+}, { isolationLevel: IsolationLevel.SERIALIZABLE, timeout: 5000 });
+```
 
-5. **Collaborate and Review**  
-   Participate in discussions, review pull requests, and provide constructive feedback to other contributors.
+## Rollback rules
+
+- If a method throws, its transaction rolls back and the error is rethrown.
+- If an inner method that joined the transaction throws, the whole transaction is marked rollback-only. Catching the error in the outer method does not save it; the commit turns into a rollback and throws `UnexpectedRollbackError`. To let an inner step fail on its own, use `Propagation.REQUIRES_NEW` (separate transaction) or `Propagation.NESTED` (savepoint).
+
+```ts
+@Transactional()
+async placeOrder(order: Order) {
+    await this.saveOrder(order);
+    try {
+        await this.audit.record(order);   // @Transactional(Propagation.REQUIRES_NEW)
+    } catch {
+        // audit failure is rolled back on its own; the order still commits
+    }
+}
+```
+
+## Cloudflare Workers
+
+Workers can't share a connection pool between requests. Use the connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) and register it at module scope:
+
+```ts
+import { env } from "cloudflare:workers";
+import { usePostgreSQLClientPerTransaction } from "@tranjs/pg";
+
+usePostgreSQLClientPerTransaction(() => ({ connectionString: env.HYPERDRIVE.connectionString }));
+```
+
+MySQL is supported the same way, but Hyperdrive ignores MySQL isolation levels, so they are rejected in this mode. See [Cloudflare Workers + Hyperdrive](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#cloudflare-workers--hyperdrive) for setup and limitations.
+
+## Documentation
+
+- [API](https://github.com/asheswook/tranjs/blob/main/docs/api.md): propagation, options, hooks, multiple datasources, errors
+- [Drivers](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md): PostgreSQL, MySQL, Cloudflare Workers
+- [Writing your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
+- [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
+
+## Upgrading from 1.0.x
+
+1.1.0 changed several behaviours to match Spring, notably the rollback-only rule above. See the [1.1.0 release notes](https://github.com/asheswook/tranjs/releases/tag/%40tranjs/core%401.1.0) before upgrading.
+
+## Contributing
+
+Issues and pull requests are welcome. To run the tests locally:
+
+```bash
+docker compose up -d
+npm install
+npm run build && npm test
+```
 
 ## License
 
-This project is licensed under the LGPL-2.1 License - see the [LICENSE](LICENSE) file for details.
+[LGPL-2.1](https://github.com/asheswook/tranjs/blob/main/LICENSE)
 
-## Acknowledgement
-
-* [Spring Framework](https://github.com/spring-projects/spring-framework)
-* [Hibernate](https://github.com/hibernate/hibernate-orm)
+Inspired by the [Spring Framework](https://github.com/spring-projects/spring-framework).
