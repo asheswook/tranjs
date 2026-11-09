@@ -1,12 +1,19 @@
 import { ctx, usePostgreSQLTransactionManager } from "@tranjs/pg";
 import { Pool } from "pg";
-import { IllegalTransactionStateException, Propagation, Transactional } from "@tranjs/core";
+import {
+    IllegalTransactionStateException,
+    Propagation,
+    runInTransaction,
+    Transactional,
+} from "@tranjs/core";
 
+// Defaults match the repository's docker-compose.yml; override with PG_URL.
 const pool = new Pool({
-    host: 'localhost',
-})
+    connectionString: process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres",
+});
 
-usePostgreSQLTransactionManager(pool)
+// Register once, outside request handlers and transactional methods.
+usePostgreSQLTransactionManager(pool);
 
 interface UserDTO {
     id: string;
@@ -14,45 +21,69 @@ interface UserDTO {
 }
 
 class MyService {
-    @Transactional(Propagation.REQUIRES_NEW) // Must be start new transaction for transfer
-    async transfer(from: string, to: string, amount: number) {
-        await this.withdrawMoney("Jaewook", 100);
-        await this.depositMoney("Chansu", 100);
+    // Always use an independent transaction, even if the caller has one.
+    @Transactional(Propagation.REQUIRES_NEW)
+    async transfer(from: string, to: string, amount: number): Promise<void> {
+        await this.withdrawMoney(from, amount);
+        await this.depositMoney(to, amount);
     }
 
-    @Transactional(Propagation.MANDATORY) // Must be join transaction
-    async depositMoney(userId: string, amount: number) {
-        await ctx().query("UPDATE users SET balance = balance + $1 WHERE id = $2", [amount, userId]);
+    // Join the transfer's transaction; reject calls without one.
+    @Transactional(Propagation.MANDATORY)
+    async depositMoney(userId: string, amount: number): Promise<void> {
+        await ctx().query(
+            "UPDATE tranjs_example_users SET balance = balance + $1 WHERE id = $2",
+            [amount, userId],
+        );
     }
 
-    @Transactional(Propagation.MANDATORY) // Must be join transaction
-    async withdrawMoney(userId: string, amount: number) {
-        await ctx().query("UPDATE users SET balance = balance - $1 WHERE id = $2", [amount, userId]);
+    @Transactional(Propagation.MANDATORY)
+    async withdrawMoney(userId: string, amount: number): Promise<void> {
+        await ctx().query(
+            "UPDATE tranjs_example_users SET balance = balance - $1 WHERE id = $2",
+            [amount, userId],
+        );
     }
 
-    @Transactional() // Default Propagation.REQUIRED
+    @Transactional() // REQUIRED: join a transaction, or begin one.
     async getBalance(userId: string): Promise<number | null> {
-        const result = await ctx().query<UserDTO>("SELECT id, balance from users WHERE id = $1", [userId]);
-        return result.rows[0]?.balance ?? null;
+        const { rows } = await ctx().query<UserDTO>(
+            "SELECT id, balance FROM tranjs_example_users WHERE id = $1", [userId],
+        );
+        return rows[0]?.balance ?? null;
     }
 }
 
-const service = new MyService();
+async function main(): Promise<void> {
+    try {
+        await runInTransaction(async () => {
+            await ctx().query(`CREATE TABLE IF NOT EXISTS tranjs_example_users (
+                id TEXT PRIMARY KEY,
+                balance INTEGER NOT NULL
+            )`);
+            await ctx().query(`INSERT INTO tranjs_example_users (id, balance)
+                VALUES ('Jaewook', 1000), ('Chansu', 1000)
+                ON CONFLICT (id) DO UPDATE SET balance = EXCLUDED.balance`);
+        });
 
-async function main() {
-    await service.transfer("Jaewook", "Chansu", 100);
+        const service = new MyService();
+        await service.transfer("Jaewook", "Chansu", 100);
+        console.log("Jaewook:", await service.getBalance("Jaewook")); // 900
+        console.log("Chansu:", await service.getBalance("Chansu")); // 1100
 
-    console.log(await service.getBalance("Jaewook"));
-    console.log(await service.getBalance("Chansu"));
-
-    // 트랜잭션 없이 호출하면 IllegalTransactionStateException 발생 (MANDATORY)
-    await service.withdrawMoney("Jaewook", 100).catch((e) => {
-        if (e instanceof IllegalTransactionStateException) {
-            console.log("Illegal Transaction State Exception: ", e.message);
+        // MANDATORY rejects this call because no transaction is active.
+        try {
+            await service.withdrawMoney("Jaewook", 100);
+        } catch (error) {
+            if (!(error instanceof IllegalTransactionStateException)) throw error;
+            console.log(error.message);
         }
-    })
-
-    await pool.end();
+    } finally {
+        await pool.end();
+    }
 }
 
-main()
+main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+});

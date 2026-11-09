@@ -2,8 +2,14 @@
 
 [![Test](https://github.com/asheswook/tranjs/actions/workflows/test.yml/badge.svg)](https://github.com/asheswook/tranjs/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/@tranjs/core)](https://www.npmjs.com/package/@tranjs/core)
+[![license](https://img.shields.io/npm/l/@tranjs/core)](https://github.com/asheswook/tranjs/blob/main/LICENSE)
 
-Declarative transactions for Node.js without an ORM. You write SQL with your usual driver (`pg` or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
+![Node.js](https://img.shields.io/badge/Node.js-supported-339933?logo=nodedotjs&logoColor=white)
+![Bun](https://img.shields.io/badge/Bun-supported-000000?logo=bun&logoColor=white)
+![Deno](https://img.shields.io/badge/Deno-supported-000000?logo=deno&logoColor=white)
+![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-supported-F38020?logo=cloudflareworkers&logoColor=white)
+
+Declarative transactions for JavaScript and TypeScript, without an ORM. You write SQL with your usual driver (`pg` or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
 
 ```ts
 import { Transactional, Propagation } from "@tranjs/core";
@@ -29,6 +35,18 @@ class AccountService {
 ```
 
 `ctx()` returns the connection of the current transaction, so nested calls share it without passing it around.
+
+## Features
+
+- ✅ **Declarative transactions** with `@Transactional`, or `runInTransaction` for plain functions
+- 🔁 **All 7 Spring propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `NESTED` (savepoints)
+- 🛡️ **Spring rollback rules**: a failure in a joined method marks the whole transaction rollback-only
+- 🎛️ **Isolation level, read-only and timeout** per transaction
+- 🗄️ **Multiple datasources**, each with independent transactions
+- 🪝 **`afterCommit` / `afterRollback` hooks**
+- 🐘 **PostgreSQL and MySQL** through `pg` and `mysql2`, or [your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
+- ☁️ **Runs on Node.js, Bun, Deno and Cloudflare Workers** (see below)
+- ⚡ **TypeScript native**, no runtime dependencies in the core package
 
 ## Install
 
@@ -64,16 +82,6 @@ useMySQLTransactionManager(createPool(process.env.DATABASE_URL!));
 
 Register managers once, not inside a request handler. Re-registering per request breaks concurrent requests.
 
-## Features
-
-- **`@Transactional` or `runInTransaction`**: use the decorator on class methods, or wrap any function.
-- **All seven propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, and `NESTED` (savepoints).
-- **Isolation level, read-only and timeout** per transaction.
-- **Multiple datasources**, each with independent transactions.
-- **`afterCommit` / `afterRollback` hooks**, for example to publish an event only after the data is committed.
-- **Cloudflare Workers + Hyperdrive** through a connection-per-transaction mode.
-- **No runtime dependencies** in the core package.
-
 ## Without decorators
 
 ```ts
@@ -103,9 +111,22 @@ async placeOrder(order: Order) {
 }
 ```
 
-## Cloudflare Workers
+## Supported platforms
 
-Workers can't share a connection pool between requests. Use the connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) and register it at module scope:
+| Platform | Status | How to use |
+|---|---|---|
+| Node.js | ✅ Supported | Pool mode (`usePostgreSQLTransactionManager`, `useMySQLTransactionManager`) |
+| Bun | ✅ Supported | Same as Node.js |
+| Deno | ✅ Supported | `npm:` specifiers; set `experimentalDecorators` in `deno.json` |
+| AWS Lambda, Vercel Functions (Node.js runtime) | ✅ Supported | Pool mode, registered once at module scope |
+| Cloudflare Workers | ✅ Supported | Connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) |
+| Edge runtimes without TCP sockets (e.g. Vercel Edge) | ❌ Not supported | The drivers need TCP connections |
+
+Node.js, Bun, Deno and Cloudflare Workers are tested. AWS Lambda and Vercel Functions run Node.js, so they use the Node.js setup, but they are not tested directly. Details: [Supported runtimes](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#supported-runtimes).
+
+### Cloudflare Workers
+
+Workers can't share a connection pool between requests. Use the connection-per-transaction mode and register it at module scope:
 
 ```ts
 import { env } from "cloudflare:workers";
@@ -114,7 +135,7 @@ import { usePostgreSQLClientPerTransaction } from "@tranjs/pg";
 usePostgreSQLClientPerTransaction(() => ({ connectionString: env.HYPERDRIVE.connectionString }));
 ```
 
-MySQL is supported the same way, but Hyperdrive ignores MySQL isolation levels, so they are rejected in this mode. See [Cloudflare Workers + Hyperdrive](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#cloudflare-workers--hyperdrive) for setup and limitations.
+MySQL works the same way with `useMySQLConnectionPerTransaction`, but Hyperdrive ignores MySQL isolation levels, so this mode rejects them. See [Cloudflare Workers + Hyperdrive](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#cloudflare-workers--hyperdrive).
 
 ## Documentation
 

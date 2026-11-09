@@ -1,122 +1,107 @@
-# Native Drivers for TranJS
+# Drivers
 
-## Supported Drivers
-
-### [MySQL Drivers](#MySQL-Driver)
-- [mysql2](https://npmjs.com/package/mysql2)
-    - Use the `@tranjs/mysql2` package to integrate with MySQL databases.
-
-### [PostgreSQL Drivers](#PostgreSQL-Driver)
-- [pg](https://npmjs.com/package/pg)
-    - Use the `@tranjs/pg` package to integrate with PostgreSQL databases.
-
-## MySQL Driver
-
-### Installation
+## PostgreSQL (pg)
 
 ```bash
-npm install @tranjs/core @tranjs/mysql2 --save
+npm install @tranjs/core @tranjs/pg pg
 ```
 
-### Usage
-
-```typescript
-import { createPool } from "mysql2/promise";
-import { useMySQLTransactionManager } from "@tranjs/mysql2";
-
-const pool = createPool({
-  host: 'localhost',
-  user: 'admin',
-})
-
-// Don't need to `useTransactionManager`,
-// if you use `useMySQLTransactionManager`
-useMySQLTransactionManager(pool);
-```
+Register a pool at module scope. `usePostgreSQLTransactionManager` registers the manager for you; no separate `useTransactionManager` call is needed.
 
 ```typescript
 import { Transactional } from "@tranjs/core";
-import { ctx } from "@tranjs/mysql2";
-
-class MyService {
-    @Transactional()
-    async method() {
-        await ctx().execute("SELECT 1;")
-    }
-}
-```
-
-That’s it! You’re ready to use TranJS with MySQL.
-
-## PostgreSQL Driver
-
-### Installation
-
-```bash
-npm install @tranjs/core @tranjs/pg --save
-```
-
-### Usage
-
-```typescript
+import { ctx, usePostgreSQLTransactionManager } from "@tranjs/pg";
 import { Pool } from "pg";
-import { usePostgreSQLTransactionManager } from "@tranjs/pg";
 
-const pool = new Pool({
-  host: 'localhost',
-  user: 'database-user',
-})
-
-// Don't need to `useTransactionManager`,
-// if you use `usePostgreSQLTransactionManager`
+const pool = new Pool({ connectionString: process.env.PG_URL });
 usePostgreSQLTransactionManager(pool);
-```
 
-```typescript
-import { Transactional } from "@tranjs/core";
-import { ctx } from "@tranjs/pg";
-
-class MyService {
+class Service {
     @Transactional()
-    async method() {
-        await ctx().query("SELECT 1;")
+    async read() {
+        return ctx().query("SELECT 1");
     }
 }
 ```
 
-That’s it! You’re ready to use TranJS with PostgreSQL.
+`ctx(datasource?)` returns the active transaction's wrapped connection. Its exported `PoolClient` type omits `connect` and `release` from `pg.PoolClient`. For helpers that accept either pool or per-transaction mode, use the exported `TransactionClient` type (`pg.Client` without `connect`). TranJS owns connection completion and cleanup; do not call lifecycle methods yourself.
+
+Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout), including the special handling of PostgreSQL Submittables.
+
+## MySQL (mysql2)
+
+```bash
+npm install @tranjs/core @tranjs/mysql2 mysql2
+```
+
+Use a pool from `mysql2/promise`. `useMySQLTransactionManager` registers the manager at module scope.
+
+```typescript
+import { Transactional } from "@tranjs/core";
+import { ctx, useMySQLTransactionManager } from "@tranjs/mysql2";
+import { createPool } from "mysql2/promise";
+
+const pool = createPool({ host: "localhost", user: "root", database: "test" });
+useMySQLTransactionManager(pool);
+
+class Service {
+    @Transactional()
+    async read() {
+        return ctx().execute("SELECT 1");
+    }
+}
+```
+
+`ctx(datasource?)` returns the active transaction's wrapped connection. Its exported `PoolConnection` type omits `connect`, `end`, `destroy`, `beginTransaction`, `release`, `commit`, and `rollback` from `mysql2/promise.PoolConnection`. Use the exported `TransactionConnection` type for helpers accepting either connection mode; it omits the same lifecycle methods, except `release`, from `mysql2/promise.Connection`. TranJS owns those lifecycle operations.
+
+The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, then starts with `START TRANSACTION` or `START TRANSACTION READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout); connection-per-transaction isolation has the [policy below](#mysql).
+
+## Supported runtimes
+
+| Runtime | Support and verification |
+|---|---|
+| Node.js | Supported, primary target. |
+| Bun 1.3 | Verified locally with the packed packages (pg pool and per-transaction mode, mysql2 pool; 50 concurrent transactions, isolation, NESTED, rollback-only, timeout). |
+| Deno 2.9 | Verified locally via `npm:` specifiers with the published 1.1.0 packages (same checks; needs `experimentalDecorators` in deno.json, which Deno marks deprecated). |
+| AWS Lambda / Vercel Functions (Node runtime) / other long-lived Node hosts | Use the pool mode and register once at module scope. Not tested on those platforms; this follows from them running Node.js. |
+| Cloudflare Workers | Supported through the connection-per-transaction mode + Hyperdrive, verified on real Workers. |
+| Edge runtimes without TCP sockets (e.g. Vercel Edge) | Not supported; the drivers need TCP. |
 
 ## Cloudflare Workers + Hyperdrive
 
-Enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in your Worker configuration. Register transaction managers **once at module scope**, not inside the request handler.
+Enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in the Worker configuration and register once at module scope, not in the request handler. The examples assume a Hyperdrive binding named `HYPERDRIVE`.
+
+Connection-per-transaction managers use no application-side pool. Each physical transaction resolves a config object, synchronous factory, or async factory, opens a connection, and calls `end()` automatically on completion, including failures. Use `runInTransaction` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
 
 ### PostgreSQL
 
 Use `pg >= 8.16.3`:
 
-```ts
+```typescript
 import { env } from "cloudflare:workers";
 import { usePostgreSQLClientPerTransaction } from "@tranjs/pg";
 
-usePostgreSQLClientPerTransaction(() => ({ connectionString: env.HYPERDRIVE.connectionString }));
+usePostgreSQLClientPerTransaction(() => ({
+    connectionString: env.HYPERDRIVE.connectionString,
+}));
 ```
 
-Use `runInTransaction` / `@Transactional` and `ctx()` as usual. This mode uses no `pg.Pool`: it resolves the config (or async config factory) and opens a new `pg.Client` for each physical transaction, then calls `end()` automatically on completion, including failures. No `end()` is needed in user code. Joined and `NESTED` scopes reuse the current client; `REQUIRES_NEW` opens another one. For direct registration, use `new PostgreSQLClientPerTransactionManager(config)` with `useTransactionManager`; both registration helpers accept an optional datasource name.
+This manager creates a fresh `pg.Client`, not a `pg.Pool`. For direct registration, pass `new PostgreSQLClientPerTransactionManager(config)` to `useTransactionManager`. Both the pool and per-transaction registration helpers accept an optional datasource name as their second argument.
 
-[Hyperdrive uses transaction-mode pooling](https://developers.cloudflare.com/hyperdrive/configuration/connection-pooling/), so session state cannot be relied on between transactions:
+[Hyperdrive uses transaction-mode pooling](https://developers.cloudflare.com/hyperdrive/configuration/connection-pooling/). Session state cannot be relied on between transactions:
 
-- `SET` outside a transaction does not persist; use transaction-local settings inside the transaction.
-- No session advisory locks (use transaction-scoped advisory locks instead).
-- No `LISTEN` / `NOTIFY`.
-- No SQL `PREPARE`.
-
-On Node without Hyperdrive, this mode opens a new database connection per physical transaction; prefer the existing `Pool` manager there to reuse connections.
+| Limitation | What to use instead |
+|---|---|
+| `SET` outside a transaction does not persist | Transaction-local settings inside the transaction |
+| No session advisory locks | Transaction-scoped advisory locks |
+| No `LISTEN` / `NOTIFY` | Another messaging mechanism |
+| No SQL `PREPARE` | Queries without SQL-level preparation |
 
 ### MySQL
 
-Use `mysql2 >= 3.13.0` with `disableEval: true`. Register once at module scope:
+Use `mysql2 >= 3.13.0` with `disableEval: true`:
 
-```ts
+```typescript
 import { env } from "cloudflare:workers";
 import { useMySQLConnectionPerTransaction } from "@tranjs/mysql2";
 
@@ -130,66 +115,47 @@ useMySQLConnectionPerTransaction(() => ({
 }));
 ```
 
-This mode uses no application-side pool: each physical transaction gets a fresh connection and TranJS calls `end()` automatically, including after failures. No `end()` is needed in user code. Config may be an object, a sync factory, or an async factory. Use `runInTransaction` / `@Transactional` with `ctx()` from `@tranjs/mysql2`; joined and `NESTED` scopes reuse the connection, while `REQUIRES_NEW` opens another one.
+The following Hyperdrive MySQL limitations were verified on Workers with identical SQL, independently of the packaged manager:
 
-Hyperdrive MySQL caveats (verified on Workers using identical SQL, not this packaged manager):
+| Limitation | Consequence |
+|---|---|
+| Isolation settings are silently ignored | Neither `SET TRANSACTION` nor `SET SESSION` changes isolation. Setting it after `START` fails. `SELECT @@transaction_isolation` returns an empty result set, so it cannot detect this limitation. |
+| `START TRANSACTION READ ONLY` blocks writes but drops the connection on a violation | The error is `PROTOCOL_CONNECTION_LOST`, not `ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`; subsequent rollback also fails. |
+| Protocol prepared statements are unsupported | Use `ctx().query()`, not `ctx().execute()`. The latter fails with `ER_NO Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages`. |
+| No multi-statement queries | Issue statements separately. |
+| No `USE` | Set the database in the connection config. |
 
-- **Verified on Workers:** Isolation levels are silently ignored through Hyperdrive; `SET TRANSACTION` and `SET SESSION` do not change the transaction's isolation. Setting isolation after `START` fails, and `SELECT @@transaction_isolation` returns an empty result set, so it cannot detect this limitation.
-- **Verified on Workers:** `START TRANSACTION READ ONLY` blocks writes, but a violation drops the connection (`PROTOCOL_CONNECTION_LOST`) rather than returning `ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`. The subsequent rollback also fails.
-- **Verified on Workers:** Use `ctx().query()`, not `ctx().execute()`: protocol prepared statements fail with `ER_NO Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages`.
-- **Verified on Workers:** No multi-statement queries; issue each statement separately.
-- **Verified on Workers:** No `USE`; select the database in the connection config.
+`MySQLConnectionPerTransactionManager` therefore rejects explicit isolation levels with `UnsupportedIsolationLevelError` **before connecting** by default. Without an explicit level, the server default applies; do not assume stronger guarantees. Hyperdrive cannot be detected reliably at runtime.
 
-This mode therefore rejects requested isolation levels with `UnsupportedIsolationLevelError` **before connecting** by default. Transactions without an explicit isolation level use the server's default; do not assume stronger guarantees. With TranJS, a failed rollback after a read-only violation is surfaced as `TransactionSystemError` ("Transaction rollback failed after application error"), with the connection-lost error in `applicationError`.
+The packaged manager, registered with `useMySQLConnectionPerTransaction` and used through `@Transactional`, was also verified on Cloudflare Workers + Hyperdrive (MySQL 8):
 
-The packaged `MySQLConnectionPerTransactionManager` (via `useMySQLConnectionPerTransaction` and `@Transactional`) was verified on Cloudflare Workers + Hyperdrive (MySQL 8):
+| Check | Result |
+|---|---|
+| 1, 50, and 100 concurrent requests | All succeeded; connection id stayed constant within each transaction. |
+| Commit, rollback, `NESTED`, `REQUIRES_NEW`, deadline timeouts, `afterCommit` errors, rollback-only | Same behaviour as Node: `TransactionTimeoutError`, propagated hook errors, and `UnexpectedRollbackError` where applicable. |
+| Explicit isolation level | Rejected by default as described above. |
+| `readOnly` write | Blocked; nothing persisted. Failed rollback surfaced as `TransactionSystemError` (`"Transaction rollback failed after application error"`), with `PROTOCOL_CONNECTION_LOST` in `applicationError`. |
 
-- 1, 50 and 100 concurrent requests all succeeded; the connection id stayed the same within each transaction.
-- Commit, rollback, `NESTED` (savepoint), `REQUIRES_NEW`, deadline timeouts (`TransactionTimeoutError`), `afterCommit` errors propagating, and rollback-only (`UnexpectedRollbackError`) behave as on Node.
-- A requested isolation level is rejected with `UnsupportedIsolationLevelError` by default.
-- A `readOnly` write is blocked and nothing persists; the error is `TransactionSystemError` with `PROTOCOL_CONNECTION_LOST` in `applicationError`.
+For **direct MySQL connections only**, opt into applying isolation settings:
 
-For **direct MySQL connections only**, explicitly opt into applying isolation settings:
+```typescript
+import { useMySQLConnectionPerTransaction } from "@tranjs/mysql2";
 
-```ts
-useMySQLConnectionPerTransaction(config, undefined, { isolationLevelSupport: "apply" });
-// Or: useTransactionManager(new MySQLConnectionPerTransactionManager(config, { isolationLevelSupport: "apply" }));
+const config = { host: "localhost", user: "root", database: "test" };
+useMySQLConnectionPerTransaction(config, undefined, {
+    isolationLevelSupport: "apply",
+});
 ```
 
-The constructor accepts `(config, options?)`; the registration helper accepts `(config, name?, options?)`. `isolationLevelSupport: "reject"` is the default; `"apply"` uses `SET TRANSACTION ISOLATION LEVEL` followed by `START TRANSACTION`. Hyperdrive cannot be detected reliably at runtime: do not enable `"apply"` there. The existing pool manager is unchanged. On Node without Hyperdrive, prefer `useMySQLTransactionManager(pool)` to avoid opening a new connection per physical transaction.
-
-### Helper types
-
-The `ctx()` return types and exported `PoolClient` / `PoolConnection` aliases retain their 1.1.0 definitions for source compatibility. For new helpers accepting either connection mode, use `TransactionClient` from `@tranjs/pg` or `TransactionConnection` from `@tranjs/mysql2`; these expose the common query surface without requiring pool-only members. Do not use pool lifecycle methods on connections owned by TranJS.
-
-## Driver Features
-
-| | mysql2 | pg |
-|---|:-:|:-:|
-| Isolation level | `SET TRANSACTION ISOLATION LEVEL` (connection-per-transaction mode rejects by default; opt into `"apply"` for direct MySQL only) | `BEGIN ISOLATION LEVEL` |
-| Read-only | `START TRANSACTION READ ONLY` | `BEGIN READ ONLY` |
-| Client-side query timeout | Remaining deadline as query/execute `timeout` | Remaining deadline as `query_timeout` (except Submittables) |
-| NESTED (savepoint) | O | O |
-| Multiple datasources | `useMySQLTransactionManager(pool, name)` / `ctx(name)` | `usePostgreSQLTransactionManager(pool, name)` / `ctx(name)` |
-
-### Deadlines and query options
-
-`timeout` must be finite, nonnegative, and at most `2147483647` ms. Use the native `ctx()` wrappers to check the transaction deadline before query dispatch. For ordinary queries, the remaining transaction timeout always overrides user PostgreSQL `query_timeout` / MySQL query/execute `timeout` and pool defaults, even shorter ones. Without a transaction deadline, user options are untouched. PostgreSQL does not set `SET LOCAL statement_timeout`; these client-side timeouts do not guarantee server-side cancellation. The owner also checks the deadline before commit.
-
-PostgreSQL Submittables (`pg.Query`, `pg-query-stream`, `pg-cursor`) are checked only before dispatch and passed through untouched, with no per-query timeout injection or interception. Consume streams inside the transactional callback so work finishes before commit; the owner's final deadline check still applies.
+The helper accepts `(config, name?, options?)`; direct construction uses `new MySQLConnectionPerTransactionManager(config, options?)`. `isolationLevelSupport: "reject"` is the default. `"apply"` sends `SET TRANSACTION ISOLATION LEVEL` followed by `START TRANSACTION`. Do not enable it through Hyperdrive. This policy does not affect the pool manager.
 
 ## Development
 
-Driver tests run against real databases:
+Driver tests use real databases. From the repository root:
 
 ```bash
 docker compose up -d
 npm run build && npm test
 ```
 
-Override the connection strings with `PG_URL` and `MYSQL_URL`.
-
-## Custom Driver
-
-If your desired database driver isn’t available, you can always implement your own by installing just the core package. 
-For guidance on self-implementation, refer to the [Self-Implementation Guide](/docs/self-implement-guide.md).
+Override test connection strings with `PG_URL` and `MYSQL_URL`. To add another driver, see the [custom driver guide](self-implement-guide.md).
