@@ -15,8 +15,10 @@
     "allowJs": false,
     "declaration": true
   },
+  "files": [],
   "references": [
     { "path": "./packages/core" },
-    { "path": "./packages/mysql2" }
+    { "path": "./packages/mysql2" },
+    { "path": "./packages/pg" }
   ]
 }

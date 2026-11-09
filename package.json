@@ -1,10 +1,12 @@
 {
-  "name": "@tranjs/core",
+  "name": "tranjs-monorepo",
+  "private": true,
   "version": "1.0.2",
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
-    "build": "lerna run build",
+    "build": "tsc -b",
     "test": "lerna run test",
+    "test:legacy": "bash scripts/legacy-smoke.sh",
     "publish": "lerna run test && npm run build && lerna publish"
   },
   "repository": {
@@ -33,7 +35,7 @@
   ],
   "devDependencies": {
     "lerna": "^8.1.9",
-    "typescript": "^4.5.0",
+    "typescript": "^5.9.3",
     "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5"

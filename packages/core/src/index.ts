@@ -3,4 +3,6 @@ export * from "./manager";
 export * from "./propagation";
 export * from "./context";
 export * from "./error";
-export * from "./asyncLocal"
+export * from "./asyncLocal";
+export * from "./config";
+export * from "./logger";

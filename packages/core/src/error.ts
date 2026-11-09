@@ -1,5 +1,36 @@
 import { Propagation } from "./propagation";
 
+export class TransactionSystemError extends Error {
+    readonly cause: unknown;
+
+    constructor(cause: unknown, public readonly applicationError: unknown) {
+        super("Transaction rollback failed after application error");
+        this.name = "TransactionSystemError";
+        this.cause = cause;
+    }
+}
+
+export class ConcurrentNestedTransactionError extends Error {
+    constructor() {
+        super("A sibling nested transaction is still open in this parent scope");
+        this.name = "ConcurrentNestedTransactionError";
+    }
+}
+
+export class UnexpectedRollbackError extends Error {
+    constructor() {
+        super("Transaction was marked rollback-only and could not be committed");
+        this.name = "UnexpectedRollbackError";
+    }
+}
+
+export class InvalidIsolationLevelError extends TypeError {
+    constructor(level: unknown) {
+        super(`Invalid transaction isolation level: ${String(level)}`);
+        this.name = "InvalidIsolationLevelError";
+    }
+}
+
 export class IllegalTransactionStateException extends Error {
     constructor(propagation: string) {
         super(`Illegal transaction state: ${propagation}`);
@@ -15,9 +46,31 @@ export class UnsupportedTransactionPropagationException extends Error {
 }
 
 export class DatasourceSetupError extends Error {
-    constructor() {
-        super(`Datasource is not set up. `);
+    constructor(name: string | symbol = "DEFAULT_DATASOURCE") {
+        super(`Datasource is not set up: ${String(name)}`);
         this.name = 'TransactionDatasourceSetupError';
+    }
+}
+
+export class TransactionTimeoutError extends Error {
+    constructor(timeout: number) {
+        super(`Transaction timed out after ${timeout}ms`);
+        this.name = "TransactionTimeoutError";
+    }
+}
+
+export class NestedTransactionNotSupportedError extends UnsupportedTransactionPropagationException {
+    constructor() {
+        super();
+        this.message = "Nested transactions are not supported by this transaction manager";
+        this.name = "NestedTransactionNotSupportedError";
+    }
+}
+
+export class NoTransactionContextError extends Error {
+    constructor() {
+        super("No transaction context available");
+        this.name = "NoTransactionContextError";
     }
 }
 

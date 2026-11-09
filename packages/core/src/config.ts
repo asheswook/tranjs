@@ -1,23 +1,22 @@
 import { Propagation } from "./propagation";
 
-export interface TransactionConfig {
-    // /**
-    //  * The name of the transaction. just for logging purposes.
-    //  */
-    // name?: string;
+export enum IsolationLevel {
+    READ_UNCOMMITTED = "READ UNCOMMITTED",
+    READ_COMMITTED = "READ COMMITTED",
+    REPEATABLE_READ = "REPEATABLE READ",
+    SERIALIZABLE = "SERIALIZABLE",
+}
 
-    // /**
-    //  * The isolation level of the transaction.
-    //  */
-    // isolationLevel?: string;
+export const DEFAULT_DATASOURCE: unique symbol = Symbol("DEFAULT_DATASOURCE");
 
-    /**
-     * The timeout of the transaction in milliseconds.
-     */
+export interface TransactionOptions {
+    isolationLevel?: IsolationLevel;
+    readOnly?: boolean;
+    /** Physical transaction deadline in milliseconds; checked before queries and commit. */
     timeout?: number;
+}
 
-    /**
-     * The propagation behavior of the transaction.
-     */
+export interface TransactionConfig extends TransactionOptions {
     propagation?: Propagation;
+    datasource?: string | symbol;
 }

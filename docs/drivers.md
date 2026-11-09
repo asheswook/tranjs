@@ -79,12 +79,39 @@ import { ctx } from "@tranjs/pg";
 class MyService {
     @Transactional()
     async method() {
-        await ctx().execute("SELECT 1;")
+        await ctx().query("SELECT 1;")
     }
 }
 ```
 
 That’s it! You’re ready to use TranJS with PostgreSQL.
+
+## Driver Features
+
+| | mysql2 | pg |
+|---|:-:|:-:|
+| Isolation level | `SET TRANSACTION ISOLATION LEVEL` | `BEGIN ISOLATION LEVEL` |
+| Read-only | `START TRANSACTION READ ONLY` | `BEGIN READ ONLY` |
+| Client-side query timeout | Remaining deadline as query/execute `timeout` | Remaining deadline as `query_timeout` (except Submittables) |
+| NESTED (savepoint) | O | O |
+| Multiple datasources | `useMySQLTransactionManager(pool, name)` / `ctx(name)` | `usePostgreSQLTransactionManager(pool, name)` / `ctx(name)` |
+
+### Deadlines and query options
+
+`timeout` must be finite, nonnegative, and at most `2147483647` ms. Use the native `ctx()` wrappers to check the transaction deadline before query dispatch. For ordinary queries, the remaining transaction timeout always overrides user PostgreSQL `query_timeout` / MySQL query/execute `timeout` and pool defaults, even shorter ones. Without a transaction deadline, user options are untouched. PostgreSQL does not set `SET LOCAL statement_timeout`; these client-side timeouts do not guarantee server-side cancellation. The owner also checks the deadline before commit.
+
+PostgreSQL Submittables (`pg.Query`, `pg-query-stream`, `pg-cursor`) are checked only before dispatch and passed through untouched, with no per-query timeout injection or interception. Consume streams inside the transactional callback so work finishes before commit; the owner's final deadline check still applies.
+
+## Development
+
+Driver tests run against real databases:
+
+```bash
+docker compose up -d
+npm run build && npm test
+```
+
+Override the connection strings with `PG_URL` and `MYSQL_URL`.
 
 ## Custom Driver
 
