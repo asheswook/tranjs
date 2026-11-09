@@ -1,5 +1,9 @@
 import { Client, ClientConfig, Pool, Query } from "pg";
+import { execFile } from "node:child_process";
+import { resolve } from "node:path";
+import { promisify } from "node:util";
 import {
+    afterCommit,
     getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
@@ -7,6 +11,7 @@ import {
     Propagation,
     runInTransaction,
     TransactionTimeoutError,
+    UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
 import {
@@ -19,6 +24,7 @@ import {
 const connectionString = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
 const table = "tranjs_pg_client_per_transaction_test";
 const failure = new Error("application failure");
+const execFileAsync = promisify(execFile);
 
 describe("PostgreSQL client per transaction (real database)", () => {
     const pool = new Pool({ connectionString, max: 2 });
@@ -60,6 +66,27 @@ describe("PostgreSQL client per transaction (real database)", () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             throw failure;
         })).rejects.toBe(failure);
+        expect(end).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([]);
+    });
+
+    it("preserves committed data and ends once when afterCommit throws", async () => {
+        await expect(runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            afterCommit(() => { throw failure; });
+        })).rejects.toBe(failure);
+        expect(end).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([1]);
+    });
+
+    it("rolls back and ends once after a swallowed joined failure", async () => {
+        await expect(runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            await expect(runInTransaction(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                throw failure;
+            })).rejects.toBe(failure);
+        })).rejects.toThrow(UnexpectedRollbackError);
         expect(end).toHaveBeenCalledTimes(1);
         expect(await ids()).toEqual([]);
     });
@@ -272,6 +299,19 @@ describe("PostgreSQL client per transaction (real database)", () => {
         expect(new Set(end.mock.contexts).size).toBe(50);
         expect(await ids()).toEqual(Array.from({ length: 50 }, (_, id) => id));
     });
+
+    it.each(["idle-query", "idle-commit", "active-query"])(
+        "survives backend termination in a child process (%s) and ends once", async scenario => {
+            const { stdout, stderr } = await execFileAsync(process.execPath, [
+                "--unhandled-rejections=strict", resolve(__dirname, "../../../scripts/test/connection-loss.cjs"), "pg", scenario,
+            ], { timeout: 10000 });
+            expect(stderr).toBe("");
+            expect(JSON.parse(stdout)).toEqual({
+                rejected: true, end: 1, destroy: 0,
+                queryRejected: scenario !== "idle-commit", commitRejected: scenario === "idle-commit",
+            });
+        },
+    );
 
     it("documents the hazard: per-call pool manager re-registration breaks concurrent request contexts", async () => {
         // This deliberately reproduces unsupported registration inside a request handler.

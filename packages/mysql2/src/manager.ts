@@ -23,7 +23,7 @@ export function useMySQLTransactionManager(pool: mysql2.Pool, name?: string | sy
 
 export interface MySQLConnectionPerTransactionOptions {
     /** Defaults to reject: Hyperdrive silently ignores MySQL isolation settings. */
-    isolationLevel?: "apply" | "reject";
+    isolationLevelSupport?: "apply" | "reject";
 }
 
 /** Register once at startup/module scope; config is resolved for each physical transaction. */
@@ -79,11 +79,11 @@ abstract class MySQLManagerBase extends PlatformTransactionManager<PoolConnectio
     }
 
     protected async commitTransaction(tx: PoolConnection): Promise<void> {
-        await (tx as mysql2.Connection).commit();
+        await (tx as unknown as mysql2.Connection).commit();
     }
 
     protected async rollbackTransaction(tx: PoolConnection): Promise<void> {
-        await (tx as mysql2.Connection).rollback();
+        await (tx as unknown as mysql2.Connection).rollback();
     }
 
     protected async createSavepoint(tx: PoolConnection, name: string): Promise<void> {
@@ -153,21 +153,26 @@ export class MySQLConnectionPerTransactionManager extends MySQLManagerBase {
             if (!Object.values(IsolationLevel).includes(options.isolationLevel)) {
                 throw new InvalidIsolationLevelError(options.isolationLevel);
             }
-            if (this.options.isolationLevel !== "apply") {
+            if (this.options.isolationLevelSupport !== "apply") {
                 throw new UnsupportedIsolationLevelError(options.isolationLevel);
             }
         }
         const config = typeof this.config === "function" ? await this.config() : this.config;
         // The promise-only createConnection hides its connection if the handshake
         // fails. Keep the handle so even connect failures can be ended once.
-        const connection = createConnection(config).promise();
+        const raw = createConnection(config);
+        // mysql2 emits idle socket failures on the underlying connection, not
+        // necessarily the promise wrapper. Its fatal-error handling closes the
+        // connection and rejects future commands; this listener prevents a crash.
+        // Leave it harmless after release to absorb late socket events too.
+        raw.on("error", () => {});
+        const connection = raw.promise();
+        // Preserve the historical ctx() type; runtime connections share the query API.
+        const transaction = connection as unknown as PoolConnection;
         try {
             await connection.connect();
         } catch (error) {
-            // A failed handshake can leave mysql2's command queue stalled. Close
-            // it first, otherwise end() may wait forever for its queued QUIT.
-            try { connection.destroy(); } catch {}
-            await this.releaseTransaction(connection, true);
+            await this.releaseTransaction(transaction, true);
             throw error;
         }
         try {
@@ -175,19 +180,23 @@ export class MySQLConnectionPerTransactionManager extends MySQLManagerBase {
                 await connection.query(`SET TRANSACTION ISOLATION LEVEL ${options.isolationLevel}`);
             }
             await connection.query(`START TRANSACTION${options?.readOnly ? " READ ONLY" : ""}`);
-            return { metadata: { driverName: DRIVER_NAME }, transaction: connection };
+            return { metadata: { driverName: DRIVER_NAME }, transaction };
         } catch (error) {
             // START may have succeeded before the driver reported an error.
             try { await connection.rollback(); } catch {}
-            await this.releaseTransaction(connection, true);
+            await this.releaseTransaction(transaction, true);
             throw error;
         }
     }
 
-    protected async releaseTransaction(tx: PoolConnection, _failed: boolean): Promise<void> {
+    protected async releaseTransaction(tx: PoolConnection, failed: boolean): Promise<void> {
         if (this.ended.has(tx)) return;
         this.ended.add(tx);
-        try { await (tx as mysql2.Connection).end(); }
+        const connection = tx as unknown as mysql2.Connection;
+        // Failed handshakes/dead sockets may leave QUIT queued forever. Close
+        // failed connections first, then invoke end exactly once on every path.
+        if (failed) { try { connection.destroy(); } catch {} }
+        try { await connection.end(); }
         catch (error) {
             // Neither cleanup nor a custom logger may mask the transaction outcome.
             try { this.cleanupLogger.error("MySQL connection cleanup failed", error); } catch {}

@@ -156,10 +156,16 @@ export class PostgreSQLClientPerTransactionManager extends PostgreSQLManagerBase
         }
         const config = typeof this.config === "function" ? await this.config() : this.config;
         const client = new pg.Client(config);
+        // pg marks the client unqueryable on connection errors. Handle its event
+        // as well, including while user code is awaiting non-database work.
+        // Keep this harmless listener through/after end for late socket events.
+        client.on("error", () => {});
+        // Preserve the historical ctx() type; runtime clients share the query API.
+        const transaction = client as unknown as PoolClient;
         try {
             await client.connect();
         } catch (error) {
-            await this.releaseTransaction(client, true);
+            await this.releaseTransaction(transaction, true);
             throw error;
         }
         try {
@@ -167,11 +173,11 @@ export class PostgreSQLClientPerTransactionManager extends PostgreSQLManagerBase
             if (options?.isolationLevel) sql += ` ISOLATION LEVEL ${options.isolationLevel}`;
             if (options?.readOnly) sql += " READ ONLY";
             await client.query(sql);
-            return { metadata: { driverName: DRIVER_NAME }, transaction: client };
+            return { metadata: { driverName: DRIVER_NAME }, transaction };
         } catch (error) {
             // BEGIN may have succeeded before the driver reported an error.
             try { await client.query("ROLLBACK"); } catch {}
-            await this.releaseTransaction(client, true);
+            await this.releaseTransaction(transaction, true);
             throw error;
         }
     }

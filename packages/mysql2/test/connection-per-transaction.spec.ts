@@ -1,6 +1,10 @@
 import mysql = require("mysql2");
+import { execFile } from "node:child_process";
+import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { Connection, ConnectionOptions, createPool, RowDataPacket } from "mysql2/promise";
 import {
+    afterCommit,
     getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
@@ -9,6 +13,7 @@ import {
     runInTransaction,
     TransactionContextMixingError,
     TransactionTimeoutError,
+    UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
 import {
@@ -21,6 +26,7 @@ import {
 const url = process.env.MYSQL_URL ?? "mysql://root:root@localhost:3306/test";
 const table = "tranjs_mysql_connection_per_transaction_test";
 const failure = new Error("application failure");
+const execFileAsync = promisify(execFile);
 
 describe("MySQL connection per transaction (real database)", () => {
     const pool = createPool({ uri: url, connectionLimit: 2 });
@@ -86,6 +92,29 @@ describe("MySQL connection per transaction (real database)", () => {
             await ctx().query(`INSERT INTO ${table} (id) VALUES (1)`);
             throw failure;
         })).rejects.toBe(failure);
+        expect(created).toHaveLength(1);
+        expect(created[0].end).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([]);
+    });
+
+    it("preserves committed data and ends once when afterCommit throws", async () => {
+        await expect(runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} (id) VALUES (1)`);
+            afterCommit(() => { throw failure; });
+        })).rejects.toBe(failure);
+        expect(created).toHaveLength(1);
+        expect(created[0].end).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([1]);
+    });
+
+    it("rolls back and ends once after a swallowed joined failure", async () => {
+        await expect(runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} (id) VALUES (1)`);
+            await expect(runInTransaction(async () => {
+                await ctx().query(`INSERT INTO ${table} (id) VALUES (2)`);
+                throw failure;
+            })).rejects.toBe(failure);
+        })).rejects.toThrow(UnexpectedRollbackError);
         expect(created).toHaveLength(1);
         expect(created[0].end).toHaveBeenCalledTimes(1);
         expect(await ids()).toEqual([]);
@@ -159,7 +188,7 @@ describe("MySQL connection per transaction (real database)", () => {
         const setError = new Error("injected SET failure");
         let query!: jest.SpyInstance;
         configure = connection => { query = jest.spyOn(connection, "query").mockRejectedValueOnce(setError); };
-        useMySQLConnectionPerTransaction({ uri: url }, undefined, { isolationLevel: "apply" });
+        useMySQLConnectionPerTransaction({ uri: url }, undefined, { isolationLevelSupport: "apply" });
         await expect(runInTransaction(async () => {}, { isolationLevel: IsolationLevel.READ_COMMITTED }))
             .rejects.toBe(setError);
         expect(query.mock.calls).toEqual([["SET TRANSACTION ISOLATION LEVEL READ COMMITTED"]]);
@@ -270,9 +299,9 @@ describe("MySQL connection per transaction (real database)", () => {
         expect(created).toHaveLength(1);
     });
 
-    it.each([undefined, "reject"] as const)("rejects isolation before connecting (policy: %s)", async isolationLevel => {
+    it.each([undefined, "reject"] as const)("rejects isolation before connecting (policy: %s)", async isolationLevelSupport => {
         const config = jest.fn(() => ({ uri: url }));
-        const manager = new MySQLConnectionPerTransactionManager(config, { isolationLevel });
+        const manager = new MySQLConnectionPerTransactionManager(config, { isolationLevelSupport });
         expect(manager).toBeInstanceOf(PlatformTransactionManager);
         useTransactionManager(manager);
         for (const level of Object.values(IsolationLevel)) {
@@ -290,7 +319,7 @@ describe("MySQL connection per transaction (real database)", () => {
     });
 
     it("validates isolation SQL even with apply enabled, before connecting", async () => {
-        const manager = new MySQLConnectionPerTransactionManager({ uri: url }, { isolationLevel: "apply" });
+        const manager = new MySQLConnectionPerTransactionManager({ uri: url }, { isolationLevelSupport: "apply" });
         await expect((manager as any).beginTransaction({ isolationLevel: "READ COMMITTED; COMMIT" }))
             .rejects.toThrow(InvalidIsolationLevelError);
         useTransactionManager(manager);
@@ -304,7 +333,7 @@ describe("MySQL connection per transaction (real database)", () => {
         { level: IsolationLevel.REPEATABLE_READ, expected: 0 },
     ])("apply mode gives behavioural $level isolation on direct MySQL", async ({ level, expected }) => {
         await pool.query(`INSERT INTO ${table} (id, value) VALUES (1, 0)`);
-        useMySQLConnectionPerTransaction({ uri: url }, undefined, { isolationLevel: "apply" });
+        useMySQLConnectionPerTransaction({ uri: url }, undefined, { isolationLevelSupport: "apply" });
         await runInTransaction(async () => {
             const [before] = await ctx().query<RowDataPacket[]>(`SELECT value FROM ${table} WHERE id = 1`);
             expect(before[0].value).toBe(0);
@@ -360,6 +389,19 @@ describe("MySQL connection per transaction (real database)", () => {
         expect(new Set(created.map(({ connection }) => connection)).size).toBe(50);
         expect(await ids()).toEqual(Array.from({ length: 50 }, (_, id) => id));
     });
+
+    it.each(["idle-query", "idle-commit", "active-query"])(
+        "survives KILL CONNECTION in a child process (%s) and ends/destroys once", async scenario => {
+            const { stdout, stderr } = await execFileAsync(process.execPath, [
+                "--unhandled-rejections=strict", resolve(__dirname, "../../../scripts/test/connection-loss.cjs"), "mysql2", scenario,
+            ], { timeout: 10000 });
+            expect(stderr).toBe("");
+            expect(JSON.parse(stdout)).toEqual({
+                rejected: true, end: 1, destroy: 1,
+                queryRejected: scenario !== "idle-commit", commitRejected: scenario === "idle-commit",
+            });
+        },
+    );
 
     it("retains context errors outside a transaction and for foreign managers", async () => {
         expect(() => ctx()).toThrow("Transaction context not initialized");

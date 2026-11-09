@@ -132,24 +132,35 @@ useMySQLConnectionPerTransaction(() => ({
 
 This mode uses no application-side pool: each physical transaction gets a fresh connection and TranJS calls `end()` automatically, including after failures. No `end()` is needed in user code. Config may be an object, a sync factory, or an async factory. Use `runInTransaction` / `@Transactional` with `ctx()` from `@tranjs/mysql2`; joined and `NESTED` scopes reuse the connection, while `REQUIRES_NEW` opens another one.
 
-Hyperdrive MySQL caveats:
+Hyperdrive MySQL caveats (verified on Workers using identical SQL, not this packaged manager):
 
-- **Verified on Workers:** Isolation levels are silently ignored through Hyperdrive; `SET TRANSACTION` and `SET SESSION` do not change the transaction's isolation. Setting isolation after `START` fails, and `SELECT @@transaction_isolation` returns an empty result set, so it cannot detect this limitation. This mode therefore rejects requested isolation levels with `UnsupportedIsolationLevelError` **before connecting** by default. Transactions without an explicit isolation level use the server's default; do not assume stronger guarantees.
-- **Verified on Workers:** `START TRANSACTION READ ONLY` blocks writes, but a violation drops the connection (`PROTOCOL_CONNECTION_LOST`) rather than returning `ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`. The subsequent rollback also fails, so TranJS throws `TransactionSystemError` ("Transaction rollback failed after application error"), with the connection-lost error in `applicationError`.
+- **Verified on Workers:** Isolation levels are silently ignored through Hyperdrive; `SET TRANSACTION` and `SET SESSION` do not change the transaction's isolation. Setting isolation after `START` fails, and `SELECT @@transaction_isolation` returns an empty result set, so it cannot detect this limitation.
+- **Verified on Workers:** `START TRANSACTION READ ONLY` blocks writes, but a violation drops the connection (`PROTOCOL_CONNECTION_LOST`) rather than returning `ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION`. The subsequent rollback also fails.
 - **Verified on Workers:** Use `ctx().query()`, not `ctx().execute()`: protocol prepared statements fail with `ER_NO Hyperdrive does not currently support MySQL COM_STMT_PREPARE messages`.
 - **Verified on Workers:** No multi-statement queries; issue each statement separately.
 - **Verified on Workers:** No `USE`; select the database in the connection config.
 
-Commit, rollback, savepoints, `REQUIRES_NEW`, stable connection IDs within transactions, and 100 concurrent requests have been verified on Workers. Reads inside a transaction did not return stale cached results even with Hyperdrive caching enabled.
+This mode therefore rejects requested isolation levels with `UnsupportedIsolationLevelError` **before connecting** by default. Transactions without an explicit isolation level use the server's default; do not assume stronger guarantees. With TranJS, a failed rollback after a read-only violation is surfaced as `TransactionSystemError` ("Transaction rollback failed after application error"), with the connection-lost error in `applicationError`.
+
+The packaged `MySQLConnectionPerTransactionManager` (via `useMySQLConnectionPerTransaction` and `@Transactional`) was verified on Cloudflare Workers + Hyperdrive (MySQL 8):
+
+- 1, 50 and 100 concurrent requests all succeeded; the connection id stayed the same within each transaction.
+- Commit, rollback, `NESTED` (savepoint), `REQUIRES_NEW`, deadline timeouts (`TransactionTimeoutError`), `afterCommit` errors propagating, and rollback-only (`UnexpectedRollbackError`) behave as on Node.
+- A requested isolation level is rejected with `UnsupportedIsolationLevelError` by default.
+- A `readOnly` write is blocked and nothing persists; the error is `TransactionSystemError` with `PROTOCOL_CONNECTION_LOST` in `applicationError`.
 
 For **direct MySQL connections only**, explicitly opt into applying isolation settings:
 
 ```ts
-useMySQLConnectionPerTransaction(config, undefined, { isolationLevel: "apply" });
-// Or: useTransactionManager(new MySQLConnectionPerTransactionManager(config, { isolationLevel: "apply" }));
+useMySQLConnectionPerTransaction(config, undefined, { isolationLevelSupport: "apply" });
+// Or: useTransactionManager(new MySQLConnectionPerTransactionManager(config, { isolationLevelSupport: "apply" }));
 ```
 
-The constructor accepts `(config, options?)`; the registration helper accepts `(config, name?, options?)`. `isolationLevel: "reject"` is the default; `"apply"` uses `SET TRANSACTION ISOLATION LEVEL` followed by `START TRANSACTION`. Hyperdrive cannot be detected reliably at runtime: do not enable `"apply"` there. The existing pool manager is unchanged. On Node without Hyperdrive, prefer `useMySQLTransactionManager(pool)` to avoid opening a new connection per physical transaction.
+The constructor accepts `(config, options?)`; the registration helper accepts `(config, name?, options?)`. `isolationLevelSupport: "reject"` is the default; `"apply"` uses `SET TRANSACTION ISOLATION LEVEL` followed by `START TRANSACTION`. Hyperdrive cannot be detected reliably at runtime: do not enable `"apply"` there. The existing pool manager is unchanged. On Node without Hyperdrive, prefer `useMySQLTransactionManager(pool)` to avoid opening a new connection per physical transaction.
+
+### Helper types
+
+The `ctx()` return types and exported `PoolClient` / `PoolConnection` aliases retain their 1.1.0 definitions for source compatibility. For new helpers accepting either connection mode, use `TransactionClient` from `@tranjs/pg` or `TransactionConnection` from `@tranjs/mysql2`; these expose the common query surface without requiring pool-only members. Do not use pool lifecycle methods on connections owned by TranJS.
 
 ## Driver Features
 

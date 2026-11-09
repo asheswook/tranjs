@@ -7,6 +7,7 @@
     "build": "tsc -b",
     "test": "lerna run test",
     "test:legacy": "bash scripts/legacy-smoke.sh",
+    "test:types": "tsc -p test/types/tsconfig.json --noEmit",
     "publish": "lerna run test && npm run build && lerna publish"
   },
   "repository": {

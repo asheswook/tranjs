@@ -45,3 +45,5 @@ jobs:
       - run: npm test
       - name: Smoke test published legacy drivers
         run: npm run test:legacy
+      - name: Type compatibility
+        run: npm run test:types
