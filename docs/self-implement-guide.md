@@ -1,106 +1,131 @@
-# Self-Implementation Guide
-
-If the desired database driver isn’t available or you prefer to create your own, this guide will help you implement a custom driver using TranJS’s core package.
-
-## Step 1: Install Core Package
-
-Begin by installing only the core TranJS package:
+# Implement a driver
 
 ```bash
-npm install @tranjs/core --save
+npm install @tranjs/core
 ```
 
-## Step 2: Extend PlatformTransactionManager
+## Minimal manager
 
-TranJS provides an abstract class, `PlatformTransactionManager`, which you must extend to implement your custom transaction management logic.
-
-Below is an example implementation:
+Extend `PlatformTransactionManager<Tx>` and implement begin, commit, and rollback. Begin returns the connection and its driver metadata. This example assumes a pool with the interface below and PostgreSQL-compatible transaction SQL; adapt acquisition and SQL to your database.
 
 ```typescript
 import {
+    getTransactionManager,
     MetadataWrappedTransaction,
+    NoTransactionContextError,
     PlatformTransactionManager,
     TransactionContext,
+    TransactionContextMixingError,
     TransactionOptions,
-} from '@tranjs/core';
+    useTransactionManager,
+} from "@tranjs/core";
 
-interface CustomConnection extends TransactionContext {
-    query(sql: string, params?: any[]): Promise<any>;
+interface Connection extends TransactionContext {
+    query(sql: string): Promise<unknown>;
+    release(): void;
+    destroy(): void;
 }
 
-const DRIVER_NAME = Symbol('custom');
+interface ConnectionPool {
+    getConnection(): Promise<Connection>;
+}
 
-class CustomDriverTransactionManager extends PlatformTransactionManager<CustomConnection> {
-    constructor(private readonly pool: any) {
+const DRIVER_NAME = Symbol("custom");
+
+class CustomTransactionManager extends PlatformTransactionManager<Connection> {
+    constructor(private readonly pool: ConnectionPool) {
         super();
     }
 
-    // Required
-    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<CustomConnection>> {
+    protected async beginTransaction(
+        options?: TransactionOptions,
+    ): Promise<MetadataWrappedTransaction<Connection>> {
         const connection = await this.pool.getConnection();
         try {
-            // Apply options.isolationLevel / options.readOnly as your DB supports them.
-            await connection.query('BEGIN');
+            let sql = "BEGIN";
+            if (options?.isolationLevel) sql += ` ISOLATION LEVEL ${options.isolationLevel}`;
+            if (options?.readOnly) sql += " READ ONLY";
+            await connection.query(sql);
+            return { transaction: connection, metadata: { driverName: DRIVER_NAME } };
         } catch (error) {
-            // Begin owns its cleanup because core has not received the connection yet.
-            try { await connection.query('ROLLBACK'); connection.release(); }
-            catch { connection.destroy(); }
+            // Core has not received this connection, so begin owns its cleanup.
+            try {
+                await connection.query("ROLLBACK");
+                connection.release();
+            } catch {
+                connection.destroy();
+            }
             throw error;
         }
-        return { transaction: connection, metadata: { driverName: DRIVER_NAME } };
     }
 
-    // Required: only send COMMIT. Core never calls rollback after a commit failure.
-    protected async commitTransaction(tx: CustomConnection): Promise<void> {
-        await tx.query('COMMIT');
+    protected async commitTransaction(tx: Connection): Promise<void> {
+        await tx.query("COMMIT");
     }
 
-    // Required
-    protected async rollbackTransaction(tx: CustomConnection): Promise<void> {
-        await tx.query('ROLLBACK');
+    protected async rollbackTransaction(tx: Connection): Promise<void> {
+        await tx.query("ROLLBACK");
     }
 
-    // Optional (default no-op). Called exactly once in core's finally block.
-    protected async releaseTransaction(tx: CustomConnection, failed: boolean): Promise<void> {
-        if (failed) (tx as any).destroy();
-        else (tx as any).release();
+    protected async releaseTransaction(tx: Connection, failed: boolean): Promise<void> {
+        if (failed) tx.destroy();
+        else tx.release();
     }
+}
 
-    // Expose this for a ctx() query wrapper to check before each query.
-    public checkDeadline(): number | undefined {
-        return this.getRemainingTimeout();
+function register(pool: ConnectionPool, name?: string | symbol): void {
+    useTransactionManager(new CustomTransactionManager(pool), name);
+}
+
+function ctx(datasource?: string | symbol): Connection {
+    const manager = getTransactionManager(datasource);
+    if (!(manager instanceof CustomTransactionManager)) {
+        throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
-
-    // Optional: implement only if you support Propagation.NESTED. Otherwise it throws NestedTransactionNotSupportedError.
-    protected async createSavepoint(tx: CustomConnection, name: string) { await tx.query(`SAVEPOINT ${name}`); }
-    protected async rollbackToSavepoint(tx: CustomConnection, name: string) { await tx.query(`ROLLBACK TO SAVEPOINT ${name}`); }
-    protected async releaseSavepoint(tx: CustomConnection, name: string) { await tx.query(`RELEASE SAVEPOINT ${name}`); }
+    const tx = manager.getCurrentTransaction();
+    if (!tx) throw new NoTransactionContextError();
+    return tx;
 }
 ```
 
-Read the current transaction with `manager.getCurrentTransaction()`. Like the native drivers, you can expose a type-safe `ctx()` based on it.
+Call `register(pool, name?)` once at module scope, then use `@Transactional` or `runInTransaction`. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
 
-The lifecycle is begin → callback → commit or rollback → completion hooks → `releaseTransaction` in a `finally` block. `failed` is true only when commit or rollback throws (an application error with successful rollback gives `false`). `afterCommit` hooks run sequentially, stopping at the first error and propagating it; the transaction remains committed, no rollback or `afterRollback` hooks run, and release is called once with `failed=false`. `afterRollback` errors are logged and swallowed. Never return a connection with an uncertain completion outcome to the pool; dispose of it instead. Begin failures must clean up within `beginTransaction` itself. Keep release hooks reliable: a thrown cleanup error can replace the pending error.
+## Connection cleanup
 
-Core never calls rollback after a commit failure; it runs `afterRollback` hooks and rethrows the commit error. When physical rollback fails, core logs the original error and throws `TransactionSystemError` with the rollback error as `cause` and the original as `applicationError`.
+The lifecycle is begin → callback → commit or rollback → completion hooks → `releaseTransaction(tx, failed)` in a `finally` block. The release hook is optional (a no-op by default) and is called exactly once after a successful begin, even if a completion hook throws. Put connection cleanup there, not in commit or rollback.
 
-Existing published drivers that release inside commit/rollback can keep doing so with the default no-op release hook: core will not roll back after failed commit and double-release. When migrating, move cleanup to `releaseTransaction` and remove it from commit/rollback; never do both.
+`failed` is true only if physical commit or rollback throws. An application error followed by successful rollback gives `false`; an `afterCommit` error also gives `false`. Dispose of connections with uncertain completion outcomes rather than returning them to a pool. Begin failures must clean up within `beginTransaction`, because core has not received the connection yet. Keep release reliable: a thrown cleanup error can replace a pending error.
 
-Core manages savepoint rollback-only state: a successful `NESTED` rollback to a savepoint clears the entire `rollbackOnly` flag, including preexisting state. A nested callback that returns while rollback-only causes savepoint rollback, flag clearing, and `UnexpectedRollbackError`; the outer callback can catch it and commit, unless the owner's deadline check fails.
+Core does not call rollback after commit failure. For error precedence, completion hooks, and logging, see the [API rollback rules](api.md#rollback-rules) and [hooks](api.md#hooks).
 
-For deadlines, `timeout` must be finite, nonnegative, and no greater than `2147483647` ms. Expose `getRemainingTimeout()` through a public method and call it immediately before each query in your type-safe `ctx()` wrapper. Pass its remaining milliseconds to the driver’s per-query timeout, always overriding user timeouts and pool defaults (including shorter values), while preserving other query arguments. It returns `undefined` without a deadline; leave user options untouched in that case. Once expired it marks rollback-only and throws `TransactionTimeoutError`. Bind other methods to the real connection. Core also checks the deadline before commit, but cannot interrupt arbitrary callback code. Native drivers show Proxy-based examples.
+## Optional savepoints
 
-The native PostgreSQL wrapper treats Submittables (`pg.Query`, `pg-query-stream`, `pg-cursor`) specially: check the deadline only before dispatch and pass them through untouched, without per-query timeout injection or interception. Streams must be consumed inside the transactional callback; the owner still checks the deadline before commit.
-
-## Step 3: Use Your Custom Driver
-
-After implementing your custom driver, you can use it in your application by calling `useTransactionManager` with an instance of your custom driver:
+Implement all three savepoint methods to support `NESTED` inside a transaction. Otherwise the default methods throw `NestedTransactionNotSupportedError`. Building on the manager above:
 
 ```typescript
-import { useTransactionManager } from '@tranjs/core';
+class SavepointTransactionManager extends CustomTransactionManager {
+    protected async createSavepoint(tx: Connection, name: string): Promise<void> {
+        await tx.query(`SAVEPOINT ${name}`);
+    }
 
-useTransactionManager(new CustomDriverTransactionManager(pool));
-// or register under a name: useTransactionManager(manager, "secondary");
+    protected async rollbackToSavepoint(tx: Connection, name: string): Promise<void> {
+        await tx.query(`ROLLBACK TO SAVEPOINT ${name}`);
+    }
+
+    protected async releaseSavepoint(tx: Connection, name: string): Promise<void> {
+        await tx.query(`RELEASE SAVEPOINT ${name}`);
+    }
+}
 ```
 
-That’s it! You’ve successfully implemented a custom driver for TranJS.
+Core generates savepoint names and manages rollback-only state, including the [reset after successful savepoint rollback](api.md#rollback-rules).
+
+## Query deadlines
+
+The minimal `ctx()` above returns the raw connection. Core checks deadlines before commit, but query-level enforcement needs a wrapper. The [native driver wrappers](../packages/pg/src/manager.ts) provide examples.
+
+Expose protected `getRemainingTimeout()` through a public manager method and call it immediately before each query. It returns the remaining milliseconds, or `undefined` without a deadline; on expiry it marks rollback-only and throws `TransactionTimeoutError`. Inject the remaining time into the driver's per-query timeout, preserving other arguments and overriding user timeouts and pool defaults, including shorter values. Leave options untouched when no deadline exists. Bind other connection methods to the real connection.
+
+If that injected timer fires, use protected `expireTransaction()` to mark rollback-only and obtain a `TransactionTimeoutError` without rechecking the clock: timers can fire just before `Date.now()` reaches the deadline. It returns `undefined` without a deadline.
+
+See [deadline limits and client-side semantics](api.md#deadlines), including PostgreSQL Submittable handling. Implement or reject isolation and read-only options according to the database's capabilities.

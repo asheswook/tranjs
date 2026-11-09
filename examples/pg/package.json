@@ -10,8 +10,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@tranjs/core": "^1.0.17",
-    "@tranjs/pg": "^1.0.14",
+    "@tranjs/core": "^1.1.0",
+    "@tranjs/pg": "^1.2.0",
     "pg": "^8.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.11",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }
