@@ -9,7 +9,7 @@
 ![Deno](https://img.shields.io/badge/Deno-supported-000000?logo=deno&logoColor=white)
 ![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-supported-F38020?logo=cloudflareworkers&logoColor=white)
 
-Declarative transactions for JavaScript and TypeScript, without an ORM. You write SQL with your usual driver (`pg` or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
+Declarative transactions for JavaScript and TypeScript, without an ORM. You write SQL with your usual driver (`pg`, `postgres`, or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
 
 ```ts
 import { Transactional, Propagation } from "@tranjs/core";
@@ -44,15 +44,18 @@ class AccountService {
 - 🎛️ **Isolation level, read-only and timeout** per transaction
 - 🗄️ **Multiple datasources**, each with independent transactions
 - 🪝 **`afterCommit` / `afterRollback` hooks**
-- 🐘 **PostgreSQL and MySQL** through `pg` and `mysql2`, or [your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
+- 🐘 **PostgreSQL and MySQL** through `pg`, `postgres` (postgres.js), and `mysql2`, or [your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - ☁️ **Runs on Node.js, Bun, Deno and Cloudflare Workers**
 - ⚡ **TypeScript native**, no runtime dependencies in the core package
 
 ## Install
 
 ```bash
-# PostgreSQL
+# PostgreSQL (pg)
 npm install @tranjs/core @tranjs/pg pg
+
+# PostgreSQL (postgres.js)
+npm install @tranjs/core @tranjs/postgres postgres
 
 # MySQL
 npm install @tranjs/core @tranjs/mysql2 mysql2

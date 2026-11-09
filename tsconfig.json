@@ -19,6 +19,7 @@
   "references": [
     { "path": "./packages/core" },
     { "path": "./packages/mysql2" },
-    { "path": "./packages/pg" }
+    { "path": "./packages/pg" },
+    { "path": "./packages/postgres" }
   ]
 }
