@@ -355,7 +355,9 @@ describe("postgres.js connection per transaction (real database)", () => {
         expect(rows).toHaveLength(0);
     });
 
-    it.each(["idle-query", "idle-commit", "active-query"])(
+    // postgres.js 3.x can throw an uncaught error for queries after a connection
+    // drops, including in its own sql.begin(); TranJS does not intercept it.
+    (process.env.POSTGRES_MAJOR === "3" ? it.skip : it).each(["idle-query", "idle-commit", "active-query"])(
         "survives backend termination in a child process (%s) and releases and ends once", async scenario => {
             const { stdout, stderr } = await execFileAsync(process.execPath, [
                 "--unhandled-rejections=strict", resolve(__dirname, "../../../scripts/test/connection-loss.cjs"), "postgres", scenario,

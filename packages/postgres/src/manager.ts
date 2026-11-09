@@ -26,7 +26,11 @@ export type PostgresConnectionConfig = string | postgres.Options<{}>;
 export type PostgresConnectionConfigSource = PostgresConnectionConfig |
     (() => PostgresConnectionConfig | Promise<PostgresConnectionConfig>);
 
-export function usePostgresTransactionManager(sql: postgres.Sql, name?: string | symbol) {
+// v3's ReservedSql incorrectly extends the pool's Sql interface. A reservation
+// still isn't a pool and cannot be used to reserve another transaction.
+type PostgresPool = postgres.Sql & { readonly release?: never };
+
+export function usePostgresTransactionManager(sql: PostgresPool, name?: string | symbol) {
     useTransactionManager(new PostgresTransactionManager(sql), name);
 }
 
@@ -37,7 +41,8 @@ export function usePostgresConnectionPerTransaction(config: PostgresConnectionCo
 
 // Symbol.dispose / asyncDispose may be missing on older runtimes; filter them out.
 const HIDDEN_MEMBERS = new Set<PropertyKey>(
-    ["release", (Symbol as any).dispose, (Symbol as any).asyncDispose].filter((key): key is PropertyKey => key !== undefined),
+    ["begin", "reserve", "end", "close", "listen", "subscribe", "largeObject", "release",
+        (Symbol as any).dispose, (Symbol as any).asyncDispose].filter((key): key is PropertyKey => key !== undefined),
 );
 
 export function ctx<T extends Record<string, unknown> = {}>(datasource?: string | symbol): TransactionSql<T>;
@@ -79,7 +84,7 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
                     return (channel: string, payload: string) =>
                         wrapper`select pg_notify(${channel}, ${"" + payload})`.then(() => undefined);
                 }
-                if (property === "unsafe" || property === "file" || property === "batch") return new Proxy(value, {
+                if ((property === "unsafe" || property === "file" || property === "batch") && typeof value === "function") return new Proxy(value, {
                     apply: (fn, _receiver, args) => {
                         this.checkDeadline();
                         if (property === "batch" && Array.isArray(args[0])) {
@@ -193,7 +198,7 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
 }
 
 export class PostgresTransactionManager extends PostgresManagerBase {
-    constructor(private readonly sql: postgres.Sql) { super(); }
+    constructor(private readonly sql: PostgresPool) { super(); }
 
     protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<ReservedTransactionSql>> {
         const begin = this.beginSql(options);
@@ -210,8 +215,7 @@ export class PostgresTransactionManager extends PostgresManagerBase {
     }
 
     protected async releaseTransaction(tx: ReservedTransactionSql, _failed: boolean): Promise<void> {
-        // No public discard API. postgres.js closes broken connections itself;
-        // release also closes a connection still in a non-idle transaction state.
+        // postgres.js owns the reservation's release and connection disposal behavior.
         tx.release();
     }
 }

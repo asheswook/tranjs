@@ -34,7 +34,7 @@ Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`
 npm install @tranjs/core @tranjs/postgres postgres
 ```
 
-Requires postgres.js `^4.1.0` (`>=4.1.0 <5`). Create one `postgres()` instance at startup and register it:
+Requires postgres.js `^3.4.0 || ^4.1.0`. Create one `postgres()` instance at startup and register it:
 
 ```typescript
 import { Transactional } from "@tranjs/core";
@@ -60,9 +60,9 @@ If a query fails inside a transaction, PostgreSQL aborts the transaction, even w
 
 postgres.js has no per-query timeout, so a transaction `timeout` is enforced by cancelling the running query when the deadline passes; this surfaces as `TransactionTimeoutError`. Batch queries have the same deadline checks at construction and first execution, and the same cancellation behavior, as normal queries. `cursor()`, `forEach()`, `stream()` and `readable()` are only checked before they start and are not cancelled mid-way. Finish them inside the transaction.
 
-Your own postgres.js options, such as `query_timeout`, are left as they are.
+postgres.js 3.x has no `batch()` or instance `query_timeout` option. Your own supported postgres.js options are left as they are.
 
-After a failed commit or rollback, the connection is returned to postgres.js, which closes broken connections and connections still inside a transaction.
+Connection loss is handled by postgres.js itself. With 3.x, a query sent on a connection that has already dropped can throw an uncaught error inside postgres.js; 4.x rejects it with `CONNECTION_CLOSED`.
 
 ## MySQL (mysql2)
 
@@ -194,11 +194,15 @@ Driver tests use real databases. From the repository root:
 ```bash
 docker compose up -d
 npm run build && npm test
+npm run test:postgres:v3
+npm run test:types && npm run test:types:postgres:v3
 ```
 
 Override test connection strings with `PG_URL` and `MYSQL_URL`. To add another driver, see the [custom driver guide](self-implement-guide.md).
 
-After building, run the real-database CommonJS smoke test on Node.js 18, 20.10 and 22 (with `--no-experimental-require-module` on 22):
+The v3 suite uses an isolated workspace with postgres.js 3.4.x; the installed 4.x dependency is unchanged. Tests for native dirty-reservation release and disconnect behavior, batch queries and instance `query_timeout` run only on 4.x.
+
+After building, run the real-database CommonJS smoke test with both postgres.js majors on Node.js 18, 20.10 and 22 (with `--no-experimental-require-module` on 22):
 
 ```bash
 bash scripts/test/postgres-node-compat.sh --all

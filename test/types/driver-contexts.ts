@@ -36,6 +36,18 @@ export function postgresManagedMembers(tx: TransactionSql): void {
     void tx.begin(async () => {});
     // @ts-expect-error Ending the pool from inside a transaction isn't allowed.
     void tx.end();
+    // @ts-expect-error TranJS owns async disposal too.
+    tx[Symbol.asyncDispose]();
+    // @ts-expect-error Reserving another connection isn't a transaction operation.
+    void tx.reserve();
+    // @ts-expect-error Closing the pool isn't a transaction operation.
+    void tx.close();
+    // @ts-expect-error A transaction cannot own a persistent listener.
+    void tx.listen("channel", () => {});
+    // @ts-expect-error A transaction cannot own a subscription.
+    void tx.subscribe("*", () => {});
+    // @ts-expect-error Large-object APIs own their own transactions.
+    void tx.largeObject();
 }
 
 

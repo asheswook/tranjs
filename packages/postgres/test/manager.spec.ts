@@ -21,6 +21,7 @@ import {
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
 const table = "tranjs_postgres_driver_test";
 const failure = new Error("application failure");
+const itV4 = process.env.POSTGRES_MAJOR === "3" ? it.skip : it;
 
 class OtherDriverManager extends PlatformTransactionManager<object> {
     constructor() { super(); }
@@ -139,7 +140,8 @@ describe("postgres.js pool manager (real database)", () => {
         expect(await ids()).toEqual([]);
     });
 
-    it.each(["rollback", "commit", "begin"])("releases a dirty reservation once after %s failure", async path => {
+    // Only postgres.js 4.x discards a dirty reservation on release; 3.x returns it unchanged.
+    itV4.each(["rollback", "commit", "begin"])("releases a dirty reservation once after %s failure", async path => {
         const connection = await sql.reserve();
         const run = connection.unsafe.bind(connection);
         const rollbackError = new Error("injected ROLLBACK failure");
@@ -226,6 +228,11 @@ describe("postgres.js pool manager (real database)", () => {
             expect(tx[Symbol.dispose]).toBeUndefined();
             expect(tx[Symbol.asyncDispose]).toBeUndefined();
             expect("release" in tx).toBe(false);
+            for (const member of ["begin", "reserve", "end", "close", "listen", "subscribe", "largeObject"]) {
+                expect(tx[member]).toBeUndefined();
+                expect(member in tx).toBe(false);
+            }
+            if (process.env.POSTGRES_MAJOR === "3") expect(tx.batch).toBeUndefined();
             await tx.unsafe(`INSERT INTO ${table} VALUES (7)`);
         });
         expect(await ids()).toEqual([7]);
@@ -386,7 +393,7 @@ describe("postgres.js pool manager (real database)", () => {
         }, { timeout: 1000 })).rejects.toThrow(TransactionAbortedError);
     });
 
-    it("preserves postgres.js instance query_timeout options and errors", async () => {
+    itV4("preserves postgres.js instance query_timeout options and errors", async () => {
         const options = { max: 1, onnotice: false as const, query_timeout: 0.05 };
         const timed = postgres(url, options);
         usePostgresTransactionManager(timed);
@@ -434,7 +441,7 @@ describe("postgres.js pool manager (real database)", () => {
         } finally { await custom.end(); }
     });
 
-    it.each(["pool", "connection"])("runs lazy batches normally in %s mode", async mode => {
+    itV4.each(["pool", "connection"])("runs lazy batches normally in %s mode", async mode => {
         if (mode === "connection") usePostgresConnectionPerTransaction(url);
         await runInTransaction(async () => {
             const transaction = ctx();
@@ -445,7 +452,7 @@ describe("postgres.js pool manager (real database)", () => {
         }, { timeout: 1000 });
     });
 
-    it.each(["pool", "connection"])("cancels a running batch at the deadline in %s mode", async mode => {
+    itV4.each(["pool", "connection"])("cancels a running batch at the deadline in %s mode", async mode => {
         if (mode === "connection") usePostgresConnectionPerTransaction(url);
         let cancel!: jest.SpyInstance;
         await expect(runInTransaction(async () => {
@@ -459,7 +466,7 @@ describe("postgres.js pool manager (real database)", () => {
         expect(cancel).toHaveBeenCalledTimes(1);
     });
 
-    it.each(["pool", "connection"])("rejects a lazy batch awaited after expiry before dispatch in %s mode", async mode => {
+    itV4.each(["pool", "connection"])("rejects a lazy batch awaited after expiry before dispatch in %s mode", async mode => {
         if (mode === "connection") usePostgresConnectionPerTransaction(url);
         await expect(runInTransaction(async () => {
             const nativeBatch = jest.spyOn(raw(), "batch");

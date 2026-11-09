@@ -45,7 +45,11 @@ jobs:
       - name: Built postgres.js CommonJS compatibility (Node 18, 20.10, 22 without require(ESM))
         run: bash scripts/test/postgres-node-compat.sh --all
       - run: npm test
+      - name: Actual postgres.js v3 (including native-import child processes)
+        run: npm run test:postgres:v3
       - name: Smoke test published legacy drivers
         run: npm run test:legacy
       - name: Type compatibility
         run: npm run test:types
+      - name: Type compatibility with postgres.js v3
+        run: npm run test:types:postgres:v3

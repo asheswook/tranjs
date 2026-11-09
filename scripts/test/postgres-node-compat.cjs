@@ -11,6 +11,12 @@ Module._load = function (request, ...args) {
 };
 
 async function main() {
+    const { version } = JSON.parse(require("node:fs").readFileSync(
+        require("node:path").resolve(__dirname, "../../node_modules/postgres/package.json"), "utf8"));
+    if (process.env.POSTGRES_MAJOR) {
+        assert.equal(version.split(".")[0], process.env.POSTGRES_MAJOR,
+            "Native imports must exercise the requested postgres.js major");
+    }
     const { runInTransaction } = require("../../packages/core/dist");
     const {
         ctx,
@@ -56,7 +62,7 @@ async function main() {
             });
         }
         assert.deepEqual((await sql.unsafe(`SELECT id FROM ${table} ORDER BY id`)).map(row => row.id), [1, 3, 4, 6]);
-        console.log(`${process.version} ${process.execArgv.join(" ")}: built CJS pool + per-tx commit/rollback passed`);
+        console.log(`${process.version} ${process.execArgv.join(" ")} postgres.js ${version}: built CJS pool + per-tx commit/rollback passed`);
     } finally {
         try {
             if (created) await sql.unsafe(`DROP TABLE ${table}`);
