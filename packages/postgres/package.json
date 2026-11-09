@@ -1,11 +1,15 @@
 {
   "name": "@tranjs/postgres",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "TranJS driver for postgres.js. (PostgreSQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -b",
     "test": "jest --runInBand"
@@ -17,12 +21,26 @@
   "jest": {
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
-    "moduleFileExtensions": ["js", "json", "ts"],
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
     "transform": {
       "/node_modules/postgres/.+\\.js$": "<rootDir>/../../scripts/test/postgres-transform.cjs",
-      "^.+\\.ts$": ["ts-jest", { "tsconfig": { "module": "commonjs", "moduleResolution": "node" } }]
+      "^.+\\.ts$": [
+        "ts-jest",
+        {
+          "tsconfig": {
+            "module": "commonjs",
+            "moduleResolution": "node"
+          }
+        }
+      ]
     },
-    "transformIgnorePatterns": ["/node_modules/(?!postgres/)"],
+    "transformIgnorePatterns": [
+      "/node_modules/(?!postgres/)"
+    ],
     "testTimeout": 30000
   },
   "devDependencies": {
