@@ -1,9 +1,12 @@
 {
   "name": "@tranjs/mysql2",
-  "version": "1.0.19",
+  "version": "1.1.0",
   "description": "TranJS driver for mysql2. (MySQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -b",
     "test": "jest --runInBand"
@@ -15,8 +18,14 @@
   "jest": {
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
-    "moduleFileExtensions": ["js", "json", "ts"],
-    "transform": { "^.+\\.ts$": "ts-jest" },
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "transform": {
+      "^.+\\.ts$": "ts-jest"
+    },
     "testTimeout": 30000
   },
   "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61",
