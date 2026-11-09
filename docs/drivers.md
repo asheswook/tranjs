@@ -52,7 +52,7 @@ class Service {
 }
 ```
 
-`ctx(datasource?)` returns the connection reserved for the current transaction, typed as `TransactionSql`. Write queries on it as usual (``ctx()`SELECT ...` `` or `ctx().unsafe(...)`). Custom types are preserved on both `typed` and its `types` alias; use `ctx<{ bigint: bigint }>()` or `TransactionSql<{ bigint: bigint }>` when the registered connection has that custom type. Don't call `sql.begin()`, `release()` or transaction statements on it; TranJS manages those.
+`ctx(datasource?)` returns the connection reserved for the current transaction, typed as `TransactionSql`. Write queries on it as usual (``ctx()`SELECT ...` `` or `ctx().unsafe(...)`). Custom types are preserved on both `typed` and its `types` alias; use `ctx<{ bigint: bigint }>()` or `TransactionSql<{ bigint: bigint }>` when the registered connection has that custom type. TranJS releases the connection when the transaction ends, so `ctx()` has no `release()`, `begin()` or dispose methods (don't use it with `using`). Don't send `BEGIN`, `COMMIT` or `ROLLBACK` yourself either.
 
 For direct registration, pass `new PostgresTransactionManager(sql)` to `useTransactionManager`. Both registration helpers accept an optional datasource name as their second argument.
 

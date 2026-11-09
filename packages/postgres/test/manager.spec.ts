@@ -219,6 +219,31 @@ describe("postgres.js pool manager (real database)", () => {
         expect(await ids()).toEqual([]);
     });
 
+    it("hides release() and dispose methods on ctx(), so `using` can't release before commit", async () => {
+        await runInTransaction(async () => {
+            const tx = ctx() as any;
+            expect(tx.release).toBeUndefined();
+            expect(tx[Symbol.dispose]).toBeUndefined();
+            expect(tx[Symbol.asyncDispose]).toBeUndefined();
+            expect("release" in tx).toBe(false);
+            await tx.unsafe(`INSERT INTO ${table} VALUES (7)`);
+        });
+        expect(await ids()).toEqual([7]);
+    });
+
+    it("sends notify() through the deadline wrapper", async () => {
+        const received: string[] = [];
+        const listener = await sql.listen("tranjs_notify_test", value => received.push(value));
+        await runInTransaction(async () => { await ctx().notify("tranjs_notify_test", "committed"); });
+        await expect(runInTransaction(async () => {
+            await new Promise(resolve => setTimeout(resolve, 150));
+            await ctx().notify("tranjs_notify_test", "after-deadline");
+        }, { timeout: 100 })).rejects.toThrow(TransactionTimeoutError);
+        await new Promise(resolve => setTimeout(resolve, 200));
+        await listener.unlisten();
+        expect(received).toEqual(["committed"]);
+    });
+
     it.each(["tagged", "unsafe", "execute"])("cancels an in-flight %s query, both first and after an earlier query", async format => {
         for (const armed of [false, true]) {
             await expect(runInTransaction(async () => {

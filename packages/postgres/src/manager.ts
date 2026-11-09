@@ -10,7 +10,7 @@ import {
     TransactionOptions,
     useTransactionManager,
 } from "@tranjs/core";
-import { TransactionSql } from "./context";
+import { ReservedTransactionSql, TransactionSql } from "./context";
 import { TransactionAbortedError } from "./errors";
 
 const DRIVER_NAME = Symbol("postgres");
@@ -35,6 +35,11 @@ export function usePostgresConnectionPerTransaction(config: PostgresConnectionCo
     useTransactionManager(new PostgresConnectionPerTransactionManager(config), name);
 }
 
+// Symbol.dispose / asyncDispose may be missing on older runtimes; filter them out.
+const HIDDEN_MEMBERS = new Set<PropertyKey>(
+    ["release", (Symbol as any).dispose, (Symbol as any).asyncDispose].filter((key): key is PropertyKey => key !== undefined),
+);
+
 export function ctx<T extends Record<string, unknown> = {}>(datasource?: string | symbol): TransactionSql<T>;
 export function ctx(datasource?: string | symbol): TransactionSql;
 export function ctx(datasource?: string | symbol): TransactionSql {
@@ -47,14 +52,14 @@ export function ctx(datasource?: string | symbol): TransactionSql {
     return manager.wrapConnection(transaction);
 }
 
-abstract class PostgresManagerBase extends PlatformTransactionManager<TransactionSql> {
-    private readonly wrappers = new WeakMap<TransactionSql, TransactionSql>();
+abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTransactionSql> {
+    private readonly wrappers = new WeakMap<ReservedTransactionSql, TransactionSql>();
     private readonly queries = new WeakMap<object, object>();
     private readonly nativeQueries = new WeakMap<object, object>();
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
-    public wrapConnection(connection: TransactionSql): TransactionSql {
+    public wrapConnection(connection: ReservedTransactionSql): TransactionSql {
         const cached = this.wrappers.get(connection);
         if (cached) return cached;
         const wrapper = new Proxy(connection, {
@@ -62,8 +67,18 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
                 this.checkDeadline();
                 return this.wrapQuery(Reflect.apply(target, receiver, args));
             },
+            has: (target, property) => !HIDDEN_MEMBERS.has(property) && Reflect.has(target, property),
             get: (target, property) => {
+                // TranJS releases the connection when the transaction ends; releasing it
+                // from user code (including `using`) would break the commit.
+                if (HIDDEN_MEMBERS.has(property)) return undefined;
                 const value = Reflect.get(target, property, target);
+                if (property === "notify") {
+                    // Native notify() awaits an internal query; issue the same statement
+                    // through the wrapper so it gets the deadline check and cancellation.
+                    return (channel: string, payload: string) =>
+                        wrapper`select pg_notify(${channel}, ${"" + payload})`.then(() => undefined);
+                }
                 if (property === "unsafe" || property === "file" || property === "batch") return new Proxy(value, {
                     apply: (fn, _receiver, args) => {
                         this.checkDeadline();
@@ -82,8 +97,10 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
                 return value;
             },
         });
-        this.wrappers.set(connection, wrapper);
-        return wrapper;
+        // The proxy hides the managed members at runtime, which is what TransactionSql describes.
+        const publicWrapper = wrapper as unknown as TransactionSql;
+        this.wrappers.set(connection, publicWrapper);
+        return publicWrapper;
     }
 
     private wrapQuery(query: any): any {
@@ -153,24 +170,24 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
         return sql;
     }
 
-    protected async commitTransaction(tx: TransactionSql): Promise<void> {
+    protected async commitTransaction(tx: ReservedTransactionSql): Promise<void> {
         const result = await tx.unsafe("COMMIT");
         if (result.command === "ROLLBACK") throw new TransactionAbortedError();
     }
 
-    protected async rollbackTransaction(tx: TransactionSql): Promise<void> {
+    protected async rollbackTransaction(tx: ReservedTransactionSql): Promise<void> {
         await tx.unsafe("ROLLBACK");
     }
 
-    protected async createSavepoint(tx: TransactionSql, name: string): Promise<void> {
+    protected async createSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
         await tx.unsafe(`SAVEPOINT ${name}`);
     }
 
-    protected async rollbackToSavepoint(tx: TransactionSql, name: string): Promise<void> {
+    protected async rollbackToSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
         await tx.unsafe(`ROLLBACK TO SAVEPOINT ${name}`);
     }
 
-    protected async releaseSavepoint(tx: TransactionSql, name: string): Promise<void> {
+    protected async releaseSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
         await tx.unsafe(`RELEASE SAVEPOINT ${name}`);
     }
 }
@@ -178,7 +195,7 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<Transactio
 export class PostgresTransactionManager extends PostgresManagerBase {
     constructor(private readonly sql: postgres.Sql) { super(); }
 
-    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<TransactionSql>> {
+    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<ReservedTransactionSql>> {
         const begin = this.beginSql(options);
         const connection = await this.sql.reserve();
         try {
@@ -192,7 +209,7 @@ export class PostgresTransactionManager extends PostgresManagerBase {
         }
     }
 
-    protected async releaseTransaction(tx: TransactionSql, _failed: boolean): Promise<void> {
+    protected async releaseTransaction(tx: ReservedTransactionSql, _failed: boolean): Promise<void> {
         // No public discard API. postgres.js closes broken connections itself;
         // release also closes a connection still in a non-idle transaction state.
         tx.release();
@@ -201,8 +218,8 @@ export class PostgresTransactionManager extends PostgresManagerBase {
 
 /** A one-connection postgres.js instance per physical transaction, for Workers + Hyperdrive. */
 export class PostgresConnectionPerTransactionManager extends PostgresManagerBase {
-    private readonly pools = new WeakMap<TransactionSql, postgres.Sql>();
-    private readonly ended = new WeakSet<TransactionSql>();
+    private readonly pools = new WeakMap<ReservedTransactionSql, postgres.Sql>();
+    private readonly ended = new WeakSet<ReservedTransactionSql>();
     private cleanupLogger: Logger = console;
 
     constructor(private readonly config: PostgresConnectionConfigSource) { super(); }
@@ -221,12 +238,12 @@ export class PostgresConnectionPerTransactionManager extends PostgresManagerBase
         catch (error) { this.logCleanup(error); }
     }
 
-    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<TransactionSql>> {
+    protected async beginTransaction(options?: TransactionOptions): Promise<MetadataWrappedTransaction<ReservedTransactionSql>> {
         const begin = this.beginSql(options);
         const config = typeof this.config === "function" ? await this.config() : this.config;
         const postgres = await loadPostgres();
         const sql = typeof config === "string" ? postgres(config, { max: 1 }) : postgres({ ...config, max: 1 });
-        let connection: TransactionSql;
+        let connection: ReservedTransactionSql;
         try { connection = await sql.reserve(); }
         catch (error) {
             await this.end(sql);
@@ -243,7 +260,7 @@ export class PostgresConnectionPerTransactionManager extends PostgresManagerBase
         }
     }
 
-    protected async releaseTransaction(tx: TransactionSql, _failed: boolean): Promise<void> {
+    protected async releaseTransaction(tx: ReservedTransactionSql, _failed: boolean): Promise<void> {
         if (this.ended.has(tx)) return;
         this.ended.add(tx);
         try { tx.release(); }

@@ -25,10 +25,19 @@ export type PgAliasUnchanged = Expect<Equal<PoolClient, LegacyPg>>;
 export type MySQLAliasUnchanged = Expect<Equal<PoolConnection, LegacyMySQL>>;
 export type PgCtxUnchanged = Expect<Equal<ReturnType<typeof pgCtx>, LegacyPg>>;
 export type MySQLCtxUnchanged = Expect<Equal<ReturnType<typeof mysqlCtx>, LegacyMySQL>>;
-export type PostgresReservedAlias = Expect<Equal<TransactionSql, postgres.ReservedSql>>;
-export type PostgresCtxReserved = Expect<Equal<ReturnType<typeof postgresCtx>, postgres.ReservedSql>>;
 export type PostgresCtxTransactionSql = Expect<Equal<ReturnType<typeof postgresCtx>, TransactionSql>>;
-export type PostgresCustomTypes = Expect<Equal<TransactionSql<{ bigint: bigint }>, postgres.ReservedSql<{ bigint: bigint }>>>;
+// ctx() must not expose members TranJS owns.
+export function postgresManagedMembers(tx: TransactionSql): void {
+    // @ts-expect-error TranJS releases the connection; ctx() has no release().
+    tx.release();
+    // @ts-expect-error No `using` disposal: it would release before commit.
+    tx[Symbol.dispose]();
+    // @ts-expect-error Pool-level transactions aren't available inside a TranJS transaction.
+    void tx.begin(async () => {});
+    // @ts-expect-error Ending the pool from inside a transaction isn't allowed.
+    void tx.end();
+}
+
 
 // This is compiled, not executed: cover old consumers and both new helper types.
 export function consumerChecks(pgClient: pg.Client, pgPoolClient: pg.PoolClient,
@@ -55,6 +64,7 @@ export const removedPolicy: MySQLConnectionPerTransactionOptions = { isolationLe
 export function postgresConsumerChecks(sql: postgres.Sql, reserved: postgres.ReservedSql,
     options: postgres.Options<{}>): void {
     const helper = (transaction: TransactionSql) => transaction`SELECT ${42}::integer AS value`;
+    // @ts-expect-error A raw reserved connection exposes release(); TranJS hands out TransactionSql instead.
     void helper(reserved);
     void helper(postgresCtx());
     void helper(postgresCtx("named"));
