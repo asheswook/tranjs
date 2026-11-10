@@ -49,6 +49,16 @@ export function runInTransaction<T>(fn: () => Promise<T> | T, config: Transactio
     return (async () => getTransactionManager(datasource).executeTransaction(propagation, fn, options))();
 }
 
+/** Wrap a function in a managed transaction, resolving its datasource on each invocation. */
+export function transactional<This, Args extends unknown[], R>(
+    fn: (this: This, ...args: Args) => R, config: TransactionConfig = {},
+): (this: This, ...args: Args) => Promise<Awaited<R>> {
+    const snapshot = { ...config };
+    return async function(this: This, ...args: Args): Promise<Awaited<R>> {
+        return await runInTransaction(() => fn.apply(this, args), snapshot);
+    };
+}
+
 /** Register on the physical transaction; without an active transaction, run immediately. */
 export function afterCommit(fn: TransactionSynchronization, datasource: string | symbol = DEFAULT_DATASOURCE): void | Promise<void> {
     const state = AsyncLocal.Frame?.txs.get(managers.get(datasource)!);

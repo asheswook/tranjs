@@ -5,7 +5,7 @@ import {
     getTransactionManager,
     PlatformTransactionManager,
     Propagation,
-    runInTransaction,
+    transactional,
     TransactionContextMixingError,
     TransactionTimeoutError,
     UnexpectedRollbackError,
@@ -63,56 +63,56 @@ describe("MySQL driver (real database)", () => {
     }
 
     it("commits and releases its connection", async () => {
-        const result = await runInTransaction(async () => {
+        const result = await transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             return 42;
-        });
+        })();
         expect(result).toBe(42);
         expect(await ids()).toEqual([1]);
     });
 
     it("rolls back and preserves the application error", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([]);
     });
 
     it("REQUIRES_NEW uses a separate connection and survives outer rollback", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect(ctx()).not.toBe(outer);
                 const [rows] = await ctx().query<RowDataPacket[]>(`SELECT id FROM ${table}`);
                 expect(rows).toEqual([]);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
-            }, { propagation: Propagation.REQUIRES_NEW });
+            }, { propagation: Propagation.REQUIRES_NEW })();
             expect(ctx()).toBe(outer);
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([2]);
     });
 
     it("NESTED rolls back to a savepoint without losing the outer transaction", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
-            await expect(runInTransaction(async () => {
+            await expect(transactional(async () => {
                 expect(ctx()).toBe(outer);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
                 throw failure;
-            }, { propagation: Propagation.NESTED })).rejects.toBe(failure);
-            await runInTransaction(async () => {
+            }, { propagation: Propagation.NESTED })()).rejects.toBe(failure);
+            await transactional(async () => {
                 await ctx().query(`INSERT INTO ${table} VALUES (3)`);
-            }, { propagation: Propagation.NESTED });
-        });
+            }, { propagation: Propagation.NESTED })();
+        })();
         expect(await ids()).toEqual([1, 3]);
     });
 
     it("applies the requested isolation level to the current transaction", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             await ctx().query(`SELECT * FROM ${table}`);
             const [rows] = await ctx().query<RowDataPacket[]>(`
                 SELECT ISOLATION_LEVEL AS isolationLevel
@@ -123,13 +123,13 @@ describe("MySQL driver (real database)", () => {
                 )
             `);
             expect(rows[0].isolationLevel).toBe("READ COMMITTED");
-        }, { isolationLevel: IsolationLevel.READ_COMMITTED });
+        }, { isolationLevel: IsolationLevel.READ_COMMITTED })();
     });
 
     it("rejects writes in read-only transactions", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
-        }, { readOnly: true })).rejects.toMatchObject({ code: "ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION" });
+        }, { readOnly: true })()).rejects.toMatchObject({ code: "ER_CANT_EXECUTE_IN_READ_ONLY_TRANSACTION" });
         expect(await ids()).toEqual([]);
     });
 
@@ -139,7 +139,7 @@ describe("MySQL driver (real database)", () => {
         let rollback: jest.SpyInstance | undefined;
         let commit: jest.SpyInstance | undefined;
         let destroy: jest.SpyInstance | undefined;
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
             await connection.query(`INSERT INTO ${table} VALUES (1)`);
             release = jest.spyOn(connection, "release");
@@ -147,7 +147,7 @@ describe("MySQL driver (real database)", () => {
             destroy = jest.spyOn(connection, "destroy");
             // MySQL has no deferred constraints; fail COMMIT on a real checked-out connection.
             commit = jest.spyOn(connection, "commit").mockRejectedValueOnce(commitError);
-        })).rejects.toBe(commitError);
+        })()).rejects.toBe(commitError);
         expect(release).not.toHaveBeenCalled();
         expect(rollback).not.toHaveBeenCalled();
         expect(destroy).toHaveBeenCalledTimes(1);
@@ -156,12 +156,12 @@ describe("MySQL driver (real database)", () => {
         release?.mockRestore();
         destroy?.mockRestore();
         expect(await ids()).toEqual([]);
-        await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+        await transactional(async () => { await ctx().query("SELECT 1"); })();
     });
 
     it.each(["query string", "query options", "execute string", "execute options"])(
         "times out a slow %s and rolls back", async format => {
-            await expect(runInTransaction(async () => {
+            await expect(transactional(async () => {
                 await ctx().query(`INSERT INTO ${table} VALUES (1)`);
                 const sql = "SELECT SLEEP(?)";
                 const options = { sql, timeout: 5000 };
@@ -170,13 +170,13 @@ describe("MySQL driver (real database)", () => {
                 if (format === "execute string") await ctx().execute(sql, [0.2]);
                 if (format === "execute options") await ctx().execute(options, [0.2]);
                 expect(options.timeout).toBe(5000);
-            }, { timeout: 50 })).rejects.toThrow(TransactionTimeoutError);
+            }, { timeout: 50 })()).rejects.toThrow(TransactionTimeoutError);
             expect(await ids()).toEqual([]);
         },
     );
 
     it("merges query options without mutation and keeps methods bound", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
             const query = jest.spyOn(connection, "query");
             const execute = jest.spyOn(connection, "execute");
@@ -201,11 +201,11 @@ describe("MySQL driver (real database)", () => {
                 const ping = ctx().ping;
                 await ping();
             } finally { query.mockRestore(); execute.mockRestore(); }
-        }, { timeout: 1000 });
+        }, { timeout: 1000 })();
     });
 
     it.each(["query", "execute"] as const)("passes %s options through untouched without a deadline", async method => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
             const operation = jest.spyOn(connection, method);
             const config = { sql: "SELECT ? AS value", timeout: 200, rowsAsArray: true };
@@ -217,7 +217,7 @@ describe("MySQL driver (real database)", () => {
                 expect(operation.mock.calls[0][1]).toBe(values);
                 expect(config.timeout).toBe(200);
             } finally { operation.mockRestore(); }
-        });
+        })();
     });
 
     it.each(["query", "execute"] as const)(
@@ -230,7 +230,7 @@ describe("MySQL driver (real database)", () => {
                     const error = Object.assign(new Error(timer ? "Query inactivity timeout" : "connection reset"), {
                         code: timer ? "PROTOCOL_SEQUENCE_TIMEOUT" : "ECONNRESET",
                     });
-                    await expect(runInTransaction(async () => {
+                    await expect(transactional(async () => {
                         const connection = getTransactionManager().getCurrentTransaction() as NativeConnection;
                         const operation = jest.spyOn(connection, method).mockImplementationOnce((() => {
                             if (!timer) clock.mockReturnValue(now + 1001);
@@ -243,7 +243,7 @@ describe("MySQL driver (real database)", () => {
                                 expect(Date.now()).toBe(now); // Timer fired before the wall-clock deadline.
                             } else await expect(result).rejects.toBe(error);
                         } finally { operation.mockRestore(); }
-                    }, { timeout: 1000 })).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
+                    }, { timeout: 1000 })()).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
                 }
             } finally { clock.mockRestore(); }
         },
@@ -252,9 +252,9 @@ describe("MySQL driver (real database)", () => {
     it("validates isolation before acquiring a connection, including direct driver use", async () => {
         const getConnection = jest.spyOn(pool, "getConnection");
         try {
-            await expect(runInTransaction(async () => {}, {
+            await expect(transactional(async () => {}, {
                 isolationLevel: "INVALID" as IsolationLevel,
-            })).rejects.toThrow(InvalidIsolationLevelError);
+            })()).rejects.toThrow(InvalidIsolationLevelError);
             await expect((new MySQLTransactionManager(pool) as any).beginTransaction({
                 isolationLevel: "INVALID",
             })).rejects.toThrow(InvalidIsolationLevelError);
@@ -286,10 +286,10 @@ describe("MySQL driver (real database)", () => {
             const getConnection = jest.spyOn(pool, "getConnection").mockResolvedValueOnce(connection);
             const log = jest.spyOn(console, "error").mockImplementation(() => {});
             try {
-                const result = runInTransaction(async () => {
+                const result = transactional(async () => {
                     await ctx().query(`INSERT INTO ${table} VALUES (1)`);
                     if (path === "rollback") throw primaryError;
-                });
+                })();
                 if (path === "rollback") await expect(result).rejects.toMatchObject({
                     name: "TransactionSystemError", cause: rollbackError, applicationError: primaryError,
                 });
@@ -306,28 +306,28 @@ describe("MySQL driver (real database)", () => {
                 release.mockRestore();
                 log.mockRestore();
             }
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect((ctx() as NativeConnection).threadId).not.toBe(oldId);
                 const [rows] = await ctx().query<RowDataPacket[]>(`SELECT id FROM ${table}`);
                 expect(rows).toEqual([]);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
-            });
+            })();
             expect(await ids()).toEqual([2]);
         },
     );
 
     it("keeps two named datasources independent", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
             expect(() => ctx(second)).toThrow("Transaction context not initialized");
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect(ctx()).toBe(outer);
                 expect(ctx(second)).not.toBe(outer);
                 await ctx(second).query(`INSERT INTO ${table} VALUES (2)`);
-            }, { datasource: second });
+            }, { datasource: second })();
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([2]);
     });
 
@@ -337,9 +337,9 @@ describe("MySQL driver (real database)", () => {
 
     it("rejects a different driver's manager", async () => {
         useTransactionManager(new OtherDriverManager());
-        await runInTransaction(async () => {
+        await transactional(async () => {
             expect(() => ctx()).toThrow(TransactionContextMixingError);
-        });
+        })();
     });
 
     it("exports the manager for direct registration", () => {

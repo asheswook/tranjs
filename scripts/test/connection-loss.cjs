@@ -2,7 +2,7 @@
 // process, not get intercepted by Jest. Requires the public packages to be built.
 const assert = require("node:assert/strict");
 const { setTimeout: delay } = require("node:timers/promises");
-const { getTransactionManager, runInTransaction } = require("@tranjs/core");
+const { getTransactionManager, transactional } = require("@tranjs/core");
 
 function deferred() {
     let resolve;

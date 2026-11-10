@@ -1,4 +1,4 @@
-import { afterCommit, Propagation, runInTransaction, Transactional } from "@tranjs/core";
+import { afterCommit, Propagation, transactional, Transactional } from "@tranjs/core";
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions, TestTransactionProbe,
@@ -66,7 +66,7 @@ describe("P5: actionable diagnostics for agent-style service mistakes", () => {
     it("names explicit mocks and unnamed object properties in an actionable debit/credit diagnostic", async () => {
         await mockTransactions(async t => {
             const accounts = t.track({ debit: jest.fn().mockName('accounts.debit'), credit: jest.fn() });
-            await runInTransaction(accounts.debit);
+            await transactional(accounts.debit)();
             accounts.credit();
             expect(message(() => assertSameTransaction(accounts.debit, accounts.credit))).toMatchInlineSnapshot(`
 "Expected tracked function toRunInSameTransactionAs(other)
@@ -162,7 +162,7 @@ Received: sendReceipt → tx#1 (REQUIRED, committed), event 3"
         await mockTransactions(async t => {
             const insertOrder = t.track(function insertOrder() {});
             const sendReceipt = t.track(function sendReceipt() {});
-            await runInTransaction(insertOrder);
+            await transactional(insertOrder)();
             sendReceipt();
             expect(message(() => assertAfterCommitOf(sendReceipt, insertOrder))).toMatchInlineSnapshot(`
 "Expected tracked function toRunAfterCommitOf(other)
@@ -178,8 +178,8 @@ Requires an observed afterCommit callback for the committed transaction (later o
             const insertOrder = t.track(function insertOrder() {});
             const insertAudit = t.track(function insertAudit() {});
             const failedWrite = t.track(function failedWrite() {});
-            await runInTransaction(() => { insertOrder(); insertAudit(); });
-            await expect(runInTransaction(() => { failedWrite(); throw new Error("write failed"); })).rejects.toThrow("write failed");
+            await transactional(() => { insertOrder(); insertAudit(); })();
+            await expect(transactional(() => { failedWrite(); throw new Error("write failed"); })()).rejects.toThrow("write failed");
             assertRolledBack(failedWrite);
             boundary(failedWrite).toHaveRolledBack();
             boundary(failedWrite).not.toHaveCommitted();

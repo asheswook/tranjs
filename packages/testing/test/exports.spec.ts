@@ -108,12 +108,12 @@ describe("built package exports", () => {
                     async rollbackTransaction() {}
                 }
                 core.useTransactionManager(new Manager());
-                await core.runInTransaction(() => 42);
+                await core.transactional(() => 42)();
                 assert.equal(allocations, 1);
                 const testing = require('@tranjs/testing');
                 assert.equal(allocations, 1);
                 await testing.mockTransactions(async () => {
-                    await core.runInTransaction(() => 42);
+                    await core.transactional(() => 42)();
                 });
                 assert.equal(allocations, 2);
                 await testing.mockTransactions(() => {});

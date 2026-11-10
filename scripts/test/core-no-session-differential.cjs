@@ -1,12 +1,13 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { existsSync, mkdtempSync, symlinkSync, rmSync } = require('node:fs');
-const { tmpdir } = require('node:os');
+const { mkdirSync, mkdtempSync, symlinkSync, rmSync } = require('node:fs');
+const { homedir } = require('node:os');
 const { join, resolve } = require('node:path');
 
 const root = resolve(__dirname, '../..');
-const approvedTemporaryRoot = '/private/var/folders/3z/4k2d2fs94w15kcv6lndg5f9w0000gn/T/opencode';
-const temporary = mkdtempSync(join(existsSync(approvedTemporaryRoot) ? approvedTemporaryRoot : tmpdir(), 'tranjs-differential-'));
+const temporaryRoot = join(homedir(), 'work/scratch/revision-impl');
+mkdirSync(temporaryRoot, { recursive: true });
+const temporary = mkdtempSync(join(temporaryRoot, 'tranjs-differential-'));
 const baseline = join(temporary, 'main');
 const command = (file, args, cwd = root) => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: 'pipe' });
 let added = false;

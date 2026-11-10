@@ -1,9 +1,8 @@
 import { AsyncResource } from "node:async_hooks";
 import {
-    afterCommit, afterRollback, clearTransactionManager, Propagation, runInTransaction,
+    afterCommit, afterRollback, clearTransactionManager, Propagation, transactional,
     Transactional, TransactionTimeoutError, useTransactionManager,
 } from "@tranjs/core";
-const transactional = <R>(fn: () => R, config?: Parameters<typeof runInTransaction>[1]) => () => runInTransaction(fn, config);
 import { fixture, mockTransactions, withTestTransaction } from "@tranjs/testing";
 
 // Shared by all real-driver suites, including the isolated postgres-v3 runner

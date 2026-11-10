@@ -17,7 +17,7 @@ async function main() {
         assert.equal(version.split(".")[0], process.env.POSTGRES_MAJOR,
             "Native imports must exercise the requested postgres.js major");
     }
-    const { runInTransaction } = require("../../packages/core/dist");
+    const { transactional } = require("../../packages/core/dist");
     const {
         ctx,
         usePostgresTransactionManager,

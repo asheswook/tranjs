@@ -79,7 +79,7 @@ export function testProvenance(): TestStore["provenance"] {
 }
 export function runTestProvenance<T>(provenance: NonNullable<TestStore["provenance"]>, fn: () => T): T {
     const store = storage?.getStore();
-    return store ? storage!.run({ ...store, provenance }, fn) : fn();
+    return store ? storage!.run({ ...store, provenance: store.provenance === "fixture" ? "fixture" : provenance }, fn) : fn();
 }
 export function hasTestTransaction(): boolean {
     return Array.from(storage?.getStore()?.sessions.values() ?? []).some(session => !session.closed && session.kind === "integration");

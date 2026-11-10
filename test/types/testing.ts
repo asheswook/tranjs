@@ -1,14 +1,17 @@
-import { Propagation, runInTransaction } from "@tranjs/core";
+import { Propagation, transactional } from "@tranjs/core";
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
-    assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions,
+    assertSameTransaction, assertSeparateTransaction, fixture, FixtureOptions, matchers, mockTransactions,
     transactions as currentTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction,
 } from "@tranjs/testing";
+import type { PgFixtureConnection } from "@tranjs/pg";
+import type { Mysql2FixtureConnection } from "@tranjs/mysql2";
+import type { PostgresFixtureConnection } from "@tranjs/postgres";
 
 // Compiled against the built package in Node10, Node16 and bundler resolution modes.
 export const mockResult: Promise<{ value: number }> = mockTransactions(async t => {
     const repository = t.track({ save: (value: number) => ({ value }) });
-    return runInTransaction(() => repository.save(42));
+    return transactional(() => repository.save(42))();
 });
 export const rollbackResult: Promise<number> = withTestTransaction(t => {
     const work = t.track((value: number) => value);
@@ -76,3 +79,60 @@ void withTestTransaction(() => {}, { timeout: 1000 });
 void mockTransactions(() => {}, { readOnly: true });
 // @ts-expect-error Datasource must be a string or symbol.
 void mockTransactions(() => {}, { datasource: 42 });
+
+// Fixture callback annotations select the driver facade; options can be forwarded.
+void fixture(connection => {
+    // @ts-expect-error An unannotated fixture context is unknown, never an unrestricted native client.
+    return connection.query("SELECT 1");
+});
+export function forwardingFixture<C, R>(fn: (connection: C) => R, options: FixtureOptions): Promise<Awaited<R>> {
+    return fixture(fn, options);
+}
+export const pgFixture = fixture((connection: PgFixtureConnection) => {
+    const result = connection.query<{ value: number }>("SELECT $1 AS value", [42]);
+    // @ts-expect-error Configuration objects and callbacks are not fixture query forms.
+    connection.query({ text: "SELECT 1" });
+    // @ts-expect-error Native callback overloads are excluded.
+    connection.query("SELECT 1", [], () => {});
+    // @ts-expect-error Native connection internals cannot escape the facade.
+    void connection.connection;
+    // @ts-expect-error TranJS owns the connection lifecycle.
+    connection.release();
+    return result;
+}, { datasource: "pg" });
+export const mysqlFixture = fixture((connection: Mysql2FixtureConnection) => {
+    const result = connection.execute("SELECT ? AS value", [42]);
+    void connection.query("SELECT 1");
+    // @ts-expect-error Native config-object overloads are excluded.
+    connection.execute({ sql: "SELECT 1" });
+    // @ts-expect-error Native callback overloads are excluded.
+    connection.query("SELECT 1", [], () => {});
+    // @ts-expect-error Native connection internals cannot escape the facade.
+    void connection.connection;
+    // @ts-expect-error Manual lifecycle operations are excluded.
+    connection.commit();
+    return result;
+}, { datasource: Symbol("mysql") });
+export const postgresFixture = fixture((connection: PostgresFixtureConnection) => {
+    const result: Promise<unknown> = connection`SELECT ${42} AS value`;
+    void connection.unsafe<{ value: number }[]>("SELECT $1 AS value", [42]);
+    // @ts-expect-error Config objects are not SQL text.
+    connection.unsafe({ text: "SELECT 1" });
+    // @ts-expect-error Native unsafe query options are excluded.
+    connection.unsafe("SELECT 1", [], { simple: true });
+    // @ts-expect-error Fixture tags return plain eager promises, not native pending queries.
+    connection`SELECT 1`.cursor(1);
+    // @ts-expect-error Identifier helpers are not part of the restricted fixture facade.
+    connection("items");
+    // @ts-expect-error Native lifecycle methods cannot escape the facade.
+    connection.reserve();
+    // @ts-expect-error Native configuration cannot escape the facade.
+    void connection.options;
+    return result;
+});
+// @ts-expect-error Fixtures accept datasource only, not transaction policy.
+void fixture((connection: PgFixtureConnection) => connection.query("SELECT 1"), { propagation: Propagation.REQUIRED });
+// @ts-expect-error Fixtures do not expose transaction configuration.
+void fixture((connection: PgFixtureConnection) => connection.query("SELECT 1"), { readOnly: true });
+// @ts-expect-error Datasource forwarding remains type checked.
+void fixture((connection: PgFixtureConnection) => connection.query("SELECT 1"), { datasource: 42 });

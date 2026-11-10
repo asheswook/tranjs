@@ -1,6 +1,6 @@
 import {
     afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError,
-    Propagation, runInTransaction, TransactionSystemError, useTransactionManager,
+    Propagation, transactional, TransactionSystemError, useTransactionManager,
 } from "../src";
 import { fixture, mockTransactions, transactions, withTestTransaction } from "../../testing/src";
 import { FakeTransactionManager } from "../../testing/src/fake";
@@ -119,7 +119,7 @@ describe("fixture", () => {
         const callback = jest.fn();
         await withTestTransaction(async () => {
             await expect(fixture(callback)).rejects.toThrow("does not support fixture connections");
-            await expect(runInTransaction(() => 7)).resolves.toBe(7);
+            await expect(transactional(() => 7)()).resolves.toBe(7);
         });
         expect(callback).not.toHaveBeenCalled();
         expect(rollback).toHaveBeenCalledTimes(1);
@@ -175,7 +175,7 @@ describe("fixture", () => {
             expect(testSession(manager)!.fixtureActive).toBe(true);
             expect(callback).not.toHaveBeenCalled();
             await expect(fixture(denied)).rejects.toThrow("overlaps an active");
-            await expect(runInTransaction(denied)).rejects.toThrow("overlaps an active fixture");
+            await expect(transactional(denied)()).rejects.toThrow("overlaps an active fixture");
             savepoint.resolve();
             expect(await first).toBe("first");
             expect(testSession(manager)!.fixtureActive).toBe(false);
@@ -190,7 +190,7 @@ describe("fixture", () => {
             const gate = deferred();
             const callback = jest.fn();
             await withTestTransaction(async () => {
-                const work = runInTransaction(async () => { entered.resolve(); await gate.promise; }, { propagation });
+                const work = transactional(async () => { entered.resolve(); await gate.promise; }, { propagation })();
                 // SUPPORTS/NOT_SUPPORTED have no owner savepoint, but still own the overlap gate.
                 await expect(fixture(callback)).rejects.toThrow("overlaps an active");
                 await entered.promise;
@@ -226,7 +226,7 @@ describe("fixture", () => {
             await fixture(async () => {
                 await Promise.resolve();
                 for (const datasource of [undefined, other]) {
-                    await expect(runInTransaction(denied, { propagation, datasource })).rejects.toThrow("forbidden inside a fixture callback");
+                    await expect(transactional(denied, { propagation, datasource })()).rejects.toThrow("forbidden inside a fixture callback");
                 }
                 await expect(secondary.executeTransaction(propagation, denied)).rejects.toThrow("forbidden inside a fixture callback");
                 await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
@@ -243,7 +243,7 @@ describe("fixture", () => {
         await withTestTransaction(async () => {
             await fixture(() => {
                 retained = gate.promise.then(async () => {
-                    await expect(runInTransaction(denied, { propagation: Propagation.SUPPORTS })).rejects.toThrow("forbidden inside a fixture callback");
+                    await expect(transactional(denied, { propagation: Propagation.SUPPORTS })()).rejects.toThrow("forbidden inside a fixture callback");
                     await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
                 });
             });
@@ -260,17 +260,17 @@ describe("fixture", () => {
             await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
         });
         await withTestTransaction(async () => {
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
                 afterCommit(async () => {
                     await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
                 });
-            });
+            })();
             const error = new Error("owner rollback");
-            await expect(runInTransaction(() => {
+            await expect(transactional(() => {
                 afterRollback(rollbackHook);
                 throw error;
-            })).rejects.toBe(error);
+            })()).rejects.toBe(error);
             await afterCommit(async () => {
                 await Promise.resolve();
                 await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
@@ -423,7 +423,7 @@ describe("fixture", () => {
         await expect(withTestTransaction(async () => {
             await expect(fixture(callback)).rejects.toBe(error);
             await expect(fixture(callback)).rejects.toThrow("closed or broken");
-            await expect(runInTransaction(callback)).rejects.toThrow("closed or broken");
+            await expect(transactional(callback)()).rejects.toThrow("closed or broken");
         })).rejects.toBe(error);
         expect(callback).not.toHaveBeenCalled();
         expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();

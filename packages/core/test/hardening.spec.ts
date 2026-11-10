@@ -3,7 +3,7 @@ import {
     afterCommit, afterRollback, AsyncLocal, ctx, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, GlobalTransactionManager, IllegalTransactionStateException, IsolationLevel,
     Logger, MetadataWrappedTransaction, NestedTransactionNotSupportedError, NoTransactionContextError,
-    PlatformTransactionManager, Propagation, runInTransaction, Transactional, TransactionOptions,
+    PlatformTransactionManager, Propagation, transactional, Transactional, TransactionOptions,
     TransactionTimeoutError, useTransactionManager, ConcurrentNestedTransactionError,
     InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError,
 } from "../src";
@@ -648,17 +648,17 @@ describe("transaction hardening", () => {
         expect(order).toEqual(["B", "A"]);
     });
 
-    it("runInTransaction supports sync/async results, propagation, options, datasource and setup errors", async () => {
-        expect(await runInTransaction(() => 42)).toBe(42);
-        expect(await runInTransaction(async () => "async")).toBe("async");
+    it("transactional supports sync/async results, propagation, options, datasource and setup errors", async () => {
+        expect(await transactional(() => 42)()).toBe(42);
+        expect(await transactional(async () => "async")()).toBe("async");
         const b = new RecordingManager();
         useTransactionManager(b, datasourceB);
-        await runInTransaction(() => expect(b.getCurrentTransaction()).toBeDefined(), {
+        await transactional(() => expect(b.getCurrentTransaction()).toBeDefined(), {
             datasource: datasourceB, readOnly: true, isolationLevel: IsolationLevel.READ_COMMITTED,
-        });
+        })();
         expect(b.options).toEqual({ readOnly: true, isolationLevel: IsolationLevel.READ_COMMITTED });
-        await runInTransaction(() => expect(manager.getCurrentTransaction()).toBeUndefined(), { propagation: Propagation.NEVER });
-        await expect(runInTransaction(() => undefined, { datasource: "missing" })).rejects.toThrow(DatasourceSetupError);
+        await transactional(() => expect(manager.getCurrentTransaction()).toBeUndefined(), { propagation: Propagation.NEVER })();
+        await expect(transactional(() => undefined, { datasource: "missing" })()).rejects.toThrow(DatasourceSetupError);
     });
 
     it("decorator resolves config lazily, preserves this, arguments, method name and reflect metadata", async () => {

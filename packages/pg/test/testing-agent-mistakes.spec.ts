@@ -1,6 +1,6 @@
 import { Pool } from "pg";
 import {
-    afterCommit, clearTransactionManager, Propagation, runInTransaction,
+    afterCommit, clearTransactionManager, Propagation, transactional,
     Transactional, useTransactionManager,
 } from "@tranjs/core";
 import { withTestTransaction } from "@tranjs/testing";
@@ -162,7 +162,7 @@ describe("agent-mistake acceptance / real PostgreSQL", () => {
                     save(id: string) {
                         pending = new Promise<void>((resolve, reject) => {
                             setTimeout(() => {
-                                runInTransaction(() => insert(id), { datasource }).then(() => {
+                                transactional(() => insert(id), { datasource })().then(() => {
                                     completed = true;
                                     resolve();
                                 }, reject);

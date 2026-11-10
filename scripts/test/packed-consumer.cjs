@@ -48,12 +48,13 @@ async function runtimeChecks() {
     const bridge = require("@tranjs/core/internal/testing-bridge");
     const importedBridge = await import("@tranjs/core/internal/testing-bridge");
     for (const entry of [main, importedCore]) {
-        for (const key of ["AsyncLocal", "PlatformTransactionManager", "getTransactionManager", "useTransactionManager"]) {
+        for (const key of ["AsyncLocal", "PlatformTransactionManager", "getTransactionManager", "useTransactionManager", "transactional"]) {
             assert.equal(typeof core[key], "function", `Missing core export ${key}`);
             same(entry[key], core[key], `${key} must have one core identity`);
         }
     }
     for (const entry of [legacy, importedLegacy, bridge, importedBridge]) same(entry.AsyncLocal, core.AsyncLocal);
+    assert.equal("runInTransaction" in core, false);
     assert.equal(bridge.TESTING_BRIDGE_VERSION, 1);
     assert.equal(bridge.TESTING_CORE_VERSION, "1.2.0");
     for (const entry of ["@tranjs/core/testing", "@tranjs/core/testing/jest", "@tranjs/core/testing/vitest"]) {
@@ -108,8 +109,7 @@ async function runtimeChecks() {
                     await connection.query(`INSERT INTO ${table} VALUES ($1)`, [id]);
                     return (await connection.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
                 });
-                const application = callback => appCore.getTransactionManager(datasource)
-                    .executeTransaction(appCore.Propagation.REQUIRED, callback);
+                const application = callback => appCore.transactional(callback, { datasource })();
                 assert.deepEqual(await application(() => save(2)), [1, 2]);
                 assert.equal(probe.txOf(save).outcome, "committed");
                 assert.equal(probe.transactions.length, 1);

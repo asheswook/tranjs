@@ -92,7 +92,7 @@ async function scenario(name, callback, faults = {}) {
     const manager = new Manager();
     core.useTransactionManager(manager);
     const mark = label => events.push([label, manager.current()]);
-    const run = (fn, config) => core.runInTransaction(fn, config);
+    const run = (fn, config) => core.transactional ? core.transactional(fn, config)() : core.runInTransaction(fn, config);
     const hook = (label, throws = false) => () => {
         mark(label);
         if (throws) throw failure(label);

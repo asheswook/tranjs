@@ -1,6 +1,6 @@
 import {
     afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, DEFAULT_DATASOURCE,
-    getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, runInTransaction,
+    getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, transactional,
     Transactional, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
 import { mockTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction } from "../src";
@@ -55,7 +55,7 @@ describe("mockTransactions", () => {
             });
             const repository = t.track({ prefix: "saved", save });
             expect(jest.isMockFunction(repository.save)).toBe(true);
-            expect(await runInTransaction(() => repository.save(7))).toBe("saved:7");
+            expect(await transactional(() => repository.save(7))()).toBe("saved:7");
             expect(repository.save).toHaveBeenCalledWith(7);
             expect(repository.save.mock.calls).toEqual([[7]]);
             expect(save).toHaveBeenCalledTimes(1);
@@ -70,8 +70,8 @@ describe("mockTransactions", () => {
         await mockTransactions(async t => {
             const work = t.track(jest.fn((value: number) => value * 2));
             expect(work(2)).toBe(4);
-            await runInTransaction(() => work(3));
-            await runInTransaction(() => work(4));
+            await transactional(() => work(3))();
+            await transactional(() => work(4))();
             expect(t.txOf(work)).toBeUndefined();
             expect(t.txOf(work, 1)).toBe(t.transactions[0]);
             expect(t.txOf(work, 2)).toBe(t.transactions[1]);
@@ -86,7 +86,7 @@ describe("mockTransactions", () => {
         }
         await mockTransactions(async t => {
             const repository = t.track(new Repository());
-            expect(await runInTransaction(() => repository.save(3))).toBe(3);
+            expect(await transactional(() => repository.save(3))()).toBe(3);
             expect(repository.total).toBe(3);
             expect(t.txOf(repository.save)).toBe(t.transactions[0]);
             expect(t.txOf(repository.save)!.outcome).toBe("committed");
@@ -115,7 +115,7 @@ describe("mockTransactions", () => {
         await mockTransactions(async t => {
             const original = new Repository();
             const repository = t.track(original);
-            expect(await runInTransaction(() => repository.save(3))).toBe(3);
+            expect(await transactional(() => repository.save(3))()).toBe(3);
             expect(repository.total).toBe(3);
             expect(original.total).toBe(3);
             expect(t.txOf(repository.save)).toBe(t.transactions[0]);
@@ -129,7 +129,7 @@ describe("mockTransactions", () => {
                 get receiver(): object { return this; },
             };
             const repository = t.track(original);
-            expect(await runInTransaction(() => repository.save())).toBe(original);
+            expect(await transactional(() => repository.save())()).toBe(original);
             expect(repository.receiver).toBe(original);
             expect(t.txOf(repository.save)).toBe(t.transactions[0]);
         });
@@ -142,7 +142,7 @@ describe("mockTransactions", () => {
                 expect(this).toBe(receiver);
                 return `${this.prefix}:${value}`;
             });
-            expect(await runInTransaction(() => work.call(receiver, 7))).toBe("saved:7");
+            expect(await transactional(() => work.call(receiver, 7))()).toBe("saved:7");
             expect(t.txOf(work)).toBe(t.transactions[0]);
         });
     });
@@ -151,7 +151,7 @@ describe("mockTransactions", () => {
         await mockTransactions(async t => {
             const original = Object.freeze({ save(value: number) { return value + 1; } });
             const repository = t.track(original);
-            expect(await runInTransaction(() => repository.save(7))).toBe(8);
+            expect(await transactional(() => repository.save(7))()).toBe(8);
             expect(Object.isFrozen(original)).toBe(true);
             expect(t.txOf(repository.save)).toBe(t.transactions[0]);
         });
@@ -162,11 +162,11 @@ describe("mockTransactions", () => {
             const original = jest.fn(async (value: number) => value);
             const work = t.track(original);
             expect(work.mockReturnValue(Promise.resolve(10))).toBe(work);
-            expect(await runInTransaction(() => work(1))).toBe(10);
+            expect(await transactional(() => work(1))()).toBe(10);
             expect(work.mockResolvedValue(20)).toBe(work);
-            expect(await runInTransaction(() => work(2))).toBe(20);
+            expect(await transactional(() => work(2))()).toBe(20);
             expect(work.mockImplementation(async value => value * 10)).toBe(work);
-            expect(await runInTransaction(() => work(3))).toBe(30);
+            expect(await transactional(() => work(3))()).toBe(30);
             expect(original.mock.calls).toEqual([[1], [2], [3]]);
             for (let call = 0; call < 3; call++) {
                 expect(t.txOf(work, call)).toBe(t.transactions[call]);
@@ -179,7 +179,7 @@ describe("mockTransactions", () => {
         await mockTransactions(async t => {
             const mark = t.track(jest.fn());
             const options = { isolationLevel: IsolationLevel.SERIALIZABLE, readOnly: true, timeout: 1000 };
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 mark();
                 const owner = t.txOf(mark)!;
                 expect(owner.outcome).toBe("active");
@@ -187,19 +187,19 @@ describe("mockTransactions", () => {
                 expect(owner.options).toEqual(options);
                 expect(owner.propagation).toBe(Propagation.REQUIRED);
                 for (const propagation of [Propagation.REQUIRED, Propagation.MANDATORY, Propagation.SUPPORTS, Propagation.NESTED]) {
-                    await runInTransaction(() => {
+                    await transactional(() => {
                         mark();
                         expect(t.txOf(mark, mark.mock.calls.length - 1)).toBe(owner);
-                    }, { propagation });
+                    }, { propagation })();
                 }
-                await expect(runInTransaction(() => { throw new Error("savepoint"); }, {
+                await expect(transactional(() => { throw new Error("savepoint"); }, {
                     propagation: Propagation.NESTED,
-                })).rejects.toThrow("savepoint");
+                })()).rejects.toThrow("savepoint");
                 expect(owner.outcome).toBe("active");
-            }, options);
+            }, options)();
             expect(t.transactions).toHaveLength(1);
             expect(t.txOf(mark)!.outcome).toBe("committed");
-            await expect(runInTransaction(() => { throw new Error("rollback"); })).rejects.toThrow("rollback");
+            await expect(transactional(() => { throw new Error("rollback"); })()).rejects.toThrow("rollback");
             expect(t.transactions.map(info => info.outcome)).toEqual(["committed", "rolled-back"]);
         });
     });
@@ -207,35 +207,35 @@ describe("mockTransactions", () => {
     it("uses the active logical owner as parent, including suspended and restored boundaries", async () => {
         await mockTransactions(async t => {
             const mark = t.track(jest.fn());
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 mark();
                 const outer = t.txOf(mark)!;
-                await runInTransaction(async () => {
+                await transactional(async () => {
                     mark();
                     const inner = t.txOf(mark, 1)!;
                     expect(inner).not.toBe(outer);
                     expect(inner.parent).toBe(outer);
                     expect(inner.propagation).toBe(Propagation.REQUIRES_NEW);
-                    await runInTransaction(() => {
+                    await transactional(() => {
                         mark();
                         expect(t.txOf(mark, 2)!.parent).toBe(inner);
-                    }, { propagation: Propagation.REQUIRES_NEW });
-                }, { propagation: Propagation.REQUIRES_NEW });
-                await runInTransaction(async () => {
+                    }, { propagation: Propagation.REQUIRES_NEW })();
+                }, { propagation: Propagation.REQUIRES_NEW })();
+                await transactional(async () => {
                     mark();
                     expect(t.txOf(mark, 3)).toBeUndefined();
-                    await runInTransaction(() => {
+                    await transactional(() => {
                         mark();
                         expect(t.txOf(mark, 4)!.parent).toBeUndefined();
-                    });
-                }, { propagation: Propagation.NOT_SUPPORTED });
-                await runInTransaction(() => {
+                    })();
+                }, { propagation: Propagation.NOT_SUPPORTED })();
+                await transactional(() => {
                     mark();
                     expect(t.txOf(mark, 5)!.parent).toBe(outer);
-                }, { propagation: Propagation.REQUIRES_NEW });
+                }, { propagation: Propagation.REQUIRES_NEW })();
                 mark();
                 expect(t.txOf(mark, 6)).toBe(outer);
-            });
+            })();
             expect(t.transactions).toHaveLength(5);
             expect(t.transactions.every(info => info.outcome === "committed")).toBe(true);
         });
@@ -273,7 +273,7 @@ describe("mockTransactions", () => {
             retained = gate.then(async () => {
                 expect(getTransactionManager()).toBe(original);
                 for (const propagation of Object.values(Propagation)) {
-                    await expect(runInTransaction(callback, { propagation })).rejects.toThrow("closed or broken");
+                    await expect(transactional(callback, { propagation })()).rejects.toThrow("closed or broken");
                 }
             });
         });
@@ -283,7 +283,7 @@ describe("mockTransactions", () => {
         expect(begin).not.toHaveBeenCalled();
         expect(callback).not.toHaveBeenCalled();
         // This continuation was not created inside the mock's ALS context.
-        await expect(runInTransaction(callback)).resolves.toBe(42);
+        await expect(transactional(callback)()).resolves.toBe(42);
         expect(begin).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledTimes(1);
     });
@@ -294,9 +294,9 @@ describe("mockTransactions", () => {
         const begin = jest.spyOn(original as any, "beginTransaction");
         const datasource = Symbol("active named mock");
         await mockTransactions(async t => {
-            await expect(runInTransaction(() => 42)).resolves.toBe(42);
+            await expect(transactional(() => 42)()).resolves.toBe(42);
             const work = t.track(jest.fn());
-            await runInTransaction(work, { datasource });
+            await transactional(work, { datasource })();
             expect(t.txOf(work)!.outcome).toBe("committed");
         }, { datasource });
         expect(begin).toHaveBeenCalledTimes(1);
@@ -308,7 +308,7 @@ describe("mockTransactions", () => {
         await Promise.all(names.map(datasource => mockTransactions(async t => {
             const work = t.track(jest.fn());
             await Promise.resolve();
-            await runInTransaction(work, { datasource });
+            await transactional(work, { datasource })();
             expect(t.datasource).toBe(datasource);
             expect(t.txOf(work)!.outcome).toBe("committed");
             expect(t.transactions).toHaveLength(1);
@@ -326,9 +326,9 @@ describe("failure selectors", () => {
             const unrelated = t.track(jest.fn());
             const error = new Error("selected commit");
             t.fail("commit", { containing: selected, error });
-            await runInTransaction(unrelated);
-            await expect(runInTransaction(selected)).rejects.toBe(error);
-            await runInTransaction(selected);
+            await transactional(unrelated)();
+            await expect(transactional(selected)()).rejects.toBe(error);
+            await transactional(selected)();
             expect(t.txOf(unrelated)!.outcome).toBe("committed");
             expect(t.txOf(selected)!.outcome).not.toBe("committed");
             expect(t.txOf(selected, 1)!.outcome).toBe("committed");
@@ -340,12 +340,12 @@ describe("failure selectors", () => {
             const work = t.track(jest.fn());
             const error = new Error("read-only commit");
             t.fail("commit", { where: info => info.options.readOnly === true, times: 2, error });
-            await runInTransaction(work);
-            await runInTransaction(() => {});
-            await expect(runInTransaction(work, { readOnly: true })).rejects.toBe(error);
-            await runInTransaction(work);
-            await expect(runInTransaction(work, { readOnly: true })).rejects.toBe(error);
-            await runInTransaction(work, { readOnly: true });
+            await transactional(work)();
+            await transactional(() => {})();
+            await expect(transactional(work, { readOnly: true })()).rejects.toBe(error);
+            await transactional(work)();
+            await expect(transactional(work, { readOnly: true })()).rejects.toBe(error);
+            await transactional(work, { readOnly: true })();
             expect(t.txOf(work, 0)!.outcome).toBe("committed");
             expect(t.txOf(work, 2)!.outcome).toBe("committed");
             expect(t.txOf(work, 4)!.outcome).toBe("committed");
@@ -358,11 +358,11 @@ describe("failure selectors", () => {
             const unrelated = t.track(jest.fn());
             const error = new Error("selected twice");
             t.fail("commit", { containing: selected, times: 2, error });
-            await runInTransaction(unrelated);
-            await expect(runInTransaction(selected)).rejects.toBe(error);
-            await runInTransaction(unrelated);
-            await expect(runInTransaction(selected)).rejects.toBe(error);
-            await runInTransaction(selected);
+            await transactional(unrelated)();
+            await expect(transactional(selected)()).rejects.toBe(error);
+            await transactional(unrelated)();
+            await expect(transactional(selected)()).rejects.toBe(error);
+            await transactional(selected)();
             expect(t.txOf(selected)!.outcome).toBe("rolled-back");
             expect(t.txOf(selected, 1)!.outcome).toBe("rolled-back");
             expect(t.txOf(selected, 2)!.outcome).toBe("committed");
@@ -388,11 +388,11 @@ describe("failure selectors", () => {
             const work = t.track(jest.fn());
             const error = new Error("begin failed");
             t.fail("begin", { where: info => info.options.readOnly === true, times: 2, error });
-            await runInTransaction(work);
-            await expect(runInTransaction(work, { readOnly: true })).rejects.toBe(error);
-            await expect(runInTransaction(work, { readOnly: true })).rejects.toBe(error);
+            await transactional(work)();
+            await expect(transactional(work, { readOnly: true })()).rejects.toBe(error);
+            await expect(transactional(work, { readOnly: true })()).rejects.toBe(error);
             expect(work).toHaveBeenCalledTimes(1);
-            await runInTransaction(work, { readOnly: true });
+            await transactional(work, { readOnly: true })();
             expect(work).toHaveBeenCalledTimes(2);
             expect(t.txOf(work, 1)!.outcome).toBe("committed");
         });
@@ -405,7 +405,7 @@ describe("failure selectors", () => {
             const applicationError = new Error("application");
             const error = new Error("rollback failed");
             t.fail("rollback", { containing: work, error });
-            const fail = () => runInTransaction(() => { work(); throw applicationError; });
+            const fail = () => transactional(() => { work(); throw applicationError; })();
             await expect(fail()).rejects.toBeInstanceOf(TransactionSystemError);
             // The selected failure is one-shot, so the original error survives the next rollback.
             await expect(fail()).rejects.toBe(applicationError);
@@ -431,16 +431,16 @@ describe("failure selectors", () => {
             t.fail("rollback", { containing: selected, error: rollbackError });
             t.fail("rollback", { where: info => info.options.readOnly === true, error: rollbackError });
             for (const readOnly of [false, true]) {
-                const result = runInTransaction(selected, { readOnly });
+                const result = transactional(selected, { readOnly })();
                 await expect(result).rejects.toBeInstanceOf(TransactionSystemError);
                 await expect(result).rejects.toMatchObject({ cause: rollbackError, applicationError: commitError });
             }
             expect(t.txOf(selected)!.outcome).toBe("rolled-back");
             expect(t.txOf(selected, 1)!.outcome).toBe("rolled-back");
-            await expect(runInTransaction(() => { unrelated(); throw laterError; }, { readOnly: true })).rejects.toBe(laterError);
+            await expect(transactional(() => { unrelated(); throw laterError; }, { readOnly: true })()).rejects.toBe(laterError);
             // A consumed containing rule must not hit the same function later either.
-            await expect(runInTransaction(() => { selected(); throw laterError; })).rejects.toBe(laterError);
-            await runInTransaction(unrelated);
+            await expect(transactional(() => { selected(); throw laterError; })()).rejects.toBe(laterError);
+            await transactional(unrelated)();
         });
         if (mode === "integration") {
             expect(nativeRollback).toHaveBeenCalledTimes(4);
@@ -452,8 +452,8 @@ describe("failure selectors", () => {
     it("supplies a default failure when no selector is given", async () => {
         await mockTransactions(async t => {
             t.fail("begin");
-            await expect(runInTransaction(() => {})).rejects.toThrow();
-            await expect(runInTransaction(() => 42)).resolves.toBe(42);
+            await expect(transactional(() => {})()).rejects.toThrow();
+            await expect(transactional(() => 42)()).resolves.toBe(42);
         });
     });
 });
@@ -482,14 +482,14 @@ describe("withTestTransaction", () => {
             work();
             expect(t.txOf(work)).toBeUndefined();
             expect(t.transactions).toHaveLength(0);
-            return runInTransaction(() => {
+            return transactional(() => {
                 afterCommit(committed);
                 afterRollback(rolledBack);
                 const result = work();
                 info = t.txOf(work, 1)!;
                 expect(info.outcome).toBe("active");
                 return result;
-            });
+            })();
         })).toBe(42);
         expect(info.outcome).toBe("committed");
         expect(committed).toHaveBeenCalledTimes(1);
@@ -510,11 +510,11 @@ describe("withTestTransaction", () => {
         let info!: TestTransactionInfo;
         await expect(withTestTransaction(t => {
             const work = t.track(jest.fn());
-            return runInTransaction(() => {
+            return transactional(() => {
                 work();
                 info = t.txOf(work)!;
                 throw error;
-            });
+            })();
         })).rejects.toBe(error);
         expect(info.outcome).toBe("rolled-back");
         expect(physicalRollback).toHaveBeenCalledTimes(1);
@@ -525,8 +525,8 @@ describe("withTestTransaction", () => {
     it("keeps the test session usable after an application transaction rolls back", async () => {
         await expect(withTestTransaction(async t => {
             const work = t.track(jest.fn());
-            await runInTransaction(() => { work(); throw new Error("application"); }).catch(() => {});
-            await runInTransaction(work);
+            await transactional(() => { work(); throw new Error("application"); })().catch(() => {});
+            await transactional(work)();
             expect(t.txOf(work)!.outcome).toBe("rolled-back");
             expect(t.txOf(work, 1)!.outcome).toBe("committed");
             return 123;
@@ -582,15 +582,15 @@ describe("withTestTransaction", () => {
         const release = jest.spyOn(poisoned as any, "releaseTransaction");
         const callback = jest.fn();
         await expect(withTestTransaction(async () => {
-            await expect(runInTransaction(async () => {
-                const nested = runInTransaction(() => {}, { propagation: Propagation.NESTED });
+            await expect(transactional(async () => {
+                const nested = transactional(() => {}, { propagation: Propagation.NESTED })();
                 await expect(nested).rejects.toBeInstanceOf(TransactionSystemError);
                 await expect(nested).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
-                await expect(runInTransaction(callback)).rejects.toThrow("closed or broken");
-                await expect(runInTransaction(callback, { propagation: Propagation.REQUIRES_NEW }))
+                await expect(transactional(callback)()).rejects.toThrow("closed or broken");
+                await expect(transactional(callback, { propagation: Propagation.REQUIRES_NEW })())
                     .rejects.toThrow("closed or broken");
                 expect(callback).not.toHaveBeenCalled();
-            })).rejects.toThrow("rollback-only");
+            })()).rejects.toThrow("rollback-only");
         })).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
         expect(release).toHaveBeenCalledWith(expect.any(Object), true);
     });
@@ -599,7 +599,7 @@ describe("withTestTransaction", () => {
         await withTestTransaction(async outer => {
             const mark = outer.track(jest.fn());
             const inner = jest.fn();
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 mark();
                 const owner = outer.txOf(mark)!;
                 const surrounding = manager.getCurrentTransaction();
@@ -608,7 +608,7 @@ describe("withTestTransaction", () => {
                 expect(manager.getCurrentTransaction()).toBe(surrounding);
                 mark();
                 expect(outer.txOf(mark, 1)).toBe(owner);
-            });
+            })();
             expect(outer.txOf(mark)!.outcome).toBe("committed");
         });
         expect(manager.getCurrentTransaction()).toBeUndefined();
@@ -626,7 +626,7 @@ describe("withTestTransaction", () => {
                 expect(inner).not.toHaveBeenCalled();
                 expect(begin).not.toHaveBeenCalled();
                 const work = t.track(jest.fn());
-                await runInTransaction(work);
+                await transactional(work)();
                 expect(t.txOf(work)!.outcome).toBe("committed");
             });
             expect(getTransactionManager(datasource)).toBe(named);
@@ -636,7 +636,7 @@ describe("withTestTransaction", () => {
     it("isolates concurrent test scopes on the same real registration", async () => {
         const infos = await Promise.all(Array.from({ length: 12 }, (_, index) => withTestTransaction(async t => {
             const work = t.track(jest.fn());
-            return runInTransaction(async () => {
+            return transactional(async () => {
                 work();
                 const info = t.txOf(work)!;
                 const physical = manager.getCurrentTransaction();
@@ -647,7 +647,7 @@ describe("withTestTransaction", () => {
                 expect(t.txOf(work, 1)).toBe(info);
                 expect(info.outcome).toBe("active");
                 return info;
-            });
+            })();
         })));
         expect(new Set(infos).size).toBe(12);
         expect(infos.every(info => info.outcome === "committed")).toBe(true);
@@ -663,12 +663,12 @@ describe("withTestTransaction", () => {
             await withTestTransaction(t => {
                 const work = t.track(jest.fn());
                 expect(t.datasource).toBe(datasource);
-                return runInTransaction(() => {
+                return transactional(() => {
                     work();
                     expect(t.txOf(work)!.outcome).toBe("active");
                     expect(named.getCurrentTransaction()).toBeDefined();
                     expect(manager.getCurrentTransaction()).toBeUndefined();
-                }, { datasource });
+                }, { datasource })();
             }, { datasource });
             expect(named.getCurrentTransaction()).toBeUndefined();
             expect(getTransactionManager(datasource)).toBe(named);
@@ -680,21 +680,21 @@ describe("withTestTransaction", () => {
         await withTestTransaction(async t => {
             probe = t;
             const mark = t.track(jest.fn());
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 mark();
                 const owner = t.txOf(mark)!;
-                await runInTransaction(() => {
+                await transactional(() => {
                     mark();
                     expect(t.txOf(mark, 1)).not.toBe(owner);
                     expect(t.txOf(mark, 1)!.parent).toBe(owner);
-                }, { propagation: Propagation.REQUIRES_NEW });
-                await runInTransaction(() => {
+                }, { propagation: Propagation.REQUIRES_NEW })();
+                await transactional(() => {
                     mark();
                     expect(t.txOf(mark, 2)).toBeUndefined();
-                }, { propagation: Propagation.NOT_SUPPORTED });
+                }, { propagation: Propagation.NOT_SUPPORTED })();
                 expect(t.txOf(mark, 1)!.outcome).toBe("committed");
                 expect(owner.outcome).toBe("active");
-            });
+            })();
         });
         expect(probe.transactions.map(info => info.outcome)).toEqual(["committed", "committed"]);
     });
@@ -704,16 +704,16 @@ describe("withTestTransaction", () => {
             const entered = deferred();
             const release = deferred();
             const work = t.track(jest.fn());
-            const first = runInTransaction(async () => {
+            const first = transactional(async () => {
                 work();
                 entered.resolve();
                 await release.promise;
-            });
+            })();
             await entered.promise;
-            try { await expect(runInTransaction(work)).rejects.toThrow(); }
+            try { await expect(transactional(work)()).rejects.toThrow(); }
             finally { release.resolve(); }
             await first;
-            await runInTransaction(work);
+            await transactional(work)();
             expect(work).toHaveBeenCalledTimes(2);
             expect(t.transactions.every(info => info.outcome === "committed")).toBe(true);
         });
@@ -726,7 +726,7 @@ describe("withTestTransaction", () => {
         await expect(withTestTransaction(t => {
             const work = t.track(jest.fn());
             t.fail("rollback", { containing: work, error });
-            return runInTransaction(() => { work(); throw applicationError; });
+            return transactional(() => { work(); throw applicationError; })();
         })).rejects.toMatchObject({ cause: error, applicationError });
         expect(manager.getCurrentTransaction()).toBeUndefined();
     });
@@ -754,16 +754,16 @@ describe("withTestTransaction", () => {
         await withTestTransaction(async t => {
             probe = t;
             const work = t.track(jest.fn());
-            await expect(runInTransaction(() => {
+            await expect(transactional(() => {
                 work();
                 afterCommit(committed);
                 afterRollback(rolledBack);
-            })).rejects.toMatchObject({ name: "TestTransactionAbortedError", code: "25P02", cause });
+            })()).rejects.toMatchObject({ name: "TestTransactionAbortedError", code: "25P02", cause });
             expect(t.txOf(work)!.outcome).toBe("rolled-back");
             expect(committed).not.toHaveBeenCalled();
             expect(rolledBack).toHaveBeenCalledTimes(1);
             expect(aborted.getCurrentTransaction()).toBeUndefined();
-            await runInTransaction(work);
+            await transactional(work)();
             expect(t.txOf(work, 1)!.outcome).toBe("committed");
         });
         expect(aborted.recovered).toBe(1);
@@ -781,13 +781,13 @@ describe("withTestTransaction", () => {
         await withTestTransaction(async t => {
             const work = t.track(jest.fn());
             t.fail("rollback", { containing: work, error: injectedError });
-            const result = runInTransaction(() => { work(); afterRollback(hook); });
+            const result = transactional(() => { work(); afterRollback(hook); })();
             await expect(result).rejects.toMatchObject({ cause: injectedError, applicationError: commitError });
             expect(rollback).toHaveBeenCalledTimes(1);
             expect(release).toHaveBeenCalledTimes(2);
             expect(hook).toHaveBeenCalledTimes(1);
             expect(t.txOf(work)!.outcome).toBe("rolled-back");
-            await runInTransaction(work);
+            await transactional(work)();
         });
     });
 
@@ -800,8 +800,8 @@ describe("withTestTransaction", () => {
             const work = t.track(jest.fn());
             t.fail("commit", { containing: work, error: commitError });
             t.fail("rollback", { containing: work, error: new Error("injected") });
-            await expect(runInTransaction(work)).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
-            await expect(runInTransaction(work)).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
+            await expect(transactional(work)()).rejects.toThrow("closed or broken");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
     });
@@ -820,12 +820,12 @@ describe("withTestTransaction", () => {
         useTransactionManager(poisoned);
         await expect(withTestTransaction(async t => {
             const work = t.track(jest.fn());
-            const result = runInTransaction(() => { work(); throw applicationError; });
+            const result = transactional(() => { work(); throw applicationError; })();
             await expect(result).rejects.toBeInstanceOf(TransactionSystemError);
             await expect(result).rejects.toMatchObject({ cause: recoveryError, applicationError });
             expect(t.txOf(work)!.outcome).toBe("rolled-back");
             expect(poisoned.getCurrentTransaction()).toBeUndefined();
-            await expect(runInTransaction(work)).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toThrow("closed or broken");
             expect(work).toHaveBeenCalledTimes(1);
             expect(t.transactions).toHaveLength(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
@@ -855,11 +855,11 @@ describe("withTestTransaction", () => {
         const committed = jest.fn();
         await expect(withTestTransaction(async t => {
             const work = t.track(jest.fn());
-            const result = runInTransaction(() => {
+            const result = transactional(() => {
                 work();
                 afterRollback(rolledBack);
                 afterCommit(committed);
-            });
+            })();
             await expect(result).rejects.toBeInstanceOf(TransactionSystemError);
             await expect(result).rejects.toMatchObject({ cause: recoveryError, applicationError });
             expect(log.error).toHaveBeenCalledWith(
@@ -868,7 +868,7 @@ describe("withTestTransaction", () => {
             expect(t.txOf(work)!.outcome).toBe("rolled-back");
             expect(rolledBack).toHaveBeenCalledTimes(1);
             expect(committed).not.toHaveBeenCalled();
-            await expect(runInTransaction(work)).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toThrow("closed or broken");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
         expect(rollback).toHaveBeenCalledTimes(1);
@@ -890,7 +890,7 @@ describe("withTestTransaction", () => {
         let ownerFailure: unknown;
         const result = withTestTransaction(async () => {
             try {
-                await runInTransaction(() => { throw applicationError; }).catch(error => { ownerFailure = error; });
+                await transactional(() => { throw applicationError; })().catch(error => { ownerFailure = error; });
             } finally {
                 // The user's finally executes before physical cleanup, even though reuse is blocked.
                 expect(rollback).not.toHaveBeenCalled();
@@ -920,7 +920,7 @@ describe("withTestTransaction", () => {
         const finalized = jest.fn();
         const result = withTestTransaction(async () => {
             try {
-                await runInTransaction(() => { throw applicationError; }).catch(() => {});
+                await transactional(() => { throw applicationError; })().catch(() => {});
             } finally { finalized(); }
         });
         await expect(result).rejects.toBeInstanceOf(TransactionSystemError);
@@ -943,7 +943,7 @@ describe("withTestTransaction", () => {
         jest.spyOn(manager as any, "rollbackToSavepoint").mockRejectedValueOnce(recoveryError);
         const result = withTestTransaction(async () => {
             try {
-                await runInTransaction(() => { throw applicationError; });
+                await transactional(() => { throw applicationError; })();
             } finally { throw finalError; }
         });
         await expect(result).rejects.toMatchObject({
@@ -1020,7 +1020,7 @@ describe("transactional service testing", () => {
             await expect(service.mandatory(1)).rejects.toBeInstanceOf(IllegalTransactionStateException);
             expect(repository.save).not.toHaveBeenCalled();
             expect(t.transactions).toHaveLength(0);
-            await runInTransaction(() => service.mandatory(2));
+            await transactional(() => service.mandatory(2))();
             expect(t.txOf(repository.save)).toBe(t.transactions[0]);
             expect(t.txOf(repository.save)!.outcome).toBe("committed");
         });
@@ -1064,58 +1064,58 @@ describe("concurrent transaction stress", () => {
                 const pause = () => new Promise(resolve => setTimeout(resolve, random() % 3));
                 const failure = new Error(`chain-${chain}`);
                 const mark = t.track(jest.fn());
-                const result = runInTransaction(async () => {
+                const result = transactional(async () => {
                     const outer = owned(manager.getCurrentTransaction(), chain);
                     mark();
                     const owner = t.txOf(mark)!;
                     await pause();
                     expect(manager.getCurrentTransaction()).toBe(outer);
-                    await runInTransaction(async () => {
+                    await transactional(async () => {
                         expect(manager.getCurrentTransaction()).toBe(outer);
                         mark();
                         expect(t.txOf(mark, 1)).toBe(owner);
                         await pause();
                         expect(manager.getCurrentTransaction()).toBe(outer);
-                    });
-                    await runInTransaction(async () => {
+                    })();
+                    await transactional(async () => {
                         const inner = owned(manager.getCurrentTransaction(), chain);
                         expect(inner).not.toBe(outer);
                         mark();
                         expect(t.txOf(mark, 2)!.parent).toBe(owner);
                         await pause();
                         expect(manager.getCurrentTransaction()).toBe(inner);
-                    }, { propagation: Propagation.REQUIRES_NEW });
+                    }, { propagation: Propagation.REQUIRES_NEW })();
                     expect(manager.getCurrentTransaction()).toBe(outer);
                     const nestedFails = random() % 2 === 0;
-                    const nested = runInTransaction(async () => {
+                    const nested = transactional(async () => {
                         expect(manager.getCurrentTransaction()).toBe(outer);
                         mark();
                         expect(t.txOf(mark, 3)).toBe(owner);
                         await pause();
                         expect(manager.getCurrentTransaction()).toBe(outer);
                         if (nestedFails) throw failure;
-                    }, { propagation: Propagation.NESTED });
+                    }, { propagation: Propagation.NESTED })();
                     if (nestedFails) await expect(nested).rejects.toBe(failure);
                     else await nested;
-                    await runInTransaction(async () => {
+                    await transactional(async () => {
                         expect(manager.getCurrentTransaction()).toBeUndefined();
                         mark();
                         expect(t.txOf(mark, 4)).toBeUndefined();
                         await pause();
                         expect(manager.getCurrentTransaction()).toBeUndefined();
-                        await runInTransaction(async () => {
+                        await transactional(async () => {
                             const independent = owned(manager.getCurrentTransaction(), chain);
                             expect(independent).not.toBe(outer);
                             mark();
                             expect(t.txOf(mark, 5)!.parent).toBeUndefined();
                             await pause();
                             expect(manager.getCurrentTransaction()).toBe(independent);
-                        });
+                        })();
                         expect(manager.getCurrentTransaction()).toBeUndefined();
-                    }, { propagation: Propagation.NOT_SUPPORTED });
+                    }, { propagation: Propagation.NOT_SUPPORTED })();
                     expect(manager.getCurrentTransaction()).toBe(outer);
                     if (chain % 7 === 0) throw failure;
-                });
+                })();
                 if (chain % 7 === 0) await expect(result).rejects.toBe(failure);
                 else await result;
                 expect(manager.getCurrentTransaction()).toBeUndefined();

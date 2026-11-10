@@ -1,7 +1,7 @@
 import { createPool, RowDataPacket } from "mysql2/promise";
 import {
     afterCommit, afterRollback, clearTransactionManager, IsolationLevel, Propagation,
-    runInTransaction, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
+    transactional, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
 import { withTestTransaction } from "@tranjs/testing";
@@ -21,8 +21,8 @@ describe("withTestTransaction / mysql2 pool (real database)", () => {
     const datasource = Symbol("mysql-testing");
     const table = "tranjs_mysql_testing_pool";
     const manager = new MySQLTransactionManager(pool);
-    const tx = <T>(fn: () => T | Promise<T>, options: Parameters<typeof runInTransaction>[1] = {}) =>
-        runInTransaction(fn, { ...options, datasource });
+    const tx = <T>(fn: () => T | Promise<T>, options: Parameters<typeof transactional>[1] = {}) =>
+        transactional(fn, { ...options, datasource })();
     const test = <T>(fn: Parameters<typeof withTestTransaction<T>>[0]) =>
         withTestTransaction(fn, { datasource });
     const insert = async (id: number) => { await ctx(datasource).query(`INSERT INTO ${table} VALUES (${id})`); };
