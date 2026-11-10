@@ -176,12 +176,12 @@ class ReportService {
 | `@tranjs/core/testing/jest` | `matchers` and their type declarations (Jest 29/30) |
 | `@tranjs/core/testing/vitest` | `matchers` and their type declarations (Vitest 3/4/5) |
 
-- `withTestTransaction(fn, options?)`: runs `fn` against the registered real manager inside one transaction that is rolled back at the end. Transactions started by the code under test become savepoints, so they commit and roll back as usual inside the test.
+- `withTestTransaction(fn, options?)`: rolls back awaited transactional work run through the registered manager (via services, `runInTransaction`, or `@Transactional`). It does **not** cover raw pool/connection queries, other datasources, work not awaited inside the callback, external effects, or fixtures created outside the callback. Transactions opened by code under test become savepoints; "committed" means the logical owner's savepoint was released, not a durable physical commit.
 - `mockTransactions(fn, options?)`: runs `fn` with a fake manager and no database, to check transaction boundaries and failure handling.
 - `transactions()`: returns the probe for the current test (the same object passed to `fn`). Throws outside a test.
 - `options` is `{ datasource?: string | symbol }`.
 
-Await all work inside `fn`; work that outlives it isn't rolled back. Full behaviour, limitations and examples are in the [testing guide](testing.md).
+**The hidden transaction is not ambient.** Direct SQL, including assertion queries, needs `runInTransaction` or `@Transactional`; `ctx()` alone is unavailable. Otherwise `REQUIRED` services could join the hidden transaction without owning a savepoint, defeating service atomicity checks. Await everything inside `fn`. Full behaviour and examples: [testing guide](testing.md).
 
 ## Errors
 

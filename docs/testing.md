@@ -1,27 +1,34 @@
 # Testing
 
-## 1. Isolate integration tests against a real database
+## Choose what to use
 
-Use `withTestTransaction` from `@tranjs/core/testing` to run real SQL and roll back the test's writes afterward. It opens one hidden physical transaction on the registered manager. Service transaction owners use savepoints on that connection, and cleanup always attempts a physical rollback, even when the test fails.
+| Situation | Helper |
+|---|---|
+| Real SQL, service atomicity, rollback isolation | [`withTestTransaction`](#real-database-isolation) |
+| Propagation, hooks, failure policy without SQL | [`mockTransactions`](#unit-tests-without-sql) |
+| Assertions in Jest 29/30 or Vitest 3/4/5 | [`expect.extend(matchers)`](#six-matchers-and-portable-assertions) from the matching runner entry |
+| Assertions in node:test, Mocha, or another runner | [Portable `assert*` functions](#six-matchers-and-portable-assertions) from `@tranjs/core/testing` |
+| Durability, locks, races, independent transaction visibility | [Real commits and separate cleanup](#differences-from-production), without a test session |
 
-The hidden transaction is **not an ambient service transaction**. Call services normally; wrap direct SQL, including assertion queries, in `runInTransaction` or `@Transactional`. Outside a logical scope, `ctx()` is unavailable.
+`withTestTransaction` rolls back **awaited transactional work run through the registered manager**, via services, `runInTransaction`, or `@Transactional`. It does **not** cover raw pool/connection queries, other datasources, work not awaited inside the callback, external effects, or fixtures created outside the callback.
 
-### Choose an entry point
+## Key ideas
 
-Use an explicit `withTestTransaction` callback for every isolated real-database test, whether using Jest 29 / 30, Vitest 3 / 4 / 5, `node:test`, or Mocha. The base `@tranjs/core/testing` entry has **no Jest or Vitest runtime requirement**. Runner packages are optional peers: install only the runner you use. The Jest and Vitest entries export only `matchers` and matcher type augmentation; they do not manage test lifecycles.
+- **The hidden transaction is not ambient.** Wrap direct SQL (including fixtures and assertion queries) in `runInTransaction` or `@Transactional`; `ctx()` alone is unavailable. Otherwise `REQUIRED` services could join the hidden transaction without owning a savepoint, defeating service atomicity checks.
+- Await everything inside the callback, including timer work. Runner hooks and fixtures outside it need separate cleanup.
+- "Committed" means the logical owner completed: its savepoint was released, not a durable physical commit. Cleanup attempts a physical rollback even when the test fails.
+- Track dependencies inside the boundary, not the decorated service method: tracking observes function entry, before an outer decorator opens its transaction.
+- Use one recorded call per matcher operand. For repeated calls, select explicit indexes with `txOf`.
 
-The callback receives a probe as `tx`; `transactions()` from `@tranjs/core/testing` retrieves that same probe from the current test session and throws outside a live session. It is not a global fallback or a list of records; `transactions().transactions` is the record snapshot.
+## Real database isolation
+
+Use an explicit callback with any runner. The base `@tranjs/core/testing` entry has no Jest/Vitest runtime requirement; install only your runner. Runner entries export matchers and type augmentation, not lifecycle management.
+
+The callback receives the probe as `tx`. `transactions()` returns that same probe and throws outside a live session; `transactions().transactions` is its record snapshot.
 
 ### Portable callback: real PostgreSQL with node:test
 
-Install `@tranjs/core`, `@tranjs/pg`, and `pg`. Point `DATABASE_URL` at a disposable PostgreSQL database, for example:
-
-```sh
-docker run --rm --name tranjs-test-postgres \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=tranjs_test \
-  -p 5433:5432 -d postgres:16
-export DATABASE_URL=postgres://postgres:postgres@localhost:5433/tranjs_test
-```
+Install `@tranjs/core`, `@tranjs/pg`, and `pg`. Point `DATABASE_URL` at a disposable PostgreSQL database.
 
 ```typescript
 import assert from "node:assert/strict";
@@ -66,7 +73,7 @@ test("inserts without keeping the row", async () => {
 });
 ```
 
-The callback works unchanged with Jest, Vitest, or Mocha test functions. Independent concurrent callbacks use separate physical connections; size the pool accordingly and isolate fixture identifiers or worker schemas. Keep rollback-sensitive fixtures inside the callback and a logical transaction scope. Create schema and shared fixtures outside it and remove them in teardown.
+The callback also works with Jest, Vitest, or Mocha. Independent callbacks use separate connections: size the pool and isolate fixture IDs or schemas. Create schema/shared fixtures outside callbacks and remove them in teardown.
 
 Both `withTestTransaction(fn, options?)` and `mockTransactions(fn, options?)` return a Promise of the callback result. Their only option is `{ datasource?: string | symbol }`, selecting the default datasource when omitted. Pass `isolationLevel`, `readOnly`, and `timeout` to service scopes, not to these helpers.
 
@@ -80,7 +87,8 @@ import { matchers } from "@tranjs/core/testing/jest";
 import { ctx } from "@tranjs/pg";
 
 expect.extend(matchers);
-const it = (name, fn) => test(name, () => withTestTransaction(fn));
+const it = (name: string, fn: Parameters<typeof withTestTransaction>[0]) =>
+    test(name, () => withTestTransaction(fn));
 
 // Register a real manager and create the users table in suite setup.
 it("saves in a logical transaction", async () => {
@@ -92,37 +100,15 @@ it("saves in a logical transaction", async () => {
 });
 ```
 
-The local helper explicitly wraps each test body, not runner hooks. Imported Jest APIs work with `injectGlobals: false`; no TranJS test environment is needed. Add parameter types to the helper when using TypeScript's `noImplicitAny`.
+This wraps test bodies, not hooks. Imported Jest APIs work with `injectGlobals: false`; no TranJS test environment is needed.
 
 ### Vitest 3 / 4 / 5: a small per-file helper
 
-```typescript
-import { expect, test } from "vitest";
-import { runInTransaction } from "@tranjs/core";
-import { transactions, withTestTransaction } from "@tranjs/core/testing";
-import { matchers } from "@tranjs/core/testing/vitest";
-import { ctx } from "@tranjs/pg";
-
-expect.extend(matchers);
-const it = (name, fn) => test(name, () => withTestTransaction(fn));
-
-// Register a real manager and create the users table in suite setup.
-it("saves in a logical transaction", async () => {
-    const save = transactions().track(async () => {
-        await ctx().query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
-    });
-    await runInTransaction(save);
-    expect(save).toHaveCommitted();
-});
-```
-
-No runner hook configuration is required. Put rollback-sensitive setup, assertions, and teardown inside the helper callback, using `try` / `finally` for resource cleanup. A retry that invokes the test body again opens a new callback session. Each callback awaits its own final cleanup; runner hooks and runner-managed fixtures that execute outside the callback are not part of that session.
+Use the same helper with `expect` and `test` from `vitest`, and `matchers` from `@tranjs/core/testing/vitest`. No hook configuration is required. Put rollback-sensitive setup, assertions, and teardown inside the callback; use `try` / `finally` for resources. Each retry opens a fresh session and awaits its cleanup.
 
 ### Deferred callbacks and runner hooks
 
-**Warning: callbacks are not a detached-work containment boundary.** Every isolated test must await all its work inside the owning callback. Flush fake timers and await the work they start before that callback returns. Runner-managed fixtures outside the callback are not isolated by it; arrange separate cleanup for suite fixtures.
-
-`withTestTransaction` cannot intercept or rebind arbitrary callback registration. Native asynchronous resources often retain the registering AsyncLocalStorage context, but fake-clock callbacks and runner hooks use their invocation context. The following rules apply to Jest 29 / 30 and Vitest 3 / 4 / 5 on Node.js, with the same behavior across the listed majors of each applicable runner:
+**Callbacks do not contain detached work.** Flush fake timers and await their work before returning. Helpers cannot intercept or rebind arbitrary registrations. On Node.js, Jest 29/30 and Vitest 3/4/5 behave as follows:
 
 | Mechanism | Invocation after callback A closes | Transaction behavior |
 |---|---|---|
@@ -134,11 +120,9 @@ No runner hook configuration is required. Put rollback-sensitive setup, assertio
 | Jest `afterEach` registered inside A | Registration during the test | Jest rejects nested hook registration; the hook is not installed |
 | Completion callback explicitly captured with native `AsyncLocalStorage.bind` inside A | Invoked after A closes | Retains closed A; core transaction entry rejects before SQL |
 
-Unbound completion callbacks are unsafe for isolated database work. In particular, registering Vitest `onTestFinished` inside the helper does not bind it to that helper. Do not defer database work to runner hooks or flush callbacks outside their owner. Closed-session checks cannot protect callbacks that have lost that session's context, and there is no runner interception to restore it.
+Registering `onTestFinished` inside a helper does not bind it. Closed-session checks cannot protect work that lost its context. The same rules apply to `mockTransactions`: unbound late work can reach the restored real manager and persist writes.
 
-The same lifetime rules apply to `mockTransactions`. Native Promise work retaining its closed mock session rejects even after the original manager registration is restored. Unbound late work that loses that context can use the restored real manager and commit database writes.
-
-If deferred registration is unavoidable on a Node.js version providing `AsyncLocalStorage.bind`, explicitly bind the callback while its owner is live to obtain a clear rejection after closure. This is a defensive guard, not permission to run SQL after the helper. For example, this Vitest completion callback asserts the rejection rather than performing teardown SQL:
+If registration is unavoidable and Node.js provides `AsyncLocalStorage.bind`, bind while the owner is live. This guards against late entry; it does not permit late SQL:
 
 ```typescript
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -161,7 +145,7 @@ test("rejects transaction entry from a bound completion callback", async () => {
 });
 ```
 
-The same native binding captures the owner for a Jest callback assigned inside the helper and invoked by a preregistered hook. Bind the actual deferred function inside the callback, not the runner hook outside it. Prefer completing all work inside the helper instead.
+For preregistered Jest hooks, bind the actual deferred function inside the callback. Prefer completing work inside the helper.
 
 ### NestJS services
 
@@ -212,7 +196,7 @@ test("creates through Nest dependency injection", async () => {
 
 Close the module inside the callback, and close shared database pools only after all callbacks using them finish.
 
-## 2. Check commit and rollback outcomes inside the test
+## Commit and rollback outcomes
 
 Final cleanup alone cannot prove service atomicity. A failed owner rolls back its savepoint immediately; a successful owner releases it, leaving writes visible to later scopes on this connection until final cleanup.
 
@@ -256,9 +240,9 @@ test("failure removes partial writes; success keeps them until cleanup", async (
 
 `"committed"` means **logical owner completion**, not durable physical commit. Joined failures still mark the owner rollback-only; catching one can produce `UnexpectedRollbackError`. `NESTED` shares its owner's record but can roll back its own savepoint.
 
-For PostgreSQL, the native driver hook checks deferred constraints before logical owner and `NESTED` savepoint commits. It stashes the current constraint modes using a temporary check savepoint, executes `SET CONSTRAINTS ALL IMMEDIATE`, then rolls back to and releases that check savepoint. This restores the **exact previous modes**, including initially immediate constraints and application `SET CONSTRAINTS` choices; setting everything deferred afterward would be incorrect. Violations keep the native driver's error class and code, such as `23505`, and roll back the affected scope. The check can encounter pending violations from earlier work on the shared connection. It does not exercise every effect of a real COMMIT.
+PostgreSQL drivers check deferred constraints before owner and `NESTED` savepoint commits. A temporary check savepoint runs `SET CONSTRAINTS ALL IMMEDIATE`, then rolls back and releases, restoring the **exact prior modes**. Violations retain native error classes/codes (such as `23505`) and roll back that scope. Earlier pending violations on the shared connection can surface here. This does not exercise every real COMMIT effect.
 
-## 3. Check after-commit effects
+## After-commit effects
 
 `afterCommit` runs after successful logical owner completion, **before final physical rollback**. Mock email, HTTP, file, and cache effects because database rollback cannot undo them. Assert callback provenance, not just that an outside call happened later.
 
@@ -273,13 +257,16 @@ expect.extend(matchers);
 test("publishes after this transaction commits", async () => {
     await mockTransactions(async tx => {
         const save = tx.track(vi.fn(async () => {}));
+        const audit = tx.track(vi.fn(async () => {}));
         const publish = tx.track(vi.fn());
         await runInTransaction(async () => {
             await save();
+            await audit();
             afterCommit(publish);
             expect(publish).not.toHaveBeenCalled();
         });
         expect(save).toHaveCommitted();
+        expect(save).toRunInSameTransactionAs(audit);
         expect(publish).toRunOutsideTransaction();
         expect(publish).toRunAfterCommitOf(save);
     });
@@ -288,47 +275,11 @@ test("publishes after this transaction commits", async () => {
 
 Use `withTestTransaction` for the same policy with real SQL. `toRunAfterCommitOf` requires an observed `afterCommit` callback associated with that committed transaction; an ordinary later call outside a transaction does not qualify. Hooks registered in `NESTED` belong to the owner; `REQUIRES_NEW` owns its own hooks. Successful hook assertions prove ordering and provenance, not durable delivery.
 
-## 4. Check TranJS boundaries and failure handling
+## Boundaries and failure handling
 
 ### Unit tests without SQL
 
 `mockTransactions` exercises TranJS propagation, rollback-only rules, deadlines, and hooks with mocked transaction operations. It does not validate SQL, database isolation, or physical commits. Real driver `ctx()` calls under it throw `TransactionContextMixingError`; mock data access instead.
-
-```typescript
-import { expect, jest, test } from "@jest/globals";
-import { Transactional } from "@tranjs/core";
-import { mockTransactions } from "@tranjs/core/testing";
-import { matchers } from "@tranjs/core/testing/jest";
-
-expect.extend(matchers);
-
-class TransferService {
-    constructor(private readonly accounts: {
-        debit: () => Promise<void>;
-        credit: () => Promise<void>;
-    }) {}
-
-    @Transactional()
-    async transfer() {
-        await this.accounts.debit();
-        await this.accounts.credit();
-    }
-}
-
-test("debit and credit share the committed owner", async () => {
-    await mockTransactions(async tx => {
-        const accounts = tx.track({
-            debit: jest.fn(async () => {}),
-            credit: jest.fn(async () => {}),
-        });
-        await new TransferService(accounts).transfer();
-        expect(accounts.debit).toRunInSameTransactionAs(accounts.credit);
-        expect(accounts.debit).toHaveCommitted();
-    });
-});
-```
-
-The runner entries provide matchers and type augmentation only. Keep each isolated test inside an explicit real or mock callback.
 
 ### Six matchers and portable assertions
 
@@ -343,24 +294,17 @@ Use `expect.extend(matchers)` with `matchers` from the Jest or Vitest entry. The
 | `expect(a).toHaveCommitted()` | `assertCommitted(a)` | Call's owner completed successfully |
 | `expect(a).toHaveRolledBack()` | `assertRolledBack(a)` | Call's owner rolled back |
 
-Operands must be tracked functions with **exactly one recorded call each**, from the same probe. Untracked functions, zero or multiple calls, and cross-session operands are usage errors, including under `.not`; they never silently pass. Two outside calls are neither the same transaction nor separate transactions. Await owner completion before checking outcomes. For repeated calls, inspect explicit indexes with `txOf` rather than relying on these matchers to choose one.
+> **What the assertions prove and don't prove**
+>
+> They prove which transaction a tracked call **entered** (same/separate/outside), its owner's logical outcome, and whether it ran through an `afterCommit` callback.
+>
+> They do **not** prove that tracked async work completed before commit (missing await), that SQL used the managed connection (raw pool queries), physical commit/durability, or delivery of external effects.
+>
+> **Practical checks:** after the callback, query test-specific rows with a separate pool connection and assert none remain, as in the PostgreSQL example. Drain any queued work before that check: an early query cannot detect future writes. Use a lint rule such as `@typescript-eslint/no-floating-promises` to catch missing awaits.
 
-Assertion failures identify the calls, transaction identities, propagation, and outcomes. Jest and Vitest entries include matcher type augmentation. The portable functions throw on assertion failure without needing runner setup:
+Operands must be tracked functions from the same probe, with **exactly one recorded call each**. Untracked functions, zero/multiple calls, and cross-session operands are usage errors even under `.not`. Two outside calls are neither same nor separate transactions. Await owner completion for outcome assertions.
 
-```typescript
-import { assertSameTransaction, mockTransactions } from "@tranjs/core/testing";
-import { runInTransaction } from "@tranjs/core";
-
-await mockTransactions(async tx => {
-    const debit = tx.track(async () => {});
-    const credit = tx.track(async () => {});
-    await runInTransaction(async () => {
-        await debit();
-        await credit();
-    });
-    assertSameTransaction(debit, credit);
-});
-```
+Failures report calls, transaction identities, propagation, and outcomes, without deciding whether code or test should change. Portable assertions throw without runner setup.
 
 ### Tracking and records
 
@@ -418,11 +362,39 @@ test("does not publish when commit fails", async () => {
 | `times?: number` | Positive number of matching operations to fail; defaults to one |
 | `error?: unknown` | Value to throw; omit for a generated error |
 
-Omit the selector to fail the next matching operation. Do not combine `containing` and `where`. A begin failure cannot use `containing`, because the call has not run: use `tx.fail("begin")` or `tx.fail("begin", { where: info => info.options.readOnly === true })`. Failed begins have records but no callback calls.
+Omit the selector to fail the next matching operation. Do not combine `containing` and `where`. Begin failures cannot use `containing`: the call has not run. Use `tx.fail("begin")` or select with `where`. Failed begins have records but no callback calls.
 
-Cleanup failures must not hide application failures. `TransactionSystemError` preserves the application error in `applicationError` and the cleanup error in `cause`. A caught PostgreSQL query error can leave an owner aborted; failed savepoint completion recovers that scope, runs rollback hooks, and rejects. `@tranjs/pg` reports `TestTransactionAbortedError` with code `25P02`; `@tranjs/postgres` uses `TransactionAbortedError`. Failed recovery poisons the test session: stop starting transaction scopes in it. User callback `finally` blocks still run regardless of session readiness; keep ordinary resource cleanup there. If recovery and final physical rollback both fail, the outer `TransactionSystemError.cause` is the physical rollback error, and its `applicationError` retains the recovery `TransactionSystemError`; that inner error's `cause` is the recovery failure and its `applicationError` is the original application failure. If final cleanup fails, reset the database rather than assuming isolation held.
+### Timeouts
 
-## 5. Differences from production and when real commits are required
+Targeted timeout injection (choosing which transaction times out) is **not provided**; `tx.fail` accepts only begin, commit, and rollback. Test deadlines with the ordinary transaction `timeout` option:
+
+```typescript
+import { expect, test } from "@jest/globals";
+import { runInTransaction, TransactionTimeoutError } from "@tranjs/core";
+import { mockTransactions } from "@tranjs/core/testing";
+
+test("rejects when the owner exceeds its deadline", async () => {
+    await mockTransactions(async () => {
+        await expect(runInTransaction(async () => {
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }, { timeout: 10 })).rejects.toBeInstanceOf(TransactionTimeoutError);
+    });
+});
+```
+
+Use real timers and await the work. The same option works in service scopes under `withTestTransaction`; neither helper itself accepts `timeout`. Deadlines cannot select an interior failure point, interrupt arbitrary I/O, or guarantee server cancellation.
+
+### Errors and recovery
+
+| Failure | Result / action |
+|---|---|
+| Cleanup after application failure | `TransactionSystemError.applicationError` retains the application failure; `cause` retains cleanup failure |
+| Caught PostgreSQL SQL error leaves owner aborted | Savepoint completion recovers, runs rollback hooks, and rejects: `@tranjs/pg` uses `TestTransactionAbortedError` (`25P02`); `@tranjs/postgres` uses `TransactionAbortedError` |
+| Recovery fails | Session is poisoned; stop opening scopes. Callback `finally` still runs for ordinary resource cleanup |
+| Recovery and final physical rollback both fail | Outer `cause` = physical rollback error; outer `applicationError` = recovery `TransactionSystemError`, whose `cause` = recovery error and `applicationError` = original failure |
+| Final cleanup fails | Reset the database; do not assume isolation held |
+
+## Differences from production
 
 | Behavior | Production | `withTestTransaction` |
 |---|---|---|

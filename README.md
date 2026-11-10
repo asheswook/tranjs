@@ -116,21 +116,24 @@ async placeOrder(order: Order) {
 
 ## Testing
 
-`@tranjs/core/testing` runs integration tests against a real database and rolls everything back at the end, so tests leave no data behind. Code under test commits and rolls back as usual, so you can check that a failure leaves nothing and a success leaves its rows.
+`@tranjs/core/testing` rolls back awaited transactional work run through the registered manager (via services, `runInTransaction`, or `@Transactional`). It does **not** cover raw pool/connection queries, other datasources, work not awaited inside the callback, external effects, or fixtures created outside the callback. Transactions opened by code under test use savepoints; "committed" means the logical owner's savepoint was released, not a durable physical commit.
+
+**The hidden test transaction is not ambient.** Wrap direct SQL, including fixture and assertion queries, in `runInTransaction` or `@Transactional`; `ctx()` alone is unavailable. Making it ambient would let `REQUIRED` services join it instead of owning a savepoint, preventing checks of service atomicity.
 
 ```ts
 import { withTestTransaction } from "@tranjs/core/testing";
+import { runInTransaction } from "@tranjs/core";
 
 test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
-  await seedStock("A", 0);
+  await runInTransaction(() => seedStock("A", 0));
   await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
-  expect(await countOrders()).toBe(0);
+  expect(await runInTransaction(countOrders)).toBe(0);
 }));
 ```
 
-It also checks transaction boundaries, such as "these two calls ran in the same transaction" or "this email was sent after commit", with standard `expect` matchers. Works with Jest 29/30, Vitest 3/4/5, node:test and Mocha.
+Standard `expect` matchers check tracked call entry and logical outcomes, such as "these calls entered the same transaction" or "this mailer call ran through an afterCommit callback". They do not prove async completion or external delivery. Works with Jest 29/30, Vitest 3/4/5, node:test and Mocha.
 
-Await all work inside the callback: work that outlives it isn't rolled back. Details, limitations and examples: [Testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md).
+Details, limitations and examples: [Testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md).
 
 ## Supported platforms
 
