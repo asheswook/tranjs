@@ -51,9 +51,9 @@ export function runInTransaction<T>(fn: () => Promise<T> | T, config: Transactio
 
 /** Wrap a function in a managed transaction, resolving its datasource on each invocation. */
 export function transactional<This, Args extends unknown[], R>(
-    fn: (this: This, ...args: Args) => R, config: TransactionConfig = {},
+    fn: (this: This, ...args: Args) => R, config: Propagation | TransactionConfig = Propagation.REQUIRED,
 ): (this: This, ...args: Args) => Promise<Awaited<R>> {
-    const snapshot = { ...config };
+    const snapshot = typeof config === "string" ? { propagation: config } : { ...config };
     return async function(this: This, ...args: Args): Promise<Awaited<R>> {
         return await runInTransaction(() => fn.apply(this, args), snapshot);
     };

@@ -9,12 +9,12 @@ import { ctx, PostgreSQLTransactionManager } from "../src";
 
 expect.extend(matchers);
 
-const datasource = Symbol("pg-agent-mistakes");
+const datasource = Symbol("pg-common-service-mistakes");
 const pool = new Pool({
     connectionString: process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres",
     max: 5,
 });
-const table = "tranjs_pg_agent_mistakes";
+const table = "tranjs_pg_service_mistakes";
 const insert = async (id: string) => {
     await ctx(datasource).query(`INSERT INTO ${table} (id) VALUES ($1)`, [id]);
 };
@@ -70,7 +70,7 @@ class ImmediateEmailOrderService extends OrderService {
 
 class MissingAwaitOrderService extends OrderService {
     protected override async saveOrder(id: string) {
-        // Deliberate agent mistake. The test retains the Promise only to drain it safely.
+        // Deliberate missing await. The test retains the Promise only to drain it safely.
         void this.orders.save(id);
     }
 }
@@ -82,7 +82,7 @@ function expectFailureFacts(assertion: () => void, facts: string[]) {
     for (const fact of facts) expect((failure as Error).message).toContain(fact);
 }
 
-describe("agent-mistake acceptance / real PostgreSQL", () => {
+describe("common service mistakes / real PostgreSQL", () => {
     beforeAll(async () => {
         await pool.query(`CREATE TABLE ${table} (id text PRIMARY KEY)`);
         useTransactionManager(new PostgreSQLTransactionManager(pool), datasource);

@@ -61,7 +61,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
             get name() {
                 const mockName = typeof (target as any).getMockName === "function" ? (target as any).getMockName() : undefined;
                 return mockName && !["jest.fn()", "mockConstructor", "vi.fn()", "spy"].includes(mockName)
-                    ? mockName : (entry.propertyName ?? target.name) || "<anonymous>";
+                    ? mockName : (entry.propertyName ?? (target.name === "spy" ? "" : target.name)) || "<anonymous>";
             },
             calls: [], completions,
         };

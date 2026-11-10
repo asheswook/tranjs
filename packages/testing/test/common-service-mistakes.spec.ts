@@ -62,7 +62,7 @@ function sample(t: TestTransactionProbe, Order = OrderService, Audit = AuditServ
     return { repository, mailer, service: new Order(repository, new Audit(repository), mailer) };
 }
 
-describe("P5: actionable diagnostics for agent-style service mistakes", () => {
+describe("common service mistakes", () => {
     it("names explicit mocks and unnamed object properties in an actionable debit/credit diagnostic", async () => {
         await mockTransactions(async t => {
             const accounts = t.track({ debit: jest.fn().mockName('accounts.debit'), credit: jest.fn() });
@@ -226,7 +226,7 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
             }).toMatchInlineSnapshot(`
 {
   "ambiguous": "toHaveRolledBack: received must have exactly one recorded call; received 2",
-  "missing": "toHaveCommitted: received must have exactly one recorded call; received 0",
+  "missing": "toHaveCommitted: received: 0 calls recorded through the wrapper returned by track()",
   "untracked": "toRunOutsideTransaction: received must be a function tracked by transactions().track or the test probe's track",
 }
 `);
@@ -243,7 +243,7 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
                 `${matcher}: received must be a function tracked by transactions().track or the test probe's track`,
             ));
             expect(() => boundary(neverCalled).not[matcher](once)).toThrow(new TypeError(
-                `${matcher}: received must have exactly one recorded call; received 0`,
+                `${matcher}: received: 0 calls recorded through the wrapper returned by track()`,
             ));
             expect(() => boundary(twice).not[matcher](once)).toThrow(new TypeError(
                 `${matcher}: received must have exactly one recorded call; received 2`,
@@ -259,7 +259,7 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
             const neverCalled = t.track(function neverCalled() {});
             once();
             expect(() => boundary(once).not[matcher](neverCalled)).toThrow(new TypeError(
-                `${matcher}: other must have exactly one recorded call; received 0`,
+                `${matcher}: other: 0 calls recorded through the wrapper returned by track()`,
             ));
             expect(() => boundary(once).not[matcher](foreign)).toThrow(new TypeError(
                 `${matcher}: Functions belong to different transaction probes`,

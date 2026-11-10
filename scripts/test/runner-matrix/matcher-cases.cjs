@@ -30,7 +30,7 @@ exports.register = ({ test, expect }) => {
         expect(() => expect(first).toRunInSameTransactionAs(separate)).toThrow(/first.*tx#|first →/s);
         expect(() => expect(function untracked() {}).not.toHaveCommitted()).toThrow(/track/i);
         const never = tx.track(function never() {});
-        expect(() => expect(never).not.toHaveCommitted()).toThrow(/exactly one|0 recorded|zero/i);
+        expect(() => expect(never).not.toHaveCommitted()).toThrow('0 calls recorded through the wrapper returned by track()');
         const multiple = tx.track(function multiple() {});
         multiple(); multiple();
         expect(() => expect(multiple).not.toRunOutsideTransaction()).toThrow(/exactly one|2 recorded|multiple/i);

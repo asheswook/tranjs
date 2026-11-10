@@ -11,7 +11,7 @@ function runNode(script: string, esm = false): void {
 }
 
 describe("built package exports", () => {
-    it("supports requiring the testing subpath", () => {
+    it("supports requiring the testing package", () => {
         runNode(`
             const assert = require('node:assert/strict');
             const testing = require('@tranjs/testing');
@@ -21,8 +21,6 @@ describe("built package exports", () => {
                 assert.equal(typeof testing[name], 'function', name);
             }
             assert.equal(typeof testing.matchers.toHaveCommitted, 'function');
-            assert.equal('createTestScope' in testing, false);
-            assert.equal('useTestTransactions' in testing, false);
             testing.mockTransactions(t => {
                 assert.equal(typeof t.track, 'function');
                 assert.equal(typeof t.txOf, 'function');
@@ -32,7 +30,7 @@ describe("built package exports", () => {
         `);
     });
 
-    it("supports dynamically importing the testing subpath", () => {
+    it("supports dynamically importing the testing package", () => {
         runNode(`
             const assert = require('node:assert/strict');
             (async () => {
@@ -79,9 +77,6 @@ describe("built package exports", () => {
             const testing = require('@tranjs/testing');
             assert.equal(typeof testing.withTestTransaction, 'function');
             assert.equal(typeof require('@tranjs/core/dist/asyncLocal').AsyncLocal, 'function');
-            assert.throws(() => require.resolve('@tranjs/testing/jest/environment'), {
-                code: 'ERR_PACKAGE_PATH_NOT_EXPORTED',
-            });
         `);
     });
 

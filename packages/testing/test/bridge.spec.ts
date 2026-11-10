@@ -3,27 +3,25 @@ describe("core testing bridge compatibility", () => {
         jest.dontMock("@tranjs/core/internal/testing-bridge");
     });
 
-    it.each([
-        { TESTING_BRIDGE_VERSION: 2, TESTING_CORE_VERSION: "1.2.0" },
-        { TESTING_BRIDGE_VERSION: 1, TESTING_CORE_VERSION: "1.1.0" },
-        { TESTING_BRIDGE_VERSION: undefined, TESTING_CORE_VERSION: undefined },
-    ])("rejects incompatible core before beginning a transaction: %p", versions => {
+    it.each([0, 2, undefined])("rejects incompatible protocol before beginning a transaction: %p", version => {
         const begin = jest.fn();
-        jest.doMock("@tranjs/core/internal/testing-bridge", () => ({ ...versions, begin }));
+        jest.doMock("@tranjs/core/internal/testing-bridge", () => ({ TESTING_BRIDGE_VERSION: version, begin }));
         jest.isolateModules(() => {
             expect(() => require("../src")).toThrow(
-                "@tranjs/testing 1.2.0 requires @tranjs/core 1.2.0 with testing bridge protocol 1",
+                "@tranjs/testing requires testing bridge protocol 1",
             );
         });
         expect(begin).not.toHaveBeenCalled();
     });
 
     it("checks direct fixture imports before they can open a transaction", () => {
+        const begin = jest.fn();
         jest.doMock("@tranjs/core/internal/testing-bridge", () => ({
-            TESTING_BRIDGE_VERSION: 1, TESTING_CORE_VERSION: "2.0.0",
+            TESTING_BRIDGE_VERSION: 2, begin,
         }));
         jest.isolateModules(() => {
-            expect(() => require("../src/fixture")).toThrow("received core 2.0.0, bridge protocol 1");
+            expect(() => require("../src/fixture")).toThrow("received protocol 2");
         });
+        expect(begin).not.toHaveBeenCalled();
     });
 });

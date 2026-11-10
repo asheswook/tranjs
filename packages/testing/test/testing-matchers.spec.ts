@@ -295,6 +295,14 @@ describe("matcher usage errors and exact diagnostics", () => {
             const standalone = t.track(function standaloneName() {});
             standalone();
             expect(matchers.toHaveCommitted.call({}, standalone).message()).toContain("Received: standaloneName →");
+            const unnamed = t.track(function spy() {});
+            unnamed();
+            expect(matchers.toHaveCommitted.call({}, unnamed).message()).toContain("Received: <anonymous> →");
+            const defaultSpy = t.track(Object.defineProperty(jest.fn(), "name", { value: "spy" }));
+            defaultSpy();
+            expect(matchers.toHaveCommitted.call({}, defaultSpy).message()).toContain("Received: <anonymous> →");
+            defaultSpy.mockName("named operation");
+            expect(matchers.toHaveCommitted.call({}, defaultSpy).message()).toContain("Received: named operation →");
         });
     });
 
@@ -309,12 +317,12 @@ describe("matcher usage errors and exact diagnostics", () => {
             const invoke = (received: unknown, other = once) => matcher.call({ isNot: true }, received, other);
             expect(() => invoke(() => {})).toThrow(new TypeError(`${name}: received must be a function tracked by transactions().track or the test probe's track`));
             expect(() => invoke(null)).toThrow(TypeError);
-            expect(() => invoke(never)).toThrow(new TypeError(`${name}: received must have exactly one recorded call; received 0`));
+            expect(() => invoke(never)).toThrow(new TypeError(`${name}: received: 0 calls recorded through the wrapper returned by track()`));
             expect(() => invoke(twice)).toThrow(new TypeError(`${name}: received must have exactly one recorded call; received 2`));
             expect(() => check(never).not[name](once)).toThrow(TypeError);
             expect(() => check(twice).not[name](once)).toThrow(TypeError);
             if (binary) {
-                expect(() => invoke(once, never)).toThrow(new TypeError(`${name}: other must have exactly one recorded call; received 0`));
+                expect(() => invoke(once, never)).toThrow(new TypeError(`${name}: other: 0 calls recorded through the wrapper returned by track()`));
                 expect(() => invoke(once, twice)).toThrow(new TypeError(`${name}: other must have exactly one recorded call; received 2`));
                 expect(() => matcher.call({ isNot: true }, once)).toThrow(new TypeError(`${name}: other must be a function tracked by transactions().track or the test probe's track`));
             }

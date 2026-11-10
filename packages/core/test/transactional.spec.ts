@@ -113,6 +113,34 @@ describe("transactional wrapper", () => {
         expect(manager.events).toEqual(["begin:1", ...middle, "commit:1"]);
     });
 
+    it.each(propagations)("accepts bare %s with the same behavior as a config object", async propagation => {
+        const invoke = (argument: Propagation | TransactionConfig) => transactional(async () => {
+            const outer = manager.getCurrentTransaction();
+            const body = jest.fn(() => manager.getCurrentTransaction() === outer);
+            const result = transactional(body, argument)();
+            expect(result).toBeInstanceOf(Promise);
+            if (propagation === Propagation.NEVER) {
+                await expect(result).rejects.toThrow(IllegalTransactionStateException);
+                expect(body).not.toHaveBeenCalled();
+                return;
+            }
+            await expect(result).resolves.toBe(![Propagation.REQUIRES_NEW, Propagation.NOT_SUPPORTED].includes(propagation));
+            expect(body).toHaveBeenCalledTimes(1);
+        })();
+        await invoke(propagation);
+        const bareEvents = manager.events.map(event => event.replace(/:\d+$/, ":tx"));
+        manager.events.length = 0;
+        await invoke({ propagation });
+        expect(manager.events.map(event => event.replace(/:\d+$/, ":tx"))).toEqual(bareEvents);
+    });
+
+    it("applies a bare ownerless MANDATORY propagation before the callback", async () => {
+        const body = jest.fn();
+        await expect(transactional(body, Propagation.MANDATORY)()).rejects.toThrow(IllegalTransactionStateException);
+        expect(body).not.toHaveBeenCalled();
+        expect(manager.events).toEqual([]);
+    });
+
     it.each([undefined, named, symbolic])("resolves datasource %s at every invocation, not wrapper creation", async datasource => {
         clearTransactionManager(datasource);
         const work = transactional(() => 42, { datasource });
