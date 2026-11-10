@@ -24,7 +24,7 @@ describe("withTestTransaction / postgres.js pool (real database, v3 and v4)", ()
     const immediateTable = `${table}_immediate`;
     const manager = new PostgresTransactionManager(sql);
     const tx = <T>(fn: () => T | Promise<T>, options: Parameters<typeof transactional>[1] = {}) =>
-        transactional(fn, { ...options, datasource })();
+        transactional(fn, { ...(typeof options === "string" ? { propagation: options } : options), datasource })();
     const test = <T>(fn: Parameters<typeof withTestTransaction<T>>[0]) =>
         withTestTransaction(fn, { datasource });
     const insert = async (id: number) => { await ctx(datasource).unsafe(`INSERT INTO ${table} VALUES (${id})`); };
