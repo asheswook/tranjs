@@ -122,4 +122,28 @@ describe("built package exports", () => {
                 .finally(() => { Object.defineProperty(hooks, 'AsyncLocalStorage', originalDescriptor); });
         `);
     });
+
+    it("loads the Jest entry through the imported runner expect, not a global", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            const Module = require('node:module');
+            const load = Module._load;
+            let registered;
+            let calls = 0;
+            Module._load = function(name, ...args) {
+                if (name === '@jest/globals') return { expect: { extend(matchers) {
+                    registered = matchers;
+                    calls++;
+                } } };
+                return load.call(this, name, ...args);
+            };
+            assert.equal(globalThis.expect, undefined);
+            const entry = require('@tranjs/testing/jest');
+            assert.deepEqual(Object.keys(entry), ['matchers']);
+            assert.equal(registered, require('@tranjs/testing').matchers);
+            assert.equal(entry.matchers, registered);
+            assert.equal(Object.keys(registered).length, 6);
+            assert.equal(calls, 1);
+        `);
+    });
 });

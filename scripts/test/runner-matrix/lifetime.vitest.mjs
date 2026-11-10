@@ -39,7 +39,7 @@ test('schedule fake timer and native detached Promise for real afterAll', async 
 test('user-bound onTestFinished retains closed A and rejects', () => h.testing.withTestTransaction(async a => {
     onTestFinished(AsyncLocalStorage.bind(async () => {
         h.assert.throws(() => h.testing.transactions(), /active.*session/i);
-        await h.assert.rejects(h.core.runInTransaction(() => h.assert.fail('bound closed callback ran')), /closed/i);
+        await h.assert.rejects(h.core.transactional(() => h.assert.fail('bound closed callback ran'))(), /closed/i);
         h.assert.equal(a.transactions.length, 0);
         console.log('LIFETIME_BOUND_COMPLETION:owner=closed-A:rejected=1');
     }));

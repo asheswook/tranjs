@@ -1,4 +1,5 @@
-import { matchers } from '@tranjs/core/testing/jest';
+import '@tranjs/testing/jest';
+import { matchers } from '@tranjs/testing/jest';
 import { expect as importedExpect } from '@jest/globals';
 import { expect as packageExpect } from 'expect';
 expect.extend(matchers);
@@ -9,6 +10,8 @@ expect(fn).toRunOutsideTransaction();
 expect(fn).toRunAfterCommitOf(fn);
 expect(fn).toHaveCommitted();
 expect(fn).toHaveRolledBack();
+expect(Promise.resolve(fn)).resolves.toHaveCommitted();
+importedExpect(Promise.resolve(fn)).resolves.not.toHaveRolledBack();
 // @ts-expect-error transaction operands must be functions
 expect(fn).toRunInSameTransactionAs(123);
 // @ts-expect-error no parameters

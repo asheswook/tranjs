@@ -1,2 +1,2 @@
-expect.extend(require('@tranjs/core/testing/jest').matchers);
+expect.extend(require('@tranjs/testing/jest').matchers);
 require('./matcher-cases.cjs').register({ test, expect });

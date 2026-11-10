@@ -1,6 +1,7 @@
 /// <reference types="vitest/globals" />
 import { expect as importedExpect } from 'vitest';
-import { matchers } from '@tranjs/core/testing/vitest';
+import '@tranjs/testing/vitest';
+import { matchers } from '@tranjs/testing/vitest';
 for (const check of [expect, importedExpect]) {
 check.extend(matchers);
 const fn = () => {};

@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { Pool } = require('pg');
 const core = require('@tranjs/core');
-const testing = require('@tranjs/core/testing');
+const testing = require('@tranjs/testing');
 const driver = require('@tranjs/pg');
 
 const pool = new Pool({ connectionString: process.env.PG_URL || 'postgres://postgres:postgres@localhost:5432/postgres', max: 12 });
@@ -23,12 +23,12 @@ async function exercise(probe, id) {
         await driver.ctx().query(`INSERT INTO ${table} VALUES ($1)`, [id]);
         return (await driver.ctx().query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
     });
-    const first = await core.runInTransaction(save);
+    const first = await core.transactional(save)();
     assert.equal(probe.txOf(save).outcome, 'committed');
     assert.equal(await count(id), 0, 'logical commit became visible outside the test transaction');
     await new Promise(resolve => setTimeout(resolve, 5));
     assert.equal(testing.transactions(), probe, 'session lost after an await');
-    const second = await core.runInTransaction(async () => (await driver.ctx().query('SELECT pg_backend_pid() AS pid')).rows[0].pid);
+    const second = await core.transactional(async () => (await driver.ctx().query('SELECT pg_backend_pid() AS pid')).rows[0].pid)();
     assert.equal(first, second, 'test did not retain its physical connection');
     return first;
 }

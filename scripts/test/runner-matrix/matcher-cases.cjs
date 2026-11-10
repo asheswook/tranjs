@@ -1,5 +1,5 @@
-const { runInTransaction, afterCommit, Propagation } = require('@tranjs/core');
-const { mockTransactions } = require('@tranjs/core/testing');
+const { transactional, afterCommit, Propagation } = require('@tranjs/core');
+const { mockTransactions } = require('@tranjs/testing');
 exports.register = ({ test, expect }) => {
     test('six matchers, negation, and usage errors', () => mockTransactions(async tx => {
         const first = tx.track(function first() {});
@@ -8,13 +8,13 @@ exports.register = ({ test, expect }) => {
         const notification = tx.track(function notification() {});
         const outside = tx.track(function outside() {});
         const rolled = tx.track(function rolled() { throw new Error('application'); });
-        await runInTransaction(async () => {
+        await transactional(async () => {
             first(); joined();
-            await runInTransaction(separate, { propagation: Propagation.REQUIRES_NEW });
+            await transactional(separate, { propagation: Propagation.REQUIRES_NEW })();
             afterCommit(notification);
-        });
+        })();
         outside();
-        await expect(runInTransaction(rolled)).rejects.toThrow('application');
+        await expect(transactional(rolled)()).rejects.toThrow('application');
         expect(first).toRunInSameTransactionAs(joined);
         expect(first).not.toRunInSameTransactionAs(separate);
         expect(first).toRunInSeparateTransactionFrom(separate);

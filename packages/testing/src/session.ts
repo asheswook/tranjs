@@ -45,7 +45,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
     };
     const trackedCalls = (fn: Function) => {
         const recorded = calls.get(fn);
-        if (!recorded) throw new Error("Function was not tracked by this transaction probe; use t.track(fn)");
+        if (!recorded) throw new Error("Function was not tracked by this transaction probe");
         return recorded;
     };
     const wrapFunction = (target: Function, receiver?: object, propertyName?: string): Function => {

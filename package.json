@@ -8,6 +8,7 @@
     "test": "lerna run test",
     "test:postgres:v3": "node scripts/test/postgres-v3.cjs",
     "test:runners": "node scripts/test/runner-matrix/run.cjs",
+    "test:packed": "node scripts/test/packed-consumer.cjs",
     "test:legacy": "bash scripts/legacy-smoke.sh",
     "test:types": "tsc -p test/types/tsconfig.json --noEmit && tsc -p test/types/tsconfig.testing-node10.json --noEmit && tsc -p test/types/tsconfig.testing-node16.json --noEmit && tsc -p test/types/tsconfig.testing-bundler.json --noEmit",
     "test:types:postgres:v3": "tsc -p test/types/tsconfig.postgres-v3.json --noEmit",

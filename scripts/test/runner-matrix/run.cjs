@@ -33,7 +33,7 @@ function prepare(directory, runner) {
         }
     }
     // Copy (do not symlink) BUILT packages, so their peer imports resolve this runner.
-    for (const name of ['core', 'pg']) {
+    for (const name of ['core', 'testing', 'pg']) {
         const source = path.join(root, 'packages', name);
         assert(fs.existsSync(path.join(source, 'dist/index.js')), 'Run npm run build first');
         const target = path.join(modules, '@tranjs', name);
@@ -59,6 +59,7 @@ function prepare(directory, runner) {
     }
     fs.writeFileSync(path.join(directory, 'vitest.config.mjs'), `export default { test: {
         include: process.env.MATRIX_CASE.split(',').map(name => name + '.vitest.mjs'),
+        setupFiles: process.env.MATRIX_SETUP ? ['./setup-only.vitest.mjs'] : [],
         pool: 'threads', maxWorkers: 2, minWorkers: 1,
         silent: false, reporters: ['verbose'], testTimeout: 15000, hookTimeout: 15000,
     } };`);
@@ -115,14 +116,22 @@ function main() {
             const directory = path.join(sandbox, runner);
             prepare(directory, runner);
             const executable = path.join(directory, 'node_modules/jest/bin/jest.js');
-            const jest = (files, extra) => run(directory, executable, ['--runInBand', '--silent=false', '--verbose', '--config', JSON.stringify({
+            const jest = (files, extra = {}, config = {}) => run(directory, executable, ['--runInBand', '--silent=false', '--verbose', '--config', JSON.stringify({
                 rootDir: directory, testEnvironment: 'node',
-                testRegex: `(${files.join('|')})\\.jest\\.cjs$`, transform: {}, testTimeout: 15000,
+                testRegex: `/(${files.join('|')})\\.jest\\.cjs$`, transform: {}, testTimeout: 15000,
+                ...config,
             })], extra);
             const output = jest(['portable', 'matchers', 'core-regressions', 'nest', 'lifetime']);
             findings(output);
             const registration = jest(['hook-registration'], { failure: /Hooks cannot be defined inside tests/ });
             assert.match(registration, /LIFETIME_JEST_NESTED_AFTER_EACH:registration=rejected:callback=not-installed/);
+            for (const injectGlobals of [true, false]) {
+                console.log(`\n=== ${runner}: registration, injectGlobals=${injectGlobals} ===`);
+                jest(['registration'], {}, { injectGlobals });
+                jest(['registration-setup'], {}, {
+                    injectGlobals, setupFilesAfterEnv: ['./setup-only.jest.cjs'],
+                });
+            }
             typeChecks.push([directory, runner]);
         }
         for (const runner of ['vitest3', 'vitest4', 'vitest5']) {
@@ -134,6 +143,8 @@ function main() {
                 ...extra, env: { ...extra.env, MATRIX_CASE: name },
             });
             findings(vitest('portable,matchers,core-regressions,lifetime'));
+            vitest('registration');
+            vitest('registration-setup', { env: { MATRIX_SETUP: '1' } });
             typeChecks.push([directory, runner]);
         }
         console.log('\n=== node:test: portable serial/concurrent and six assertions ===');

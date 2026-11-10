@@ -1,6 +1,10 @@
 import type {} from "expect";
+import { expect } from "@jest/globals";
+import { matchers } from "./index";
 
-export { matchers } from "./index";
+expect.extend(matchers);
+
+export { matchers };
 
 declare module "expect" {
     interface Matchers<R extends void | Promise<void>, T = unknown> {

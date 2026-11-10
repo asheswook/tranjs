@@ -1,6 +1,9 @@
-import type {} from "vitest";
+import { expect } from "vitest";
+import { matchers } from "./index.js";
 
-export { matchers } from "./index.js";
+expect.extend(matchers);
+
+export { matchers };
 
 declare module "vitest" {
     // A parameterless merge supports the different Assertion generics in 3/4/5.

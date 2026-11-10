@@ -28,7 +28,7 @@ export function registerProbeOwner(session: TestSession, owner: object): void {
 export function trackedFunctionForOwner(fn: Function, owner: object): TrackedFunction | undefined {
     const wrapped = wrappers.get(fn);
     if (wrapped && wrapped.owner !== owner) {
-        throw new TypeError("Cannot track a wrapper belonging to a different transaction probe; track the original function instead");
+        throw new TypeError("Cannot track a wrapper belonging to a different transaction probe");
     }
     return wrapped ?? originals.get(fn)?.entries.get(owner);
 }
@@ -60,15 +60,15 @@ export function getTrackedFunction(fn: Function): TrackedFunction | undefined {
     const owner = session && owners.get(session);
     if (session && !session.closed) {
         const entry = owner && record.entries.get(owner);
-        if (!entry) throw new TypeError("Original function was not tracked by the current transaction probe; use its tracked wrapper");
+        if (!entry) throw new TypeError("Original function was not tracked by the current transaction probe");
         return entry;
     }
     if (record.ambiguous) {
-        throw new TypeError("Original function belongs to multiple transaction probes; use its tracked wrapper outside an active session");
+        throw new TypeError("Original function belongs to multiple transaction probes");
     }
     // A dangling task must not borrow even a sole entry from another session.
     if (session && record.single?.owner !== owner) {
-        throw new TypeError("Original function was not tracked by the current transaction probe; use its tracked wrapper");
+        throw new TypeError("Original function was not tracked by the current transaction probe");
     }
     return record.single;
 }

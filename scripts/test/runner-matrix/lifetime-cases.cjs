@@ -20,7 +20,7 @@ function write(id, observation) {
             await driver.ctx().query(`INSERT INTO ${h.table} VALUES ($1)`, [id]);
         };
         const tracked = probe ? probe.track(save) : save;
-        await core.runInTransaction(tracked);
+        await core.transactional(tracked)();
         if (probe) observation.info = probe.txOf(tracked);
     };
 }
@@ -38,7 +38,7 @@ async function fakeTimerInsideB(clock, source = 'real') {
             setTimeout(() => { done = write(id, observed)(); }, 1);
         });
         await testing.withTestTransaction(async b => {
-            const backend = await core.runInTransaction(pid);
+            const backend = await core.transactional(pid)();
             await clock.flush();
             await done;
             assert.equal(observed.probe, b, 'runner no longer dispatches timers in the flush context');
@@ -61,7 +61,7 @@ async function detachedInsideB() {
     await testing.withTestTransaction(async a => {
         task = gate.promise.then(async () => {
             assert.throws(() => testing.transactions(), /active.*session/i);
-            await assert.rejects(core.runInTransaction(() => { bodies++; }), /closed/i);
+            await assert.rejects(core.transactional(() => { bodies++; })(), /closed/i);
             assert.equal(a.transactions.length, 0);
         });
     });
@@ -96,10 +96,10 @@ async function mockDetached({ afterAll = false } = {}) {
             task = gate.promise.then(async () => {
                 assert.throws(() => testing.transactions(), /active.*session/i);
                 for (const propagation of Object.values(core.Propagation)) {
-                    await assert.rejects(core.runInTransaction(async () => {
+                    await assert.rejects(core.transactional(async () => {
                         bodies++;
                         await driver.ctx(datasource).query('SELECT 1');
-                    }, { datasource, propagation }), /closed/i);
+                    }, { datasource, propagation })(), /closed/i);
                 }
                 assert.equal(a.transactions.length, 0);
             });
@@ -125,11 +125,11 @@ async function mockDetached({ afterAll = false } = {}) {
         try {
             const before = begins;
             assert.throws(() => testing.transactions(), /active.*session/i);
-            const result = await core.runInTransaction(async () => {
+            const result = await core.transactional(async () => {
                 const backend = await pidFor(datasource);
                 const { rows } = await driver.ctx(datasource).query('SELECT 1 AS live');
                 return { backend, live: rows[0].live };
-            }, { datasource });
+            }, { datasource })();
             assert.equal(typeof result.backend, 'number');
             assert.equal(result.live, 1);
             assert.equal(begins, before + 1, 'legitimate outside caller did not start its own real transaction');
@@ -164,7 +164,7 @@ async function scheduleAfterAll(clock) {
         await helper(async a => {
             setTimeout(() => { item.timerTask = write(item.id, observed)(); }, 1);
             item.promiseTask = gate.promise.then(async () => {
-                await assert.rejects(core.runInTransaction(() => assert.fail('closed callback ran')), /closed/i);
+                await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), /closed/i);
                 assert.equal(a.transactions.length, 0);
             });
         });

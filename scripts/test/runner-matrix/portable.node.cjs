@@ -14,13 +14,13 @@ test('all six portable assertions work without runner matchers', () => h.testing
     const notification = tx.track(function notification() {});
     const outside = tx.track(function outside() {});
     const rolled = tx.track(function rolled() { throw new Error('application'); });
-    await h.core.runInTransaction(async () => {
+    await h.core.transactional(async () => {
         first(); joined();
-        await h.core.runInTransaction(separate, { propagation: h.core.Propagation.REQUIRES_NEW });
+        await h.core.transactional(separate, { propagation: h.core.Propagation.REQUIRES_NEW })();
         h.core.afterCommit(notification);
-    });
+    })();
     outside();
-    await h.assert.rejects(h.core.runInTransaction(rolled), /application/);
+    await h.assert.rejects(h.core.transactional(rolled)(), /application/);
     h.testing.assertSameTransaction(first, joined);
     h.testing.assertSeparateTransaction(first, separate);
     h.testing.assertOutsideTransaction(outside);

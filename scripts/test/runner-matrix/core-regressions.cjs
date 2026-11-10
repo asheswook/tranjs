@@ -20,10 +20,10 @@ async function initializingSession() {
                     // This executes in the helper's initializing ALS, while its
                     // hidden BEGIN has not even reached PostgreSQL yet.
                     for (const propagation of Object.values(core.Propagation)) {
-                        await assert.rejects(core.runInTransaction(async () => {
+                        await assert.rejects(core.transactional(async () => {
                             bodies++;
                             await pool.query(`INSERT INTO ${table} VALUES (1)`);
-                        }, { datasource, propagation }), /initializ/i);
+                        }, { datasource, propagation })(), /initializ/i);
                     }
                 }
             }
@@ -34,7 +34,7 @@ async function initializingSession() {
     try {
         await pool.query(`CREATE TABLE ${table} (id integer)`);
         await testing.withTestTransaction(async () => {
-            await core.runInTransaction(() => driver.ctx(datasource).query(`INSERT INTO ${table} VALUES (2)`), { datasource });
+            await core.transactional(() => driver.ctx(datasource).query(`INSERT INTO ${table} VALUES (2)`), { datasource })();
         }, { datasource });
         assert.equal(checked, true);
         assert.equal(bodies, 0, 'initializing sessions admitted application work');
@@ -50,7 +50,7 @@ async function initializingSession() {
 async function diagnosticLabels(mock) {
     await testing.withTestTransaction(async tx => {
         const accounts = tx.track({ debit: mock().mockName('accounts.debit'), credit: mock() });
-        await core.runInTransaction(() => accounts.debit());
+        await core.transactional(() => accounts.debit())();
         accounts.credit();
         assert.throws(() => testing.assertSameTransaction(accounts.debit, accounts.credit), error => {
             assert.match(error.message, /Received: accounts\.debit → tx#1 \(REQUIRED, committed\), event 1/);
@@ -73,12 +73,12 @@ async function recoveryInjection() {
         });
         tx.fail('commit', { containing: save, error: commit });
         tx.fail('rollback', { error: rollback });
-        await core.runInTransaction(() => {}); // Selectors must survive unrelated success.
-        await assert.rejects(core.runInTransaction(async () => {
+        await core.transactional(() => {})(); // Selectors must survive unrelated success.
+        await assert.rejects(core.transactional(async () => {
             core.afterCommit(() => { commitHooks++; });
             core.afterRollback(() => { rollbackHooks++; });
             await save();
-        }), error => {
+        })(), error => {
             assert.equal(error.name, 'TransactionSystemError');
             assert.equal(error.applicationError, commit);
             assert.equal(error.cause, rollback);
@@ -86,8 +86,8 @@ async function recoveryInjection() {
         });
         assert.equal(rollbackHooks, 1);
         assert.equal(commitHooks, 0);
-        assert.equal(await core.runInTransaction(async () => Number((await driver.ctx().query(`SELECT count(*) FROM ${h.table}`)).rows[0].count)), 0);
-        await assert.rejects(core.runInTransaction(() => { throw later; }), error => error === later);
+        assert.equal(await core.transactional(async () => Number((await driver.ctx().query(`SELECT count(*) FROM ${h.table}`)).rows[0].count))(), 0);
+        await assert.rejects(core.transactional(() => { throw later; })(), error => error === later);
     });
     assert.equal(await h.count('recovery'), 0);
 }
@@ -119,19 +119,19 @@ async function brokenSavepointRecovery() {
     try {
         await assert.rejects(testing.withTestTransaction(async probe => {
             try {
-                await core.runInTransaction(async () => {
+                await core.transactional(async () => {
                     try {
                         await driver.ctx(datasource).query(`INSERT INTO ${h.table} VALUES ('broken-recovery')`);
                         throw application;
                     } finally { applicationFinally = true; }
-                }, { datasource });
+                }, { datasource })();
             } catch (error) {
                 logicalFailure = error;
                 assert.equal(error.name, 'TransactionSystemError');
                 assert.equal(error.applicationError, application);
                 assert.equal(error.cause, recovery);
                 assert.equal(probe.transactions[0].outcome, 'rolled-back');
-                await assert.rejects(core.runInTransaction(() => assert.fail('broken session admitted work'), { datasource }), /broken|aborted|recovery/i);
+                await assert.rejects(core.transactional(() => assert.fail('broken session admitted work'), { datasource })(), /broken|aborted|recovery/i);
                 throw error;
             } finally { callbackFinally = true; }
         }, { datasource }), error => {

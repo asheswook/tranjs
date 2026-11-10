@@ -56,7 +56,7 @@ describe("framework-neutral transaction assertions", () => {
         assertCommitted(wrappers[0]);
         assertRolledBack(wrappers[1]);
         expect(() => assertCommitted(original.save)).toThrow(new TypeError(
-            "toHaveCommitted: received: Original function belongs to multiple transaction probes; use its tracked wrapper outside an active session",
+            "toHaveCommitted: received: Original function belongs to multiple transaction probes",
         ));
         expect(() => check(original.save).not.toHaveCommitted()).toThrow(TypeError);
     });
