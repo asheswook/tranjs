@@ -12,6 +12,9 @@ import {
 } from "@tranjs/core";
 import { ReservedTransactionSql, TransactionSql } from "./context";
 import { TransactionAbortedError } from "./errors";
+import type { FixtureLease } from "@tranjs/core/internal/testing-bridge";
+import { createPostgresFixtureConnection } from "./fixture";
+import type { PostgresFixtureConnection } from "./fixture";
 
 const DRIVER_NAME = Symbol("postgres");
 
@@ -58,6 +61,10 @@ export function ctx(datasource?: string | symbol): TransactionSql {
 }
 
 abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTransactionSql> {
+    protected createFixtureConnection(tx: ReservedTransactionSql, lease: FixtureLease): PostgresFixtureConnection {
+        return createPostgresFixtureConnection(tx, lease);
+    }
+
     protected testTransactionAbortedError(cause: unknown): Error {
         return Object.assign(new TransactionAbortedError(), { cause });
     }

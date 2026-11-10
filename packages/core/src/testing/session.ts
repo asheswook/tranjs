@@ -181,6 +181,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
     const session: TestSession = {
         kind, lifecycle: kind === "mock" ? "ready" : "initializing",
         counter: 0, closed: false, root: { open: false },
+        admitting: true, fixtureActive: false, managedActive: 0, pendingFixtures: new Set(),
         begin(options, propagation, parent) {
             const info: TestTransactionInfo = Object.freeze({
                 id: transactions.length + 1,
@@ -250,6 +251,7 @@ export async function mockTransactions<T>(fn: (t: TestTransactionProbe) => T | P
     useTransactionManager(manager, datasource);
     try { return await runTestSession(manager, session, () => fn(probe)); }
     finally {
+        session.admitting = false;
         session.closed = true;
         if (previous) useTransactionManager(previous, datasource);
         else clearTransactionManager(datasource);
@@ -282,6 +284,14 @@ export async function withTestTransaction<T>(fn: (t: TestTransactionProbe) => T 
             failure = { error };
             throw error;
         } finally {
+            session.admitting = false;
+            if (session.pendingFixtures.size) {
+                const settled = await Promise.allSettled([...session.pendingFixtures]);
+                const errors = [new Error("withTestTransaction callback exited with pending fixture work"),
+                    ...(failure ? [failure.error] : []),
+                    ...settled.flatMap(result => result.status === "rejected" ? [result.reason] : [])];
+                failure = { error: new AggregateError(errors, "Pending fixture work drained before test rollback") };
+            }
             session.closed = true;
             // A caught owner failure cannot make an unrecoverable session pass.
             // Keep the full application/recovery pair, including thrown undefined.
@@ -302,7 +312,7 @@ export async function withTestTransaction<T>(fn: (t: TestTransactionProbe) => T 
                 access.logError("Transaction release failed", error);
                 failure = { error: failure ? new TransactionSystemError(error, failure.error) : error };
             }
-            if (cleanupFailed || "broken" in session) throw failure!.error;
+            if (failure) throw failure.error;
         }
     });
 }

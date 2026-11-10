@@ -22,6 +22,10 @@ export interface TestSession {
     closed: boolean;
     broken?: unknown;
     root: { open: boolean };
+    admitting: boolean;
+    fixtureActive: boolean;
+    managedActive: number;
+    pendingFixtures: Set<Promise<unknown>>;
     begin(options: TransactionOptions, propagation: Propagation, parent?: TxState): TestBoundaryInfo;
     attach(state: TxState, info: TestBoundaryInfo): void;
     complete(info: TestBoundaryInfo, outcome: "committed" | "rolled-back"): void;
@@ -34,10 +38,20 @@ export const testAccess = new WeakMap<PlatformTransactionManager<any>, {
     release(tx: any, failed: boolean): Promise<void>;
     outside<T>(fn: () => T): T;
     logError(message: string, error: unknown): void;
+    fixtureConnection(tx: any, lease: FixtureLease): unknown;
+    createSavepoint(tx: any, name: string): Promise<void>;
+    rollbackToSavepoint(tx: any, name: string): Promise<void>;
+    releaseSavepoint(tx: any, name: string): Promise<void>;
 }>();
+/** Internal driver capability protocol; never supplies ambient transaction access. */
+export interface FixtureLease {
+    assert(): void;
+    track<T>(operation: () => PromiseLike<T>): Promise<T>;
+}
 interface TestStore {
     sessions: Map<PlatformTransactionManager<any>, TestSession>;
     scopes: Map<PlatformTransactionManager<any>, { open: boolean }>;
+    provenance?: "fixture" | "managed" | "hook";
 }
 // Importing the production entry initializes the bridge, not a testing context.
 // Allocate the extra async-local storage only when a testing helper is used.
@@ -60,6 +74,13 @@ export function currentTestSession(): TestSession | undefined {
     const sessions = storage?.getStore()?.sessions;
     return sessions ? Array.from(sessions.values()).reverse()[0] : undefined;
 }
+export function testProvenance(): TestStore["provenance"] {
+    return storage?.getStore()?.provenance;
+}
+export function runTestProvenance<T>(provenance: NonNullable<TestStore["provenance"]>, fn: () => T): T {
+    const store = storage?.getStore();
+    return store ? storage!.run({ ...store, provenance }, fn) : fn();
+}
 export function hasTestTransaction(): boolean {
     return Array.from(storage?.getStore()?.sessions.values() ?? []).some(session => !session.closed && session.kind === "integration");
 }
@@ -68,7 +89,7 @@ export function runTestSession<T>(manager: PlatformTransactionManager<any>, sess
     const sessions = new Map(storage.getStore()?.sessions);
     sessions.delete(manager);
     sessions.set(manager, session);
-    return storage.run({ sessions, scopes: new Map(storage.getStore()?.scopes) }, fn);
+    return storage.run({ ...storage.getStore(), sessions, scopes: new Map(storage.getStore()?.scopes) }, fn);
 }
 export function testScope<T>(manager: PlatformTransactionManager<any>, fn: () => Promise<T>): Promise<T> {
     const store = storage?.getStore();
