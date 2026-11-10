@@ -49,18 +49,26 @@ class UserService {
 }
 ```
 
-`runInTransaction(fn, config?)` is the functional equivalent. The callback may return a value or a Promise; the result is always a Promise, including setup failures as rejections.
+`transactional(fn, config?)` creates a callable transaction wrapper. Calling it forwards arguments unchanged and preserves dynamic, invocation-time `this`. Synchronous values and thenables are accepted; every propagation returns a Promise of the awaited result, including setup failures as rejections. Configuration is snapshotted at wrapper creation; manager lookup happens at invocation.
 
 ```typescript
-import { IsolationLevel, runInTransaction } from "@tranjs/core";
+function transactional<This, Args extends unknown[], R>(
+    fn: (this: This, ...args: Args) => R, config?: TransactionConfig,
+): (this: This, ...args: Args) => Promise<Awaited<R>>;
+```
+
+```typescript
+import { IsolationLevel, transactional } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
-const createUser = (name: string) => runInTransaction(async () => {
+const createUser = transactional(async (name: string) => {
     const { rows } = await ctx().query(
         "INSERT INTO users(name) VALUES ($1) RETURNING *", [name],
     );
     return rows[0];
 }, { isolationLevel: IsolationLevel.SERIALIZABLE });
+
+const user = await createUser("Ada");
 ```
 
 ### TransactionConfig
@@ -87,7 +95,7 @@ const createUser = (name: string) => runInTransaction(async () => {
 | `NEVER` | Throw `IllegalTransactionStateException` | Run without a transaction |
 | `NESTED` | Create a savepoint on the same connection | Begin one, as with `REQUIRED` |
 
-Propagation is tracked per datasource. A scope on datasource B never joins a transaction on datasource A. Both native drivers support savepoints.
+Propagation is tracked per datasource. A scope on datasource B never joins a transaction on datasource A. All native drivers support savepoints.
 
 ## Rollback rules
 
@@ -172,16 +180,33 @@ class ReportService {
 
 | Entry point | Exports |
 |---|---|
-| `@tranjs/core/testing` | `withTestTransaction`, `mockTransactions`, `transactions`, and the assertion functions `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack`. Works with any runner. |
-| `@tranjs/core/testing/jest` | `matchers` and their type declarations (Jest 29/30) |
-| `@tranjs/core/testing/vitest` | `matchers` and their type declarations (Vitest 3/4/5) |
+| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `transactions`, `fixture`, `FixtureOptions` (type), `matchers`, and portable assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
+| `@tranjs/testing/jest` | Side-effect registration of six matchers through `expect` from `@jest/globals`, plus `matchers` and types (Jest 29/30; supports `injectGlobals: false`) |
+| `@tranjs/testing/vitest` | ESM side-effect registration of six matchers through Vitest's `expect`, plus `matchers` and types (Vitest 3/4/5) |
 
-- `withTestTransaction(fn, options?)`: rolls back awaited transactional work run through the registered manager (via services, `runInTransaction`, or `@Transactional`). It does **not** cover raw pool/connection queries, other datasources, work not awaited inside the callback, external effects, or fixtures created outside the callback. Transactions opened by code under test become savepoints; "committed" means the logical owner's savepoint was released, not a durable physical commit.
+`@tranjs/testing@1.2.0` is a separate package with a required exact peer on `@tranjs/core@1.2.0`; runner peers are optional. Drivers: `@tranjs/pg@1.3.0`, `@tranjs/mysql2@1.3.0`, `@tranjs/postgres@1.2.0`. Manual `expect.extend(matchers)` is also supported.
+
+- `withTestTransaction(fn, options?)`: rolls back awaited transactional work through the selected manager, including services, `transactional` and `@Transactional`. It does not contain raw connections, other datasources, detached work, external effects, or fixtures outside the callback. Owners use savepoints; "committed" is logical completion, not physical durability.
 - `mockTransactions(fn, options?)`: runs `fn` with a fake manager and no database, to check transaction boundaries and failure handling.
-- `transactions()`: returns the probe for the current test (the same object passed to `fn`). Throws outside a test.
+- `transactions()`: returns the current live session's probe (also passed to `fn`); throws outside a live session. It exposes `track`, `txOf`, `fail`, `transactions`, and `datasource`.
 - `options` is `{ datasource?: string | symbol }`.
 
-**The hidden transaction is not ambient.** Direct SQL, including assertion queries, needs `runInTransaction` or `@Transactional`; `ctx()` alone is unavailable. Otherwise `REQUIRED` services could join the hidden transaction without owning a savepoint, defeating service atomicity checks. Await everything inside `fn`. Full behaviour and examples: [testing guide](testing.md).
+```typescript
+function fixture<C, R>(
+    fn: (ctx: C) => R, options?: FixtureOptions,
+): Promise<Awaited<R>>;
+// FixtureOptions: { datasource?: string | symbol }
+```
+
+`fixture` requires a live integration `withTestTransaction` session, not `mockTransactions`. It supplies a restricted, revocable driver façade without changing ambient `ctx()` or `getCurrentTransaction()`. Use type-only `PgFixtureConnection`, `Mysql2FixtureConnection`, or `PostgresFixtureConnection` from the matching driver. Annotations do not validate datasource wiring. Passing the façade into application code is unsupported capability transfer.
+
+Each call uses one savepoint, records no probe transaction or logical TxState, and has no deadline beyond native timeouts. All seven managed propagations on any datasource are rejected inside its callback before managed bodies run. Recursive fixtures and fixtures from managed callbacks or commit/rollback hooks are rejected. A shared gate rejects fixture/owner and fixture/fixture overlaps. Await the returned value and all queries: the façade and escaped methods are revoked on callback completion; pending database work fails and is drained before release. Session exit stops admission, settles admitted work, and retains pending-work misuse and cleanup errors.
+
+SQL errors roll back to and release the fixture savepoint while preserving native errors; recovery failure poisons the session and retains both errors, so final exit fails even if caught. This recovery differs from production. Returned data is not deeply scanned; not every missing await is detectable. Fixtures are not a SQL sandbox: explicit COMMIT, DDL, and external effects can escape rollback.
+
+**The hidden transaction is not ambient.** Application and assertion SQL needs `transactional` or `@Transactional`; test-only DML can use `fixture`. No implicit ambient capability is granted. Schema migrations run separately. For real commit semantics, use no session, seed/work via `transactional`, verify through a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests use independent physical transactions outside sessions. Full policies, examples and limitations: [testing guide](testing.md).
+
+The core main entry loads no `@tranjs/testing`, probe, fake manager, matcher or runner code. Testing AsyncLocalStorage is allocated only when a session starts; the internal bridge is inert without a session.
 
 ## Errors
 

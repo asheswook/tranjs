@@ -3,7 +3,7 @@ import { Pool } from "pg";
 import {
     IllegalTransactionStateException,
     Propagation,
-    runInTransaction,
+    transactional,
     Transactional,
 } from "@tranjs/core";
 
@@ -56,7 +56,7 @@ class MyService {
 
 async function main(): Promise<void> {
     try {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             await ctx().query(`CREATE TABLE IF NOT EXISTS tranjs_example_users (
                 id TEXT PRIMARY KEY,
                 balance INTEGER NOT NULL
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
             await ctx().query(`INSERT INTO tranjs_example_users (id, balance)
                 VALUES ('Jaewook', 1000), ('Chansu', 1000)
                 ON CONFLICT (id) DO UPDATE SET balance = EXCLUDED.balance`);
-        });
+        })();
 
         const service = new MyService();
         await service.transfer("Jaewook", "Chansu", 100);

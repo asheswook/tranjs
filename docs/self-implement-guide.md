@@ -88,7 +88,7 @@ function ctx(datasource?: string | symbol): Connection {
 }
 ```
 
-Call `register(pool, name?)` once at module scope, then use `@Transactional` or `runInTransaction`. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
+Call `register(pool, name?)` once at module scope, then use `@Transactional` or `transactional`. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
 
 ## Connection cleanup
 

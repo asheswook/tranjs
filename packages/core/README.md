@@ -38,7 +38,7 @@ class AccountService {
 
 ## Features
 
-- ✅ **Declarative transactions** with `@Transactional`, or `runInTransaction` for plain functions
+- ✅ **Declarative transactions** with `@Transactional`, or `transactional` for plain functions
 - 🔁 **All 7 Spring propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `NESTED` (savepoints)
 - 🛡️ **Spring rollback rules**: a failure in a joined method marks the whole transaction rollback-only
 - 🎛️ **Isolation level, read-only and timeout** per transaction
@@ -88,14 +88,18 @@ Register managers once, not inside a request handler. Re-registering per request
 ## Without decorators
 
 ```ts
-import { runInTransaction, IsolationLevel } from "@tranjs/core";
+import { transactional, IsolationLevel } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
-const order = await runInTransaction(async () => {
+const createOrder = transactional(async (userId: string) => {
     const { rows } = await ctx().query("INSERT INTO orders (user_id) VALUES ($1) RETURNING *", [userId]);
     return rows[0];
 }, { isolationLevel: IsolationLevel.SERIALIZABLE, timeout: 5000 });
+
+const order = await createOrder(userId);
 ```
+
+`transactional(fn, config?)` returns a callable that preserves invocation-time `this` and arguments. It accepts synchronous or asynchronous functions and always returns a Promise of the awaited result, including failures as rejections. Configuration is snapshotted when the wrapper is created; the manager is resolved when it is called.
 
 ## Rollback rules
 
@@ -116,22 +120,33 @@ async placeOrder(order: Order) {
 
 ## Testing
 
-`@tranjs/core/testing` rolls back awaited transactional work run through the registered manager (via services, `runInTransaction`, or `@Transactional`). It does **not** cover raw pool/connection queries, other datasources, work not awaited inside the callback, external effects, or fixtures created outside the callback. Transactions opened by code under test use savepoints; "committed" means the logical owner's savepoint was released, not a durable physical commit.
+Install `@tranjs/testing@1.2.0` separately with its required, exact peer `@tranjs/core@1.2.0`. Compatible drivers are `@tranjs/pg@1.3.0`, `@tranjs/mysql2@1.3.0`, and `@tranjs/postgres@1.2.0`. Jest and Vitest are optional peers; the base entry works with any runner.
 
-**The hidden test transaction is not ambient.** Wrap direct SQL, including fixture and assertion queries, in `runInTransaction` or `@Transactional`; `ctx()` alone is unavailable. Making it ambient would let `REQUIRED` services join it instead of owning a savepoint, preventing checks of service atomicity.
+`withTestTransaction` rolls back awaited work routed through the selected manager. Owners use savepoints; "committed" means logical completion, not durable physical commit. Raw connections, other datasources, detached work, and external effects can escape rollback.
+
+**The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. Use `fixture` for test-only DML through a restricted connection. Apply schema migrations separately.
 
 ```ts
-import { withTestTransaction } from "@tranjs/core/testing";
-import { runInTransaction } from "@tranjs/core";
+import { fixture, withTestTransaction } from "@tranjs/testing";
+import type { PgFixtureConnection } from "@tranjs/pg";
+import { transactional } from "@tranjs/core";
 
 test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
-  await runInTransaction(() => seedStock("A", 0));
+  await fixture(async (db: PgFixtureConnection) => {
+    await db.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
+  });
   await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
-  expect(await runInTransaction(countOrders)).toBe(0);
+  expect(await transactional(countOrders)()).toBe(0);
 }));
 ```
 
-Standard `expect` matchers check tracked call entry and logical outcomes, such as "these calls entered the same transaction" or "this mailer call ran through an afterCommit callback". They do not prove async completion or external delivery. Works with Jest 29/30, Vitest 3/4/5, node:test and Mocha.
+`import "@tranjs/testing/jest"` auto-registers six matchers through `@jest/globals`, including with `injectGlobals: false`. `import "@tranjs/testing/vitest"` is an ESM entry that auto-registers them through Vitest. Manual `expect.extend(matchers)` remains available from `@tranjs/testing`. Supports Jest 29/30, Vitest 3/4/5, node:test and Mocha. Matchers observe tracked call entry, logical outcomes, and hook provenance, not async completion or external delivery.
+
+Fixture annotations do not validate datasource wiring. Passing a fixture connection into application code is unsupported capability transfer. Fixtures do not sandbox SQL: explicit COMMIT, DDL, and external effects can persist. Not every missing await is detectable. Fixture savepoint recovery after SQL errors differs from production.
+
+For durability, locking, or races, use no test session: migrate separately, seed and run work through `transactional`, verify in a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests need independent physical transactions.
+
+The core main entry loads no `@tranjs/testing`, probe, fake manager, matcher, or runner code. No testing AsyncLocalStorage is allocated until a session starts; the internal bridge is inert without a session.
 
 Details, limitations and examples: [Testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md).
 

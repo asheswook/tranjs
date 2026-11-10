@@ -3,7 +3,7 @@ import { createPool, RowDataPacket } from "mysql2/promise";
 import {
     IllegalTransactionStateException,
     Propagation,
-    runInTransaction,
+    transactional,
     Transactional,
 } from "@tranjs/core";
 
@@ -59,11 +59,11 @@ async function main(): Promise<void> {
             id VARCHAR(100) PRIMARY KEY,
             balance INTEGER NOT NULL
         ) ENGINE=InnoDB`);
-        await runInTransaction(async () => {
+        await transactional(async () => {
             await ctx().query(`INSERT INTO tranjs_example_users (id, balance)
                 VALUES ('Jaewook', 1000), ('Chansu', 1000)
                 ON DUPLICATE KEY UPDATE balance = 1000`);
-        });
+        })();
 
         const service = new MyService();
         await service.transfer("Jaewook", "Chansu", 100);

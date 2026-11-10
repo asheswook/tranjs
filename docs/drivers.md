@@ -109,7 +109,7 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 Enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in the Worker configuration and register once at module scope, not in the request handler. The examples assume a Hyperdrive binding named `HYPERDRIVE`.
 
-Connection-per-transaction managers do not share an application-side pool between transactions. Each physical transaction resolves its configuration, opens a connection, and calls `end()` automatically on completion, including failures. Use `runInTransaction` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
+Connection-per-transaction managers do not share an application-side pool between transactions. Each physical transaction resolves its configuration, opens a connection, and calls `end()` automatically on completion, including failures. Use `transactional` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
 
 ### PostgreSQL
 
