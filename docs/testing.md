@@ -51,8 +51,8 @@ after(() => pool.end());
 test("inserts without keeping the row", async () => {
     const batch = randomUUID();
     await withTestTransaction(async () => {
-        await fixture(async (db: PgFixtureConnection) => {
-            await db.query("INSERT INTO test_entries(batch) VALUES ($1)", [batch]);
+        await fixture(async (ctx: PgFixtureConnection) => {
+            await ctx.query("INSERT INTO test_entries(batch) VALUES ($1)", [batch]);
         });
         await transactional(async () => {
             const { rows } = await ctx().query(
@@ -107,7 +107,7 @@ function fixture<C, R>(fn: (ctx: C) => R, options?: FixtureOptions): Promise<Awa
 // FixtureOptions: { datasource?: string | symbol }
 ```
 
-Use `fixture` only inside a live integration `withTestTransaction` session. It rejects calls outside a session, in a closed session, or in `mockTransactions`. Custom managers without the fixture capability are unsupported. It grants no implicit ambient capability: imported driver `ctx()` and `getCurrentTransaction()` remain unchanged.
+Use `fixture` only inside a live integration `withTestTransaction` session. It rejects calls outside a session, in a closed session, or in `mockTransactions`. Custom managers must support fixtures. It does not change what imported driver `ctx()` or `getCurrentTransaction()` returns.
 
 Annotate callbacks with the matching restricted **type-only** driver export, not a native connection type. **Annotations do not validate datasource wiring.** Select the datasource with `FixtureOptions` and register its matching driver.
 
@@ -121,8 +121,8 @@ import type { PgFixtureConnection } from "@tranjs/pg";
 export const pgFixture = <R>(fn: (ctx: PgFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
 
 // Inside withTestTransaction, with a registered pg manager:
-await pgFixture(async (db: PgFixtureConnection) => {
-    const { rows } = await db.query("SELECT $1::text AS name", ["Ada"]);
+await pgFixture(async (ctx: PgFixtureConnection) => {
+    const { rows } = await ctx.query("SELECT $1::text AS name", ["Ada"]);
     return rows[0];
 });
 ```
@@ -136,9 +136,9 @@ import { fixture } from "@tranjs/testing";
 import type { Mysql2FixtureConnection } from "@tranjs/mysql2";
 
 // Inside withTestTransaction, with a registered mysql2 manager:
-await fixture(async (db: Mysql2FixtureConnection) => {
-    await db.execute("INSERT INTO users(name) VALUES (?)", ["Ada"]);
-    const [rows, fields] = await db.query("SELECT name FROM users WHERE name = ?", ["Ada"]);
+await fixture(async (ctx: Mysql2FixtureConnection) => {
+    await ctx.execute("INSERT INTO users(name) VALUES (?)", ["Ada"]);
+    const [rows, fields] = await ctx.query("SELECT name FROM users WHERE name = ?", ["Ada"]);
     return rows;
 });
 ```
@@ -152,9 +152,9 @@ import { fixture } from "@tranjs/testing";
 import type { PostgresFixtureConnection } from "@tranjs/postgres";
 
 // Inside withTestTransaction, with a registered postgres.js manager:
-await fixture(async (sql: PostgresFixtureConnection) => {
-    await sql`INSERT INTO users(name) VALUES (${"Ada"})`;
-    return await sql.unsafe("SELECT name FROM users WHERE name = $1", ["Ada"]);
+await fixture(async (ctx: PostgresFixtureConnection) => {
+    await ctx`INSERT INTO users(name) VALUES (${"Ada"})`;
+    return await ctx.unsafe("SELECT name FROM users WHERE name = $1", ["Ada"]);
 });
 ```
 
@@ -166,21 +166,21 @@ Tagged calls and `unsafe(text, values?)` return plain Promises of native row lis
 import { fixture } from "@tranjs/testing";
 
 // Inside withTestTransaction, with a registered pg manager:
-await fixture(/** @param {import("@tranjs/pg").PgFixtureConnection} db */ async (db) => {
-    await db.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
+await fixture(/** @param {import("@tranjs/pg").PgFixtureConnection} ctx */ async (ctx) => {
+    await ctx.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
 });
 ```
 
 ### Fixture boundaries and recovery
 
-- All seven managed propagations on **any datasource** are rejected inside fixture callbacks before their bodies execute. Recursive fixtures, fixtures from managed callbacks, and fixtures from `afterCommit` or `afterRollback` hooks are rejected, including immediate ownerless `afterCommit` callbacks. Provenance is deny-only; it never supplies ambient transaction context.
-- Admission registers pending work and acquires the shared root overlap gate synchronously, before the first await. Fixture/owner overlaps in either direction and fixture/fixture overlaps reject. Run them sequentially.
-- Each fixture call creates one savepoint. It awaits the top-level returned value while the connection lease is live, revokes the façade and escaped methods, drains tracked database operations, then releases the savepoint before resolving. Pending queries at callback completion fail the call and are drained. Await every query.
-- SQL errors recover with `ROLLBACK TO` and `RELEASE`, preserving the original native error, such as `23505` or `ER_DUP_ENTRY`. Recovery failure poisons the session, retains both errors, and makes final exit fail even if the fixture error was caught. **This savepoint recovery differs from production SQL-error handling.**
-- Session exit stops admission, settles admitted fixture work, records misuse for pending fixture work, and aggregates rollback/release errors without losing earlier errors. It does not make detached managed work safe.
-- Fixtures create no probe records or logical TxState and have no TranJS deadline; native timeouts still apply. Returned data is not deeply scanned for handles. Keep the façade and its methods inside the callback; not every missing await is detectable.
+- You cannot start transactions through TranJS inside a fixture callback, on **any datasource**. All seven propagation modes are rejected before their callbacks run. Do not nest fixtures or call them from transactional callbacks, `afterCommit`, or `afterRollback` hooks, including `afterCommit` callbacks that run immediately without a transaction. Fixtures do not make the hidden transaction available through driver `ctx()`.
+- Run fixtures and transactional work sequentially. Overlapping calls are rejected as soon as they start, even before the first await.
+- Each fixture call creates one savepoint and awaits the callback's returned value. The connection and its methods stop working when the callback finishes. Queries still pending at that point fail the fixture call; it waits for them to finish before releasing the savepoint. Await every query.
+- SQL errors recover with `ROLLBACK TO` and `RELEASE`, preserving the original native error, such as `23505` or `ER_DUP_ENTRY`. If recovery fails, the session cannot continue safely: both errors are preserved, and session cleanup fails even if you catch the fixture error. **This savepoint recovery differs from production SQL-error handling.**
+- When the session ends, it rejects new fixture calls and waits for existing calls to finish. Unfinished fixture work is an error; rollback and release errors are preserved alongside earlier errors. Always await transactional work too.
+- A fixture does not create a service transaction or add a transaction to the probe. TranJS timeouts do not apply; database timeouts still do. Keep the connection and its methods inside the callback. Returned data is not checked for nested connection references, and not every missing await is detectable.
 
-**Passing a fixture connection into application code is unsupported capability transfer.** Restrictions are not a SQL sandbox: explicit COMMIT/ROLLBACK, DDL (including implicit MySQL commits), sequences, and external effects can escape rollback. Apply schema migrations separately; use fixtures for controlled test-only DML.
+**Do not pass this connection into application code.** Fixtures are not a SQL sandbox: explicit COMMIT/ROLLBACK, DDL (including implicit MySQL commits), sequences, and external effects can escape rollback. Apply schema migrations separately; use fixtures for controlled test-only DML.
 
 ### Deferred callbacks and runner hooks
 
@@ -475,7 +475,7 @@ Use real timers and await the work. The same option works in service scopes unde
 | Behavior | Production | `withTestTransaction` |
 |---|---|---|
 | Physical transactions | Owners open real transactions | One hidden transaction; owners use savepoints; final physical rollback |
-| `ctx()` outside a scope | No active transactional context | Also unavailable; use a logical scope or the explicit fixture façade for test-only SQL |
+| `ctx()` outside a scope | No active transactional context | Also unavailable; use `transactional` or the fixture connection for test-only SQL |
 | `REQUIRED`, `MANDATORY`, `SUPPORTS` | Normal joining and absence rules | Same logical rules; the hidden transaction is not ambient |
 | `NESTED` | Savepoint sharing owner state, hooks, and deadline | Same sharing; no separate owner record |
 | `REQUIRES_NEW` | Independent transaction, visibility, and durability | Separate logical owner on the **same connection**; sees parent writes and is undone by enclosing rollback |

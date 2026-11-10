@@ -132,8 +132,8 @@ import type { PgFixtureConnection } from "@tranjs/pg";
 import { transactional } from "@tranjs/core";
 
 test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
-  await fixture(async (db: PgFixtureConnection) => {
-    await db.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
+  await fixture(async (ctx: PgFixtureConnection) => {
+    await ctx.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
   });
   await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
   expect(await transactional(countOrders)()).toBe(0);
@@ -142,7 +142,7 @@ test("place() leaves no order when stock is short", () => withTestTransaction(as
 
 `import "@tranjs/testing/jest"` auto-registers six matchers through `@jest/globals`, including with `injectGlobals: false`. `import "@tranjs/testing/vitest"` is an ESM entry that auto-registers them through Vitest. Manual `expect.extend(matchers)` remains available from `@tranjs/testing`. Supports Jest 29/30, Vitest 3/4/5, node:test and Mocha. Matchers observe tracked call entry, logical outcomes, and hook provenance, not async completion or external delivery.
 
-Fixture annotations do not validate datasource wiring. Passing a fixture connection into application code is unsupported capability transfer. Fixtures do not sandbox SQL: explicit COMMIT, DDL, and external effects can persist. Not every missing await is detectable. Fixture savepoint recovery after SQL errors differs from production.
+Fixture annotations do not validate datasource wiring. Do not pass this connection into application code. Fixtures do not sandbox SQL: explicit COMMIT, DDL, and external effects can persist. Not every missing await is detectable. Fixture savepoint recovery after SQL errors differs from production.
 
 For durability, locking, or races, use no test session: migrate separately, seed and run work through `transactional`, verify in a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests need independent physical transactions.
 
