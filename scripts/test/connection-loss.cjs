@@ -58,7 +58,7 @@ async function main() {
     let transaction;
     // Attach rejection handling immediately; do not add test error listeners to
     // the transaction connection (that would hide the production bug).
-    const outcome = runInTransaction(async () => {
+    const outcome = transactional(async () => {
         transaction = manager.getCurrentTransaction();
         const cleanup = driver === "postgres" ? "release" : "end";
         const originalEnd = transaction[cleanup].bind(transaction);
@@ -101,7 +101,7 @@ async function main() {
                 catch (error) { queryRejected = true; throw error; }
             }
         }
-    }).then(() => ({ rejected: false }), error => ({ rejected: true, error }));
+    })().then(() => ({ rejected: false }), error => ({ rejected: true, error }));
     try {
         const id = await ready.promise;
         assert(Number.isInteger(id));
