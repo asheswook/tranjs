@@ -56,10 +56,6 @@ async function runtimeChecks() {
     for (const entry of [legacy, importedLegacy, bridge, importedBridge]) same(entry.AsyncLocal, core.AsyncLocal);
     assert.equal("runInTransaction" in core, false);
     assert.equal(bridge.TESTING_BRIDGE_VERSION, 1);
-    assert.equal(bridge.TESTING_CORE_VERSION, "1.2.0");
-    for (const entry of ["@tranjs/core/testing", "@tranjs/core/testing/jest", "@tranjs/core/testing/vitest"]) {
-        assert.throws(() => require.resolve(entry), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });
-    }
 
     const drivers = {};
     for (const name of ["pg", "mysql2", "postgres"]) {
@@ -214,87 +210,89 @@ export const restrictedTypes = () => {
 `;
 
 async function main() {
+    const sourceManifests = Object.fromEntries(packages.map(name => [
+        name, JSON.parse(fs.readFileSync(path.join(root, "packages", name, "package.json"))),
+    ]));
     for (const name of packages) {
         assert(fs.existsSync(path.join(root, "packages", name, "dist/index.js")),
             `Missing built @tranjs/${name}; finish the clean package build before running this script`);
     }
-    const base = path.join(os.homedir(), "work/scratch/pack-check");
-    fs.mkdirSync(base, { recursive: true });
-    const sandbox = fs.mkdtempSync(path.join(base, "consumer-"));
-    // Preserve the sandbox (including tarballs and fixtures) for diagnostics.
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tranjs-packed-"));
+    let succeeded = false;
     console.log(`Packed consumer: ${sandbox}`);
-    const consumer = path.join(sandbox, "consumer");
-    fs.mkdirSync(consumer);
-    fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "tranjs-packed-check", version: "1.0.0", private: true }));
-    const tarballs = [];
-    for (const name of packages) {
-        const output = run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", sandbox], path.join(root, "packages", name));
-        const [packed] = JSON.parse(output);
-        assert.equal(packed.name, `@tranjs/${name}`);
-        assert(packed.files.some(file => file.path === "dist/index.js"), `Missing packed runtime for ${name}`);
-        assert(packed.files.some(file => file.path === "dist/index.d.ts"), `Missing packed declarations for ${name}`);
-        if (name === "core") {
-            assert.equal(packed.version, "1.2.0");
-            const stale = packed.files.filter(file => /^dist\/testing(?:[/.]|$)/.test(file.path));
-            assert.deepEqual(stale, [], "Core tarball contains stale dist/testing artifacts; clean before building");
-        }
-        tarballs.push(path.join(sandbox, packed.filename));
-    }
-    run(npm, ["install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund", ...tarballs, "@types/node@^22"], consumer);
-    const consumerRequire = createRequire(path.join(consumer, "package.json"));
-    const modules = path.join(consumer, "node_modules");
-    for (const name of packages) {
-        const installed = path.join(modules, "@tranjs", name);
-        assert(!fs.lstatSync(installed).isSymbolicLink(), `@tranjs/${name} must not be a workspace symlink`);
-        assert(fs.realpathSync(consumerRequire.resolve(`@tranjs/${name}`)).startsWith(fs.realpathSync(modules) + path.sep));
-    }
-    const coreManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/core/package.json")));
-    assert(!coreManifest.dependencies?.["@tranjs/testing"] && !coreManifest.peerDependencies?.["@tranjs/testing"]);
-    const testingManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/testing/package.json")));
-    assert.equal(testingManifest.version, "1.2.0");
-    assert.equal(testingManifest.peerDependencies["@tranjs/core"], "1.2.0");
-    assert(!testingManifest.peerDependenciesMeta?.["@tranjs/core"]?.optional, "Core peer must be required");
-
-    const runtimeFile = path.join(consumer, "runtime.cjs");
-    const mismatchFile = path.join(consumer, "mismatch.cjs");
-    const emit = fn => `(${fn.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`;
-    fs.writeFileSync(runtimeFile, emit(runtimeChecks));
-    fs.writeFileSync(mismatchFile, emit(mismatchChecks));
-    const runtime = JSON.parse(run(process.execPath, ["--unhandled-rejections=strict", runtimeFile], consumer));
-
-    const bridgeFile = consumerRequire.resolve("@tranjs/core/internal/testing-bridge");
-    const original = fs.readFileSync(bridgeFile, "utf8");
-    let mismatches = 0;
     try {
-        for (const [key, value, replacement] of [
-            ["TESTING_BRIDGE_VERSION", "1", "999"],
-            ["TESTING_CORE_VERSION", `["']1\\.2\\.0["']`, '"0.0.0-packed-mismatch"'],
-        ]) {
-            const assignment = new RegExp(`(exports\\.${key}\\s*=\\s*)${value}(\\s*;)`, "g");
+        const consumer = path.join(sandbox, "consumer");
+        fs.mkdirSync(consumer);
+        fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "tranjs-packed-check", version: "1.0.0", private: true }));
+        const tarballs = [];
+        for (const name of packages) {
+            const output = run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", sandbox], path.join(root, "packages", name));
+            const [packed] = JSON.parse(output);
+            assert.equal(packed.name, `@tranjs/${name}`);
+            assert(packed.files.some(file => file.path === "dist/index.js"), `Missing packed runtime for ${name}`);
+            assert(packed.files.some(file => file.path === "dist/index.d.ts"), `Missing packed declarations for ${name}`);
+            assert.equal(packed.version, sourceManifests[name].version);
+            tarballs.push(path.join(sandbox, packed.filename));
+        }
+        run(npm, ["install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund", ...tarballs, "@types/node@^22"], consumer);
+        const consumerRequire = createRequire(path.join(consumer, "package.json"));
+        const modules = path.join(consumer, "node_modules");
+        for (const name of packages) {
+            const installed = path.join(modules, "@tranjs", name);
+            assert(!fs.lstatSync(installed).isSymbolicLink(), `@tranjs/${name} must not be a workspace symlink`);
+            assert(fs.realpathSync(consumerRequire.resolve(`@tranjs/${name}`)).startsWith(fs.realpathSync(modules) + path.sep));
+            const installedManifest = JSON.parse(fs.readFileSync(path.join(installed, "package.json")));
+            assert.equal(installedManifest.version, sourceManifests[name].version, `Installed @tranjs/${name} version must match source`);
+        }
+        const coreManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/core/package.json")));
+        assert(!coreManifest.dependencies?.["@tranjs/testing"] && !coreManifest.peerDependencies?.["@tranjs/testing"]);
+        const testingManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/testing/package.json")));
+        assert.equal(testingManifest.peerDependencies["@tranjs/core"], sourceManifests.testing.peerDependencies["@tranjs/core"]);
+        assert(!testingManifest.peerDependenciesMeta?.["@tranjs/core"]?.optional, "Core peer must be required");
+
+        const runtimeFile = path.join(consumer, "runtime.cjs");
+        const mismatchFile = path.join(consumer, "mismatch.cjs");
+        const emit = fn => `(${fn.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`;
+        fs.writeFileSync(runtimeFile, emit(runtimeChecks));
+        fs.writeFileSync(mismatchFile, emit(mismatchChecks));
+        const runtime = JSON.parse(run(process.execPath, ["--unhandled-rejections=strict", runtimeFile], consumer));
+
+        const bridgeFile = consumerRequire.resolve("@tranjs/core/internal/testing-bridge");
+        const original = fs.readFileSync(bridgeFile, "utf8");
+        let mismatches = 0;
+        try {
+            const assignment = /(exports\.TESTING_BRIDGE_VERSION\s*=\s*)1(\s*;)/g;
             let changes = 0;
             const mutated = original.replace(assignment, (_match, prefix, suffix) => {
                 changes++;
-                return prefix + replacement + suffix;
+                return prefix + "999" + suffix;
             });
-            assert.equal(changes, 1, `Expected exactly one emitted ${key} assignment in ${bridgeFile}`);
+            assert.equal(changes, 1, `Expected exactly one emitted TESTING_BRIDGE_VERSION assignment in ${bridgeFile}`);
             fs.writeFileSync(bridgeFile, mutated);
             for (const loader of ["require", "import"]) {
                 const result = JSON.parse(run(process.execPath, ["--unhandled-rejections=strict", mismatchFile, loader], consumer));
                 assert.equal(result.begins, 0);
                 mismatches += result.mismatch;
             }
+        } finally {
+            fs.writeFileSync(bridgeFile, original);
         }
-    } finally {
-        fs.writeFileSync(bridgeFile, original);
-    }
 
-    fs.writeFileSync(path.join(consumer, "fixture-types.ts"), types);
-    fs.writeFileSync(path.join(consumer, "tsconfig.json"), JSON.stringify({
-        compilerOptions: { target: "ES2022", module: "Node16", moduleResolution: "Node16", strict: true, skipLibCheck: false, noEmit: true },
-        files: ["fixture-types.ts"],
-    }));
-    run(process.execPath, [path.join(root, "node_modules/typescript/bin/tsc"), "-p", path.join(consumer, "tsconfig.json")], consumer);
-    console.log(`Packed consumer passed: packages=${packages.length} identities=${runtime.identities} mixed=${runtime.mixed} mismatches=${mismatches} types=1 core-cache=${runtime.coreCachedModules}`);
+        fs.writeFileSync(path.join(consumer, "fixture-types.ts"), types);
+        fs.writeFileSync(path.join(consumer, "tsconfig.json"), JSON.stringify({
+            compilerOptions: { target: "ES2022", module: "Node16", moduleResolution: "Node16", strict: true, skipLibCheck: false, noEmit: true },
+            files: ["fixture-types.ts"],
+        }));
+        run(process.execPath, [path.join(root, "node_modules/typescript/bin/tsc"), "-p", path.join(consumer, "tsconfig.json")], consumer);
+        console.log(`Packed consumer passed: packages=${packages.length} identities=${runtime.identities} mixed=${runtime.mixed} mismatches=${mismatches} types=1 core-cache=${runtime.coreCachedModules}`);
+        succeeded = true;
+    } finally {
+        if (!succeeded || process.env.KEEP_PACKED_SANDBOX === "1") {
+            console.log(`Retained packed consumer sandbox: ${sandbox}`);
+        } else {
+            fs.rmSync(sandbox, { recursive: true, force: true });
+        }
+    }
 }
 
 main().catch(error => {

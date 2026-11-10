@@ -37,12 +37,11 @@ jobs:
       MYSQL_URL: mysql://root:root@localhost:3306/test
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20
       - run: npm install
+      - run: cmp README.md packages/core/README.md
       - run: npm run build
       - name: Packed consumer singleton, version and mixed-loader checks
         run: npm run test:packed

@@ -1,5 +1,5 @@
-import { afterCommit, clearTransactionManager, PlatformTransactionManager, transactional, useTransactionManager } from "../src";
-import { fixture, mockTransactions, withTestTransaction } from "../../testing/src";
+import { afterCommit, clearTransactionManager, PlatformTransactionManager, transactional, useTransactionManager } from "@tranjs/core";
+import { fixture, mockTransactions, withTestTransaction } from "../src";
 
 class FixtureManager extends PlatformTransactionManager<object> {
     constructor() { super(); }

@@ -73,9 +73,7 @@ async function main() {
     const args = process.argv.slice(2);
     const compat = args[0] === "--compat";
     if (compat && args.length === 1) throw new Error("--compat requires a Node command");
-    const scratch = path.join(os.homedir(), "work/scratch");
-    fs.mkdirSync(scratch, { recursive: true });
-    const sandbox = fs.mkdtempSync(path.join(scratch, "tranjs-postgres-v3-"));
+    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tranjs-postgres-v3-"));
     try {
         const version = prepare(sandbox);
         console.log(`Testing actual postgres.js ${version} in an isolated workspace`);

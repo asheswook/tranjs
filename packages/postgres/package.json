@@ -1,5 +1,7 @@
 {
   "name": "@tranjs/postgres",
+  "license": "LGPL-2.1-only",
+  "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/postgres" },
   "version": "1.2.0",
   "description": "TranJS driver for postgres.js. (PostgreSQL)",
   "main": "dist/index.js",

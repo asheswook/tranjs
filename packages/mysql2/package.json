@@ -1,5 +1,7 @@
 {
   "name": "@tranjs/mysql2",
+  "license": "LGPL-2.1-only",
+  "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/mysql2" },
   "version": "1.3.0",
   "description": "TranJS driver for mysql2. (MySQL)",
   "main": "dist/index.js",

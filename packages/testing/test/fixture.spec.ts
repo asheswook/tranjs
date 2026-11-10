@@ -1,10 +1,10 @@
 import {
     afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError,
     Propagation, transactional, TransactionSystemError, useTransactionManager,
-} from "../src";
-import { fixture, mockTransactions, transactions, withTestTransaction } from "../../testing/src";
-import { FakeTransactionManager } from "../../testing/src/fake";
-import { FixtureLease, testSession } from "../src/internal";
+} from "@tranjs/core";
+import { fixture, mockTransactions, transactions, withTestTransaction } from "../src";
+import { FakeTransactionManager } from "../src/fake";
+import { FixtureLease, testSession } from "../../core/src/internal";
 
 function deferred<T = void>() {
     let resolve!: (value: T | PromiseLike<T>) => void;

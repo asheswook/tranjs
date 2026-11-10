@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-mkdir -p "$HOME/work/scratch/revision-impl"
-TEMP=$(mktemp -d "$HOME/work/scratch/revision-impl/tranjs-legacy.XXXXXX")
+TEMP=$(mktemp -d "${TMPDIR:-/tmp}/tranjs-legacy.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT
 
 cd "$ROOT"
