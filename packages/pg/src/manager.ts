@@ -10,6 +10,7 @@ import {
     TransactionOptions,
     useTransactionManager,
 } from "@tranjs/core";
+import { TransactionAbortedError } from "./errors";
 import { PoolClient } from "./context";
 
 const DRIVER_NAME = Symbol("pg");
@@ -85,7 +86,10 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
     }
 
     protected async commitTransaction(tx: PoolClient): Promise<void> {
-        await tx.query("COMMIT");
+        // After a statement error PostgreSQL aborts the transaction and answers
+        // COMMIT with ROLLBACK instead of an error. Report it rather than success.
+        const result = await tx.query("COMMIT");
+        if (result?.command === "ROLLBACK") throw new TransactionAbortedError();
     }
 
     protected async rollbackTransaction(tx: PoolClient): Promise<void> {

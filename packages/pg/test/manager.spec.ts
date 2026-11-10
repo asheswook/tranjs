@@ -12,8 +12,10 @@ import {
     TransactionTimeoutError,
     UnexpectedRollbackError,
     useTransactionManager,
+    afterCommit as registerAfterCommit,
+    afterRollback as registerAfterRollback,
 } from "@tranjs/core";
-import { ctx, PostgreSQLTransactionManager, usePostgreSQLTransactionManager } from "../src";
+import { ctx, PostgreSQLTransactionManager, TransactionAbortedError, usePostgreSQLTransactionManager } from "../src";
 
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
 const table = "tranjs_pg_driver_test";
@@ -54,6 +56,29 @@ describe("PostgreSQL driver (real database)", () => {
     async function ids() {
         return (await pool.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
     }
+
+    it("reports a COMMIT that PostgreSQL turned into ROLLBACK after a caught statement error", async () => {
+        const afterCommit = jest.fn();
+        const afterRollback = jest.fn();
+        await expect(runInTransaction(async () => {
+            registerAfterCommit(afterCommit);
+            registerAfterRollback(afterRollback);
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            try { await ctx().query("SELECT 1 / 0"); } catch { /* caught by application code */ }
+            return "service returned normally";
+        })).rejects.toBeInstanceOf(TransactionAbortedError);
+        expect(await ids()).toEqual([]);
+        expect(afterCommit).not.toHaveBeenCalled();
+        expect(afterRollback).toHaveBeenCalledTimes(1);
+    });
+
+    it("commits normally after a NESTED step failed and rolled back to its savepoint", async () => {
+        await runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            await runInTransaction(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED }).catch(() => {});
+        });
+        expect(await ids()).toEqual([1]);
+    });
 
     it("commits and releases its connection", async () => {
         const result = await runInTransaction(async () => {

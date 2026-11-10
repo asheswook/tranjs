@@ -26,7 +26,9 @@ class Service {
 
 `ctx(datasource?)` returns the active transaction's wrapped connection. Its exported `PoolClient` type omits `connect` and `release` from `pg.PoolClient`. For helpers that accept either pool or per-transaction mode, use the exported `TransactionClient` type (`pg.Client` without `connect`). TranJS owns connection completion and cleanup; do not call lifecycle methods yourself.
 
-Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout), including the special handling of PostgreSQL Submittables.
+Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`. Savepoints and named datasources are supported.
+
+If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` (exported by `@tranjs/pg`) so the failure isn't silent. Use `Propagation.NESTED` if a step should be allowed to fail. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout), including the special handling of PostgreSQL Submittables.
 
 ## PostgreSQL (postgres.js)
 
