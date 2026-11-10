@@ -58,6 +58,10 @@ export function ctx(datasource?: string | symbol): TransactionSql {
 }
 
 abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTransactionSql> {
+    protected testTransactionAbortedError(cause: unknown): Error {
+        return Object.assign(new TransactionAbortedError(), { cause });
+    }
+
     private readonly wrappers = new WeakMap<ReservedTransactionSql, TransactionSql>();
     private readonly queries = new WeakMap<object, object>();
     private readonly nativeQueries = new WeakMap<object, object>();
@@ -182,6 +186,14 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
 
     protected async rollbackTransaction(tx: ReservedTransactionSql): Promise<void> {
         await tx.unsafe("ROLLBACK");
+    }
+
+    protected async checkTestTransactionConstraints(tx: ReservedTransactionSql, name: string): Promise<void> {
+        await this.createSavepoint(tx, name);
+        await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+        // Restore the exact constraint modes, including application overrides.
+        await this.rollbackToSavepoint(tx, name);
+        await this.releaseSavepoint(tx, name);
     }
 
     protected async createSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {

@@ -96,6 +96,14 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
         await tx.query("ROLLBACK");
     }
 
+    protected async checkTestTransactionConstraints(tx: PoolClient, name: string): Promise<void> {
+        await this.createSavepoint(tx, name);
+        await tx.query("SET CONSTRAINTS ALL IMMEDIATE");
+        // Restore the exact constraint modes, including application overrides.
+        await this.rollbackToSavepoint(tx, name);
+        await this.releaseSavepoint(tx, name);
+    }
+
     protected async createSavepoint(tx: PoolClient, name: string): Promise<void> {
         await tx.query(`SAVEPOINT ${name}`);
     }

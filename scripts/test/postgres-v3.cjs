@@ -93,6 +93,11 @@ async function main() {
         ], { cwd: sandbox, env });
         if (typecheck !== 0) return typecheck;
         const config = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")).jest;
+        // v3 intentionally skips v4-only features. Enforce its measured baseline
+        // separately without weakening the ordinary v4 npm test thresholds.
+        config.coverageThreshold = {
+            global: { statements: 92.9, branches: 76.6, functions: 95.3, lines: 96.3 },
+        };
         // Compile skipped v4-only tests against v4 declarations, while every
         // runtime import (including connection-loss.cjs) resolves actual v3.
         config.transform["^.+\\.ts$"][1].tsconfig.paths = {

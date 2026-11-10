@@ -1,0 +1,22 @@
+{
+  "name": "tranjs-runner-matrix",
+  "private": true,
+  "scripts": { "test": "node run.cjs" },
+  "devDependencies": {
+    "@nestjs/common": "11.1.11",
+    "@nestjs/core": "11.1.11",
+    "@nestjs/testing": "11.1.11",
+    "@types/jest": "29.5.14",
+    "@types/node": "22.19.0",
+    "jest29": "npm:jest@29.7.0",
+    "jest30": "npm:jest@30.5.2",
+    "pg": "8.16.3",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2",
+    "typescript": "5.9.3",
+    "typesjest30": "npm:@types/jest@30.0.0",
+    "vitest3": "npm:vitest@3.2.7",
+    "vitest4": "npm:vitest@4.1.12",
+    "vitest5": "npm:vitest@5.1.0"
+  }
+}

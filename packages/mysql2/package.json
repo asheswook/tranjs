@@ -16,6 +16,24 @@
     "mysql2": "*"
   },
   "jest": {
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
+    "coverageReporters": [
+      "json",
+      "json-summary",
+      "text",
+      "html"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 98.2,
+        "branches": 85,
+        "functions": 99.9,
+        "lines": 99
+      }
+    },
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
     "moduleFileExtensions": [

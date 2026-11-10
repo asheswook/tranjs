@@ -16,6 +16,15 @@ Do not re-register per request. Registration replaces the shared manager, but ac
 
 For a [custom driver](self-implement-guide.md), use `useTransactionManager(manager, name?)`. Omitting the name selects the default datasource. `getTransactionManager(name?)` retrieves a registered manager.
 
+`clearTransactionManager(name?)` is a public export from the main `@tranjs/core` entry point. It removes the default or named registration and does nothing if none is registered. Transactions already in progress are unchanged; future manager lookups throw `DatasourceSetupError` until a manager is registered again. Use it for registration teardown, not while other work is using that datasource.
+
+```typescript
+import { clearTransactionManager } from "@tranjs/core";
+
+clearTransactionManager(); // Default datasource.
+clearTransactionManager("analytics"); // Named datasource; symbols are also accepted.
+```
+
 ## Transaction scopes
 
 `@Transactional()` wraps an async method. It accepts either a `Propagation` value or a `TransactionConfig`. It preserves the method's `this`, name, and `reflect-metadata` metadata when that optional package is present, including when used with decorators such as NestJS's.
@@ -158,6 +167,21 @@ class ReportService {
     }
 }
 ```
+
+## Testing helpers
+
+| Entry point | Exports |
+|---|---|
+| `@tranjs/core/testing` | `withTestTransaction`, `mockTransactions`, `transactions`, and the assertion functions `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack`. Works with any runner. |
+| `@tranjs/core/testing/jest` | `matchers` and their type declarations (Jest 29/30) |
+| `@tranjs/core/testing/vitest` | `matchers` and their type declarations (Vitest 3/4/5) |
+
+- `withTestTransaction(fn, options?)`: runs `fn` against the registered real manager inside one transaction that is rolled back at the end. Transactions started by the code under test become savepoints, so they commit and roll back as usual inside the test.
+- `mockTransactions(fn, options?)`: runs `fn` with a fake manager and no database, to check transaction boundaries and failure handling.
+- `transactions()`: returns the probe for the current test (the same object passed to `fn`). Throws outside a test.
+- `options` is `{ datasource?: string | symbol }`.
+
+Await all work inside `fn`; work that outlives it isn't rolled back. Full behaviour, limitations and examples are in the [testing guide](testing.md).
 
 ## Errors
 

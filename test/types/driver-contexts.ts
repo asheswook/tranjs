@@ -102,3 +102,7 @@ export function postgresConsumerChecks(sql: postgres.Sql, reserved: postgres.Res
     // @ts-expect-error The pool manager requires the caller-owned Sql pool.
     void new PostgresTransactionManager(reserved);
 }
+
+// The deprecated global keeps its 1.1.0 non-optional type.
+import { GlobalTransactionManager, PlatformTransactionManager, TransactionContext } from "@tranjs/core";
+export type GlobalManagerUnchanged = Expect<Equal<typeof GlobalTransactionManager, PlatformTransactionManager<TransactionContext>>>;

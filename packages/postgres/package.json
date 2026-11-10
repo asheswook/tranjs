@@ -19,6 +19,24 @@
     "postgres": "^3.4.0 || ^4.1.0"
   },
   "jest": {
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
+    "coverageReporters": [
+      "json",
+      "json-summary",
+      "text",
+      "html"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 96.4,
+        "branches": 83.1,
+        "functions": 97.6,
+        "lines": 99.2
+      }
+    },
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
     "moduleFileExtensions": [

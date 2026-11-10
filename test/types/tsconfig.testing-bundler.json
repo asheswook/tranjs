@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.testing-node10.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
+  }
+}

@@ -114,6 +114,24 @@ async placeOrder(order: Order) {
 }
 ```
 
+## Testing
+
+`@tranjs/core/testing` runs integration tests against a real database and rolls everything back at the end, so tests leave no data behind. Code under test commits and rolls back as usual, so you can check that a failure leaves nothing and a success leaves its rows.
+
+```ts
+import { withTestTransaction } from "@tranjs/core/testing";
+
+test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
+  await seedStock("A", 0);
+  await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
+  expect(await countOrders()).toBe(0);
+}));
+```
+
+It also checks transaction boundaries, such as "these two calls ran in the same transaction" or "this email was sent after commit", with standard `expect` matchers. Works with Jest 29/30, Vitest 3/4/5, node:test and Mocha.
+
+Await all work inside the callback: work that outlives it isn't rolled back. Details, limitations and examples: [Testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md).
+
 ## Supported platforms
 
 | Platform | Status | How to use |
@@ -142,6 +160,7 @@ MySQL works the same way with `useMySQLConnectionPerTransaction`, but Hyperdrive
 
 - [API](https://github.com/asheswook/tranjs/blob/main/docs/api.md): propagation, options, hooks, multiple datasources, errors
 - [Drivers](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md): PostgreSQL, MySQL, Cloudflare Workers
+- [Testing](https://github.com/asheswook/tranjs/blob/main/docs/testing.md): mockTransactions, withTestTransaction, Jest, Vitest
 - [Writing your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
 

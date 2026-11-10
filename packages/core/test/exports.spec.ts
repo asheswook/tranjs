@@ -1,0 +1,139 @@
+import { execFileSync } from "node:child_process";
+import { resolve } from "node:path";
+
+// Use Node, not Jest's resolver or transformed source, to exercise package exports.
+function runNode(script: string, esm = false): void {
+    execFileSync(process.execPath, [...(esm ? ["--input-type=module"] : []), "-e", script], {
+        cwd: resolve(__dirname, ".."),
+        encoding: "utf8",
+        stdio: "pipe",
+    });
+}
+
+describe("built package exports", () => {
+    it("supports requiring the testing subpath", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            const testing = require('@tranjs/core/testing');
+            for (const name of ['mockTransactions', 'withTestTransaction', 'transactions',
+                'assertSameTransaction', 'assertSeparateTransaction', 'assertOutsideTransaction',
+                'assertAfterCommitOf', 'assertCommitted', 'assertRolledBack']) {
+                assert.equal(typeof testing[name], 'function', name);
+            }
+            assert.equal(typeof testing.matchers.toHaveCommitted, 'function');
+            assert.equal('createTestScope' in testing, false);
+            assert.equal('useTestTransactions' in testing, false);
+            testing.mockTransactions(t => {
+                assert.equal(typeof t.track, 'function');
+                assert.equal(typeof t.txOf, 'function');
+                assert.equal(typeof t.fail, 'function');
+                assert.deepEqual(t.transactions, []);
+            }).catch(error => { console.error(error); process.exitCode = 1; });
+        `);
+    });
+
+    it("supports dynamically importing the testing subpath", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            (async () => {
+                const testing = await import('@tranjs/core/testing');
+                for (const name of ['mockTransactions', 'withTestTransaction']) {
+                    assert.equal(typeof testing[name], 'function', name);
+                }
+                await testing.mockTransactions(t => {
+                    assert.equal(typeof t.track, 'function');
+                    assert.equal(typeof t.txOf, 'function');
+                    assert.equal(typeof t.fail, 'function');
+                    assert.deepEqual(t.transactions, []);
+                });
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+        `);
+    });
+
+    it("does not load testing modules through the main entry", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            const path = require('node:path');
+            const testingDirectory = path.dirname(require.resolve('@tranjs/core/testing')) + path.sep;
+            assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), false);
+            const core = require('@tranjs/core');
+            assert.equal('mockTransactions' in core, false);
+            assert.equal('withTestTransaction' in core, false);
+            assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), false);
+            require('@tranjs/core/testing');
+            assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), true);
+        `);
+    });
+
+    it("loads the portable entry without loading either runner and preserves the legacy deep import", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            const Module = require('node:module');
+            const load = Module._load;
+            Module._load = function(name, ...args) {
+                if (/^(?:vitest|jest|@jest\\/|jest-environment|expect$)/.test(name)) {
+                    throw new Error('Portable entry attempted a runner import: ' + name);
+                }
+                return load.call(this, name, ...args);
+            };
+            const testing = require('@tranjs/core/testing');
+            assert.equal(typeof testing.withTestTransaction, 'function');
+            assert.equal(typeof require('@tranjs/core/dist/asyncLocal').AsyncLocal, 'function');
+            for (const subpath of ['jest']) {
+                const entry = require('@tranjs/core/testing/' + subpath);
+                assert.deepEqual(Object.keys(entry), ['matchers']);
+                assert.equal(entry.matchers, testing.matchers);
+            }
+            assert.throws(() => require.resolve('@tranjs/core/testing/jest/environment'), {
+                code: 'ERR_PACKAGE_PATH_NOT_EXPORTED',
+            });
+        `);
+        runNode(`
+            import assert from 'node:assert/strict';
+            for (const subpath of ['jest', 'vitest']) {
+                const entry = await import('@tranjs/core/testing/' + subpath);
+                assert.equal(typeof entry.matchers.toHaveCommitted, 'function');
+                assert.equal('useTestTransactions' in entry, false);
+                if (subpath === 'vitest') assert.deepEqual(Object.keys(entry), ['matchers']);
+            }
+        `, true);
+    });
+
+    it("allocates testing async-local storage only when a test session starts", () => {
+        runNode(`
+            const assert = require('node:assert/strict');
+            const hooks = require('node:async_hooks');
+            const originalDescriptor = Object.getOwnPropertyDescriptor(hooks, 'AsyncLocalStorage');
+            const OriginalStorage = hooks.AsyncLocalStorage;
+            let allocations = 0;
+            Object.defineProperty(hooks, 'AsyncLocalStorage', { configurable: true, value: class extends OriginalStorage {
+                constructor(...args) { super(...args); allocations++; }
+            }});
+            (async () => {
+                const core = require('@tranjs/core');
+                // The production transaction context has its own storage. Importing
+                // the private testing bridge must not allocate a second instance.
+                assert.equal(allocations, 1);
+                class Manager extends core.PlatformTransactionManager {
+                    async beginTransaction() {
+                        return { transaction: {}, metadata: { driverName: 'export-test' } };
+                    }
+                    async commitTransaction() {}
+                    async rollbackTransaction() {}
+                }
+                core.useTransactionManager(new Manager());
+                await core.runInTransaction(() => 42);
+                assert.equal(allocations, 1);
+                const testing = require('@tranjs/core/testing');
+                assert.equal(allocations, 1);
+                await testing.mockTransactions(async () => {
+                    await core.runInTransaction(() => 42);
+                });
+                assert.equal(allocations, 2);
+                await testing.mockTransactions(() => {});
+                assert.equal(allocations, 2);
+            })().catch(error => { console.error(error); process.exitCode = 1; })
+                .finally(() => { Object.defineProperty(hooks, 'AsyncLocalStorage', originalDescriptor); });
+        `);
+    });
+});

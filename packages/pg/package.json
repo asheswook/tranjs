@@ -17,6 +17,24 @@
     "pg": "*"
   },
   "jest": {
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
+    "coverageReporters": [
+      "json",
+      "json-summary",
+      "text",
+      "html"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 98.2,
+        "branches": 83.1,
+        "functions": 95.9,
+        "lines": 99.9
+      }
+    },
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
     "moduleFileExtensions": [
