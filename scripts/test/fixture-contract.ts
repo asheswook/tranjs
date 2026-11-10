@@ -299,10 +299,39 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 for (const propagation of [Propagation.REQUIRED, Propagation.SUPPORTS, Propagation.NOT_SUPPORTED, Propagation.NEVER]) {
                     await tx(async () => { await expect(fix(body)).rejects.toThrow(/fixture|callback|transaction|scope/i); }, { propagation });
                 }
-                const hook = async () => { await expect(fix(body)).rejects.toThrow(/fixture|hook|callback|scope/i); };
+                let hookCalls = 0;
+                const hookResults: PromiseSettledResult<unknown>[] = [];
+                const resume = deferred();
+                let retained!: Promise<PromiseSettledResult<unknown>[]>;
+                const hook = async () => {
+                    hookCalls++;
+                    const [result] = await Promise.allSettled([fix(body)]);
+                    hookResults.push(result);
+                };
                 await tx(async () => { afterCommit(hook, datasource); });
-                await expect(tx(async () => { afterRollback(hook, datasource); throw failure; })).rejects.toBe(failure);
+                await expect(tx(async () => {
+                    afterRollback(async () => {
+                        await hook();
+                        retained = resume.promise.then(() => Promise.allSettled([fix(body)]));
+                    }, datasource);
+                    throw failure;
+                })).rejects.toBe(failure);
+                expect(hookCalls).toBe(2);
+                expect(driver.manager.getCurrentTransaction()).toBeUndefined();
+                await fix(() => 1); // A fresh fixture proves the owner overlap gate has closed.
+                resume.resolve();
+                const [retainedResult] = await retained;
+                expect(retainedResult).toMatchObject({
+                    status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                });
                 await afterCommit(hook, datasource); // immediate ownerless branch
+                expect(hookCalls).toBe(3);
+                expect(hookResults).toHaveLength(3);
+                for (const result of hookResults) {
+                    expect(result).toMatchObject({
+                        status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                    });
+                }
                 expect(body).not.toHaveBeenCalled();
             });
         });

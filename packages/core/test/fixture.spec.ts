@@ -254,11 +254,17 @@ describe("fixture", () => {
         expect(denied).not.toHaveBeenCalled();
     });
 
-    it("forbids fixture entry from managed callbacks, commit hooks and ownerless commit hooks", async () => {
+    it("forbids fixture entry from managed callbacks, rollback/commit hooks and retained hook continuations", async () => {
         const denied = jest.fn();
-        const rollbackHook = jest.fn(async () => {
-            await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
-        });
+        const resume = deferred();
+        let rollbackCalls = 0;
+        let rollbackResult: PromiseSettledResult<unknown> | undefined;
+        let retained!: Promise<PromiseSettledResult<unknown>[]>;
+        const rollbackHook = async () => {
+            rollbackCalls++;
+            [rollbackResult] = await Promise.allSettled([fixture(denied)]);
+            retained = resume.promise.then(() => Promise.allSettled([fixture(denied)]));
+        };
         await withTestTransaction(async () => {
             await transactional(async () => {
                 await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
@@ -271,6 +277,18 @@ describe("fixture", () => {
                 afterRollback(rollbackHook);
                 throw error;
             })()).rejects.toBe(error);
+            expect(rollbackCalls).toBe(1);
+            expect(rollbackResult).toMatchObject({
+                status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+            });
+            expect(testSession(manager)!.root.open).toBe(false);
+            expect(testSession(manager)!.managedActive).toBe(0);
+            await fixture(() => 1);
+            resume.resolve();
+            const [retainedResult] = await retained;
+            expect(retainedResult).toMatchObject({
+                status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+            });
             await afterCommit(async () => {
                 await Promise.resolve();
                 await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
@@ -283,7 +301,7 @@ describe("fixture", () => {
             await fixture(() => 1);
         });
         expect(denied).not.toHaveBeenCalled();
-        expect(rollbackHook).toHaveBeenCalledTimes(1);
+        expect(rollbackCalls).toBe(1);
     });
 
     it.each([new Error("callback"), undefined, null, "callback failure"])("rolls back callback failure %p without poisoning the session", async error => {

@@ -357,17 +357,17 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         callback: (tx: Tx) => R | Promise<R>,
         options?: TransactionOptions,
     ): Promise<R> {
-        if (testProvenance() === "fixture") throw new Error("Managed transaction entry is forbidden inside a fixture callback");
         const current = currentTestSession();
-        if (current?.fixtureActive) throw new Error("Managed transaction entry overlaps an active fixture");
+        if (!current) return this.dispatchTransaction(propagation, callback, options);
+        if (testProvenance() === "fixture") throw new Error("Managed transaction entry is forbidden inside a fixture callback");
+        if (current.fixtureActive) throw new Error("Managed transaction entry overlaps an active fixture");
         const session = testSession(this);
         if (session) assertTestSessionReady(session);
         if (session && !session.admitting) throw new Error("Test session no longer admits managed work");
         // A mock's registration may already be restored to another manager, but
         // work retained by that closed session must not enter a real transaction.
-        const currentSession = currentTestSession();
-        if (currentSession && currentSession !== session && (currentSession.closed || "broken" in currentSession)) {
-            assertTestSessionReady(currentSession);
+        if (current !== session && (current.closed || "broken" in current)) {
+            assertTestSessionReady(current);
         }
         if (session) session.managedActive++;
         try {
