@@ -142,6 +142,8 @@ test("place() leaves no order when stock is short", () => withTestTransaction(as
 
 `import "@tranjs/testing/jest"` auto-registers six matchers through `@jest/globals`, including with `injectGlobals: false`. `import "@tranjs/testing/vitest"` is an ESM entry that auto-registers them through Vitest. Manual `expect.extend(matchers)` remains available from `@tranjs/testing`. Supports Jest 29/30, Vitest 3/4/5, node:test and Mocha. Matchers observe tracked call entry, logical outcomes, and hook provenance, not async completion or external delivery.
 
+To register matchers for all tests without a setup file, configure the runner entry and load its TypeScript types globally: [Registering matchers for all tests](https://github.com/asheswook/tranjs/blob/main/docs/testing.md#registering-matchers-for-all-tests). Per-file imports are an alternative.
+
 Fixture annotations do not validate datasource wiring. Do not pass this connection into application code. Fixtures do not sandbox SQL: explicit COMMIT, DDL, and external effects can persist. Not every missing await is detectable. Fixture savepoint recovery after SQL errors differs from production.
 
 For durability, locking, or races, use no test session: migrate separately, seed and run work through `transactional`, verify in a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests need independent physical transactions.

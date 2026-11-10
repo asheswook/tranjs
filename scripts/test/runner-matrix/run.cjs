@@ -57,9 +57,13 @@ function prepare(directory, runner) {
         }
         if (runner === 'jest30') link(path.join(dependencies, 'typesjest30'), path.join(modules, '@types/jest'));
     }
-    fs.writeFileSync(path.join(directory, 'vitest.config.mjs'), `export default { test: {
+    fs.writeFileSync(path.join(directory, 'vitest.config.mjs'), `import { fileURLToPath } from 'node:url';
+    export default { test: {
         include: process.env.MATRIX_CASE.split(',').map(name => name + '.vitest.mjs'),
-        setupFiles: process.env.MATRIX_SETUP ? ['./setup-only.vitest.mjs'] : [],
+        setupFiles: process.env.MATRIX_SETUP === 'package-resolved'
+            ? [fileURLToPath(import.meta.resolve('@tranjs/testing/vitest'))] :
+            process.env.MATRIX_SETUP === 'package' ? ['@tranjs/testing/vitest'] :
+            process.env.MATRIX_SETUP ? ['./setup-only.vitest.mjs'] : [],
         pool: 'threads', maxWorkers: 2, minWorkers: 1,
         silent: false, reporters: ['verbose'], testTimeout: 15000, hookTimeout: 15000,
     } };`);
@@ -90,6 +94,14 @@ function types(directory, runner) {
     };
     fs.writeFileSync(path.join(directory, 'tsconfig.json'), JSON.stringify(config));
     run(directory, path.join(dependencies, 'typescript/bin/tsc'), ['-p', 'tsconfig.json']);
+    // Runner config is not a TypeScript input: load augmentation through types,
+    // with a fixture that never imports the matcher entry or a setup module.
+    config.compilerOptions.types = vitest
+        ? ['node', '@tranjs/testing/vitest']
+        : ['node', 'jest', '@tranjs/testing/jest'];
+    config.files = [vitest ? 'types-global.vitest.mts' : 'types-global.jest.ts'];
+    fs.writeFileSync(path.join(directory, 'tsconfig.global.json'), JSON.stringify(config));
+    run(directory, path.join(dependencies, 'typescript/bin/tsc'), ['-p', 'tsconfig.global.json']);
 }
 function findings(output) {
     for (const marker of [
@@ -131,6 +143,10 @@ function main() {
                 jest(['registration-setup'], {}, {
                     injectGlobals, setupFilesAfterEnv: ['./setup-only.jest.cjs'],
                 });
+                console.log(`\n=== ${runner}: direct package config, injectGlobals=${injectGlobals} ===`);
+                jest(['registration-config'], {}, {
+                    injectGlobals, setupFilesAfterEnv: ['@tranjs/testing/jest'],
+                });
             }
             typeChecks.push([directory, runner]);
         }
@@ -145,6 +161,14 @@ function main() {
             findings(vitest('portable,matchers,core-regressions,lifetime'));
             vitest('registration');
             vitest('registration-setup', { env: { MATRIX_SETUP: '1' } });
+            // Resolve v3's setup entry explicitly in workspace-shaped projects.
+            // The same no-setup-file form is supported by every Vitest version.
+            console.log(`\n=== ${runner}: resolved package config ===`);
+            vitest('registration-config', { env: { MATRIX_SETUP: 'package-resolved' } });
+            if (runner !== 'vitest3') {
+                console.log(`\n=== ${runner}: bare package config ===`);
+                vitest('registration-config', { env: { MATRIX_SETUP: 'package' } });
+            }
             typeChecks.push([directory, runner]);
         }
         console.log('\n=== node:test: portable serial/concurrent and six assertions ===');

@@ -73,9 +73,58 @@ SQL-error recovery rolls back to and releases the savepoint while preserving the
 | `toHaveCommitted` | `assertCommitted` |
 | `toHaveRolledBack` | `assertRolledBack` |
 
-Side-effect import `@tranjs/testing/jest` registers all six with `expect` from `@jest/globals` and supports `injectGlobals: false`. The ESM side-effect import `@tranjs/testing/vitest` registers them with Vitest's `expect`. Include imports in a test or a TypeScript-included runner setup file. Manual `expect.extend(matchers)` remains available with `matchers` from the base package. Portable assertions need no runner registration.
+Side-effect import `@tranjs/testing/jest` registers all six with `expect` from `@jest/globals` and supports `injectGlobals: false`. The ESM side-effect import `@tranjs/testing/vitest` registers them with Vitest's `expect`. Manual `expect.extend(matchers)` remains available with `matchers` from the base package. Portable assertions need no runner registration.
 
 Operands must be tracked functions from one probe with exactly one recorded call each; misuse throws even under `.not`. Assertions observe entry, logical outcome and hook provenance, not SQL routing, awaited completion, physical durability or external delivery. `assertAfterCommitOf` requires observed hook provenance, not merely a later outside call.
+
+### Registering matchers for all tests
+
+Jest 29/30 accept the package entry directly, with `injectGlobals` true or false. No user setup file is needed:
+
+```javascript
+// jest.config.cjs
+module.exports = {
+    setupFilesAfterEnv: ["@tranjs/testing/jest"],
+};
+```
+
+In `tsconfig.json`, load TypeScript augmentation through `types`; keep your project's other entries:
+
+```json
+{
+    "compilerOptions": {
+        "types": ["node", "jest", "@tranjs/testing/jest"],
+        "skipLibCheck": false
+    }
+}
+```
+
+For Vitest 3, resolve the entry in config. The same form works with Vitest 4/5 and requires Node 18.19+ or 20.6+:
+
+```javascript
+// vitest.config.mjs
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+    test: {
+        setupFiles: [fileURLToPath(import.meta.resolve("@tranjs/testing/vitest"))],
+    },
+});
+```
+
+Vitest 4/5 also accept `setupFiles: ["@tranjs/testing/vitest"]`. Add its types separately in `tsconfig.json`:
+
+```json
+{
+    "compilerOptions": {
+        "types": ["node", "@tranjs/testing/vitest"],
+        "skipLibCheck": false
+    }
+}
+```
+
+Individual tests need no matcher-entry import. Import `expect`/`test` from the runner as usual when runner globals are disabled. Alternatively, keep registration per file with `import "@tranjs/testing/jest"` or `import "@tranjs/testing/vitest"`; that import supplies both registration and augmentation.
 
 ## Limits and real commits
 

@@ -24,6 +24,14 @@ injection. A custom pg-manager subclass performs real savepoint/final rollback S
 before throwing: both callback finally blocks run, the `TransactionSystemError`
 chain preserves physical/recovery/application errors, and no rows persist.
 
+Config-only registration uses `setupFilesAfterEnv: ["@tranjs/testing/jest"]` on
+Jest 29/30 with globals on/off. Vitest 3 uses a file path from
+`fileURLToPath(import.meta.resolve("@tranjs/testing/vitest"))`; Vitest 4/5 run both
+that form and `setupFiles: ["@tranjs/testing/vitest"]`. The config-only test files
+have no matcher-entry import or manual extension and cover all six matchers,
+`.not`, and `.resolves`. Separate strict type fixtures load augmentation only
+through `compilerOptions.types`, without an entry import in each test file.
+
 ## Actual lifetime boundaries (not automatic isolation)
 
 `withTestTransaction` and `mockTransactions` scope **awaited work in their callback**,
