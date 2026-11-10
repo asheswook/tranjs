@@ -2,8 +2,8 @@ import {
     afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError,
     Propagation, runInTransaction, TransactionSystemError, useTransactionManager,
 } from "../src";
-import { fixture, mockTransactions, transactions, withTestTransaction } from "../src/testing";
-import { FakeTransactionManager } from "../src/testing/fake";
+import { fixture, mockTransactions, transactions, withTestTransaction } from "../../testing/src";
+import { FakeTransactionManager } from "../../testing/src/fake";
 import { FixtureLease, testSession } from "../src/internal";
 
 function deferred<T = void>() {

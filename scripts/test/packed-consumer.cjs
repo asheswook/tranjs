@@ -1,0 +1,303 @@
+#!/usr/bin/env node
+// Run after a clean build of core, testing, and every driver. No workspace links.
+// Requires a real PostgreSQL server (PG_URL, or the usual local test database).
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { createRequire } = require("node:module");
+const { spawnSync } = require("node:child_process");
+
+const root = path.resolve(__dirname, "../..");
+const packages = ["core", "testing", "pg", "mysql2", "postgres"];
+const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+
+function run(command, args, cwd) {
+    const result = spawnSync(command, args, {
+        cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024,
+        env: { ...process.env, NODE_PATH: "" },
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+        throw new Error(`${command} ${args.join(" ")} failed (${result.status}):\n${result.stdout}\n${result.stderr}`);
+    }
+    return result.stdout.trim();
+}
+
+// These functions are emitted into the actual consumer so both native import
+// and require resolve packages from its node_modules, never from this script.
+async function runtimeChecks() {
+    const assert = require("node:assert/strict");
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const { createRequire } = require("node:module");
+    let identities = 0;
+    const same = (a, b, message) => { assert.equal(a, b, message); identities++; };
+    const core = require("@tranjs/core");
+    const coreOnly = Object.keys(require.cache);
+    const forbidden = coreOnly.filter(file =>
+        /[/\\]@tranjs[/\\]testing[/\\]/.test(file) ||
+        /[/\\](?:testing|probe|fake|matchers?|metadata|jest|vitest)(?:[/\\]|\.[cm]?js$)/.test(file));
+    assert.deepEqual(forbidden, [], "Core main must not load testing/probe/fake/matcher/runner code");
+    // Cache isolation is observable; do not claim this proves ALS allocation.
+    const importedCore = await import("@tranjs/core");
+    const coreRoot = path.dirname(path.dirname(require.resolve("@tranjs/core")));
+    const main = require(path.resolve(coreRoot, JSON.parse(fs.readFileSync(path.join(coreRoot, "package.json"))).main));
+    const legacy = require("@tranjs/core/dist/asyncLocal");
+    const importedLegacy = await import("@tranjs/core/dist/asyncLocal");
+    const bridge = require("@tranjs/core/internal/testing-bridge");
+    const importedBridge = await import("@tranjs/core/internal/testing-bridge");
+    for (const entry of [main, importedCore]) {
+        for (const key of ["AsyncLocal", "PlatformTransactionManager", "getTransactionManager", "useTransactionManager"]) {
+            assert.equal(typeof core[key], "function", `Missing core export ${key}`);
+            same(entry[key], core[key], `${key} must have one core identity`);
+        }
+    }
+    for (const entry of [legacy, importedLegacy, bridge, importedBridge]) same(entry.AsyncLocal, core.AsyncLocal);
+    assert.equal(bridge.TESTING_BRIDGE_VERSION, 1);
+    assert.equal(bridge.TESTING_CORE_VERSION, "1.2.0");
+    for (const entry of ["@tranjs/core/testing", "@tranjs/core/testing/jest", "@tranjs/core/testing/vitest"]) {
+        assert.throws(() => require.resolve(entry), { code: "ERR_PACKAGE_PATH_NOT_EXPORTED" });
+    }
+
+    const drivers = {};
+    for (const name of ["pg", "mysql2", "postgres"]) {
+        drivers[name] = require(`@tranjs/${name}`);
+        const fromDriver = createRequire(require.resolve(`@tranjs/${name}`));
+        same(fromDriver.resolve("@tranjs/core"), require.resolve("@tranjs/core"), `${name} must resolve installed core`);
+        same(fromDriver("@tranjs/core").PlatformTransactionManager, core.PlatformTransactionManager);
+    }
+    assert(!Object.keys(require.cache).some(file => /[/\\]@tranjs[/\\]testing[/\\]/.test(file)),
+        "Drivers must not load @tranjs/testing");
+    const testing = require("@tranjs/testing");
+    const importedTesting = await import("@tranjs/testing");
+    // A dual build may have distinct functions; shared state is checked below.
+    for (const entry of [testing, importedTesting]) {
+        for (const key of ["fixture", "withTestTransaction", "transactions"]) assert.equal(typeof entry[key], "function");
+    }
+
+    const { Pool } = require("pg");
+    const pool = new Pool({
+        connectionString: process.env.PG_URL || "postgres://postgres:postgres@localhost:5432/postgres",
+        max: 3, connectionTimeoutMillis: 10000,
+    });
+    const datasource = Symbol("packed-consumer");
+    const table = `tranjs_packed_${process.pid}_${Date.now()}`;
+    const manager = new drivers.pg.PostgreSQLTransactionManager(pool);
+    core.useTransactionManager(manager, datasource);
+    same(importedCore.getTransactionManager(datasource), manager);
+    // Exercise both directions, not just the convenient CJS-first direction.
+    const directions = [[testing, importedTesting, core], [importedTesting, testing, importedCore]];
+    let created = false;
+    try {
+        await pool.query(`CREATE TABLE ${table} (id integer PRIMARY KEY)`);
+        created = true;
+        for (const [sessionApi, otherApi, appCore] of directions) {
+            await sessionApi.withTestTransaction(async probe => {
+                same(otherApi.transactions(datasource), probe, "Import and require must share the live probe");
+                same(sessionApi.transactions(), probe);
+                assert.throws(() => drivers.pg.ctx(datasource), /context|transaction/i);
+                await otherApi.fixture(async connection => {
+                    await connection.query(`INSERT INTO ${table} VALUES ($1)`, [1]);
+                    assert.throws(() => drivers.pg.ctx(datasource), /context|transaction/i);
+                }, { datasource });
+                assert.equal(probe.transactions.length, 0, "Fixture must not record a logical transaction");
+                const save = probe.track(async function save(id) {
+                    const connection = drivers.pg.ctx(datasource);
+                    assert(manager.getCurrentTransaction());
+                    await connection.query(`INSERT INTO ${table} VALUES ($1)`, [id]);
+                    return (await connection.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
+                });
+                const application = callback => appCore.getTransactionManager(datasource)
+                    .executeTransaction(appCore.Propagation.REQUIRED, callback);
+                assert.deepEqual(await application(() => save(2)), [1, 2]);
+                assert.equal(probe.txOf(save).outcome, "committed");
+                assert.equal(probe.transactions.length, 1);
+                const failing = probe.track(async () => {
+                    await drivers.pg.ctx(datasource).query(`INSERT INTO ${table} VALUES (3)`);
+                });
+                const failure = new Error("packed injected commit failure");
+                probe.fail("commit", { containing: failing, error: failure });
+                await assert.rejects(application(failing), error => error === failure);
+                assert.equal(probe.txOf(failing).outcome, "rolled-back");
+                await application(async () => {
+                    assert.deepEqual((await drivers.pg.ctx(datasource).query(`SELECT id FROM ${table} ORDER BY id`)).rows,
+                        [{ id: 1 }, { id: 2 }]);
+                });
+                assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "No physical commit during session");
+            }, { datasource });
+            assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "Session must physically roll back");
+            assert.throws(() => otherApi.transactions(datasource), /session/i);
+        }
+    } finally {
+        core.clearTransactionManager(datasource);
+        try { if (created) await pool.query(`DROP TABLE ${table}`); }
+        finally { await pool.end(); }
+    }
+    console.log(JSON.stringify({ identities, mixed: directions.length, coreCachedModules: coreOnly.length }));
+}
+
+async function mismatchChecks() {
+    const assert = require("node:assert/strict");
+    const core = require("@tranjs/core");
+    let begins = 0;
+    // Construct before loading testing: the bridge must retain this manager's
+    // protected begin hook, but must never get far enough to invoke it.
+    class BeginSentinel extends core.PlatformTransactionManager {
+        constructor() { super(); }
+        async beginTransaction() { begins++; throw new Error("BEGIN SENTINEL: transaction opened"); }
+        async commitTransaction() {}
+        async rollbackTransaction() {}
+    }
+    const datasource = Symbol("mismatch");
+    core.useTransactionManager(new BeginSentinel(), datasource);
+    try {
+        let failure;
+        try {
+            if (process.argv[2] === "import") await import("@tranjs/testing");
+            else require("@tranjs/testing");
+        } catch (error) { failure = error; }
+        assert.equal(begins, 0, "A mismatched package must not open a transaction");
+        assert(failure, "@tranjs/testing must reject the mismatch at module load, not at session entry");
+        assert.match(String(failure), /version|protocol|incompatib|mismatch/i);
+        assert.match(String(failure), /core|bridge/i);
+    } finally {
+        core.clearTransactionManager(datasource);
+    }
+    console.log(JSON.stringify({ mismatch: 1, begins }));
+}
+
+const types = `import { fixture, type FixtureOptions } from "@tranjs/testing";
+import type { PgFixtureConnection } from "@tranjs/pg";
+import type { Mysql2FixtureConnection } from "@tranjs/mysql2";
+import type { PostgresFixtureConnection } from "@tranjs/postgres";
+
+export const pgFixture = <R>(fn: (ctx: PgFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
+export const mysqlFixture = <R>(fn: (ctx: Mysql2FixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
+export const postgresFixture = <R>(fn: (ctx: PostgresFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
+export const pgResult = () => pgFixture(async connection => (await connection.query("SELECT $1::int AS id", [1])).rows);
+export const mysqlResult = () => mysqlFixture(async connection => {
+    await connection.query("SELECT ? AS id", [1]);
+    return connection.execute("SELECT ? AS id", [1]);
+});
+export const postgresResult = () => postgresFixture(async connection => {
+    await connection.unsafe("SELECT $1::int AS id", [1]);
+    return connection\`SELECT \${1}::int AS id\`;
+});
+export const restrictedTypes = () => {
+    void pgFixture(connection => {
+        // @ts-expect-error Native lifecycle is not exposed.
+        connection.release();
+        // @ts-expect-error Config objects are not part of the fixture contract.
+        connection.query({ text: "SELECT 1" });
+        // @ts-expect-error Callback queries are not part of the fixture contract.
+        connection.query("SELECT 1", () => {});
+        return connection.query<{ id: number }>("SELECT 1 AS id");
+    });
+    void mysqlFixture(connection => {
+        // @ts-expect-error Native internals are not exposed.
+        connection.connection;
+        // @ts-expect-error Native lifecycle is not exposed.
+        connection.commit();
+        return connection.execute("SELECT ? AS id", [1]);
+    });
+    void postgresFixture(connection => {
+        // @ts-expect-error Native connection helpers are not exposed.
+        connection.reserve();
+        // @ts-expect-error Query modifiers are not exposed on plain promises.
+        connection\`SELECT 1\`.values();
+        // @ts-expect-error Native unsafe options are not supported.
+        connection.unsafe("SELECT 1", [], { prepare: false });
+        return connection\`SELECT 1\`;
+    });
+};
+`;
+
+async function main() {
+    for (const name of packages) {
+        assert(fs.existsSync(path.join(root, "packages", name, "dist/index.js")),
+            `Missing built @tranjs/${name}; finish the clean package build before running this script`);
+    }
+    const base = path.join(os.homedir(), "work/scratch/pack-check");
+    fs.mkdirSync(base, { recursive: true });
+    const sandbox = fs.mkdtempSync(path.join(base, "consumer-"));
+    // Preserve the sandbox (including tarballs and fixtures) for diagnostics.
+    console.log(`Packed consumer: ${sandbox}`);
+    const consumer = path.join(sandbox, "consumer");
+    fs.mkdirSync(consumer);
+    fs.writeFileSync(path.join(consumer, "package.json"), JSON.stringify({ name: "tranjs-packed-check", version: "1.0.0", private: true }));
+    const tarballs = [];
+    for (const name of packages) {
+        const output = run(npm, ["pack", "--ignore-scripts", "--json", "--pack-destination", sandbox], path.join(root, "packages", name));
+        const [packed] = JSON.parse(output);
+        assert.equal(packed.name, `@tranjs/${name}`);
+        assert(packed.files.some(file => file.path === "dist/index.js"), `Missing packed runtime for ${name}`);
+        assert(packed.files.some(file => file.path === "dist/index.d.ts"), `Missing packed declarations for ${name}`);
+        if (name === "core") {
+            assert.equal(packed.version, "1.2.0");
+            const stale = packed.files.filter(file => /^dist\/testing(?:[/.]|$)/.test(file.path));
+            assert.deepEqual(stale, [], "Core tarball contains stale dist/testing artifacts; clean before building");
+        }
+        tarballs.push(path.join(sandbox, packed.filename));
+    }
+    run(npm, ["install", "--ignore-scripts", "--legacy-peer-deps", "--no-audit", "--no-fund", ...tarballs, "@types/node@^22"], consumer);
+    const consumerRequire = createRequire(path.join(consumer, "package.json"));
+    const modules = path.join(consumer, "node_modules");
+    for (const name of packages) {
+        const installed = path.join(modules, "@tranjs", name);
+        assert(!fs.lstatSync(installed).isSymbolicLink(), `@tranjs/${name} must not be a workspace symlink`);
+        assert(fs.realpathSync(consumerRequire.resolve(`@tranjs/${name}`)).startsWith(fs.realpathSync(modules) + path.sep));
+    }
+    const coreManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/core/package.json")));
+    assert(!coreManifest.dependencies?.["@tranjs/testing"] && !coreManifest.peerDependencies?.["@tranjs/testing"]);
+    const testingManifest = JSON.parse(fs.readFileSync(path.join(modules, "@tranjs/testing/package.json")));
+    assert.equal(testingManifest.version, "1.2.0");
+    assert.equal(testingManifest.peerDependencies["@tranjs/core"], "1.2.0");
+    assert(!testingManifest.peerDependenciesMeta?.["@tranjs/core"]?.optional, "Core peer must be required");
+
+    const runtimeFile = path.join(consumer, "runtime.cjs");
+    const mismatchFile = path.join(consumer, "mismatch.cjs");
+    const emit = fn => `(${fn.toString()})().catch(error => { console.error(error); process.exitCode = 1; });\n`;
+    fs.writeFileSync(runtimeFile, emit(runtimeChecks));
+    fs.writeFileSync(mismatchFile, emit(mismatchChecks));
+    const runtime = JSON.parse(run(process.execPath, ["--unhandled-rejections=strict", runtimeFile], consumer));
+
+    const bridgeFile = consumerRequire.resolve("@tranjs/core/internal/testing-bridge");
+    const original = fs.readFileSync(bridgeFile, "utf8");
+    let mismatches = 0;
+    try {
+        for (const [key, value, replacement] of [
+            ["TESTING_BRIDGE_VERSION", "1", "999"],
+            ["TESTING_CORE_VERSION", `["']1\\.2\\.0["']`, '"0.0.0-packed-mismatch"'],
+        ]) {
+            const assignment = new RegExp(`(exports\\.${key}\\s*=\\s*)${value}(\\s*;)`, "g");
+            let changes = 0;
+            const mutated = original.replace(assignment, (_match, prefix, suffix) => {
+                changes++;
+                return prefix + replacement + suffix;
+            });
+            assert.equal(changes, 1, `Expected exactly one emitted ${key} assignment in ${bridgeFile}`);
+            fs.writeFileSync(bridgeFile, mutated);
+            for (const loader of ["require", "import"]) {
+                const result = JSON.parse(run(process.execPath, ["--unhandled-rejections=strict", mismatchFile, loader], consumer));
+                assert.equal(result.begins, 0);
+                mismatches += result.mismatch;
+            }
+        }
+    } finally {
+        fs.writeFileSync(bridgeFile, original);
+    }
+
+    fs.writeFileSync(path.join(consumer, "fixture-types.ts"), types);
+    fs.writeFileSync(path.join(consumer, "tsconfig.json"), JSON.stringify({
+        compilerOptions: { target: "ES2022", module: "Node16", moduleResolution: "Node16", strict: true, skipLibCheck: false, noEmit: true },
+        files: ["fixture-types.ts"],
+    }));
+    run(process.execPath, [path.join(root, "node_modules/typescript/bin/tsc"), "-p", path.join(consumer, "tsconfig.json")], consumer);
+    console.log(`Packed consumer passed: packages=${packages.length} identities=${runtime.identities} mixed=${runtime.mixed} mismatches=${mismatches} types=1 core-cache=${runtime.coreCachedModules}`);
+}
+
+main().catch(error => {
+    console.error(error);
+    process.exitCode = 1;
+});

@@ -1,4 +1,5 @@
-import { executeFixture } from "../internal/fixture";
+import "./bridge";
+import { executeFixture } from "@tranjs/core/internal/testing-bridge";
 
 export interface FixtureOptions { datasource?: string | symbol; }
 

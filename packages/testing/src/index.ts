@@ -1,3 +1,5 @@
+import "./bridge";
+
 export {
     mockTransactions, transactions, withTestTransaction,
 } from "./session";

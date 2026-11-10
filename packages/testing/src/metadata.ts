@@ -1,4 +1,4 @@
-import { currentTestSession, TestBoundaryInfo, TestSession } from "../internal";
+import { currentTestSession, TestBoundaryInfo, TestSession } from "@tranjs/core/internal/testing-bridge";
 
 /** Private matcher evidence. No runner dependencies and no production allocations. */
 export interface RecordedCall {

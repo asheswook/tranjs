@@ -4,7 +4,7 @@ import {
     runInTransaction, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
-import { withTestTransaction } from "@tranjs/core/testing";
+import { withTestTransaction } from "@tranjs/testing";
 import { ctx, MySQLTransactionManager } from "../src";
 
 const url = process.env.MYSQL_URL ?? "mysql://root:root@localhost:3306/test";

@@ -14,7 +14,7 @@ describe("built package exports", () => {
     it("supports requiring the testing subpath", () => {
         runNode(`
             const assert = require('node:assert/strict');
-            const testing = require('@tranjs/core/testing');
+            const testing = require('@tranjs/testing');
             for (const name of ['mockTransactions', 'withTestTransaction', 'transactions',
                 'assertSameTransaction', 'assertSeparateTransaction', 'assertOutsideTransaction',
                 'assertAfterCommitOf', 'assertCommitted', 'assertRolledBack']) {
@@ -36,7 +36,7 @@ describe("built package exports", () => {
         runNode(`
             const assert = require('node:assert/strict');
             (async () => {
-                const testing = await import('@tranjs/core/testing');
+                const testing = await import('@tranjs/testing');
                 for (const name of ['mockTransactions', 'withTestTransaction']) {
                     assert.equal(typeof testing[name], 'function', name);
                 }
@@ -54,13 +54,13 @@ describe("built package exports", () => {
         runNode(`
             const assert = require('node:assert/strict');
             const path = require('node:path');
-            const testingDirectory = path.dirname(require.resolve('@tranjs/core/testing')) + path.sep;
+            const testingDirectory = path.dirname(require.resolve('@tranjs/testing')) + path.sep;
             assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), false);
             const core = require('@tranjs/core');
             assert.equal('mockTransactions' in core, false);
             assert.equal('withTestTransaction' in core, false);
             assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), false);
-            require('@tranjs/core/testing');
+            require('@tranjs/testing');
             assert.equal(Object.keys(require.cache).some(file => file.startsWith(testingDirectory)), true);
         `);
     });
@@ -76,27 +76,13 @@ describe("built package exports", () => {
                 }
                 return load.call(this, name, ...args);
             };
-            const testing = require('@tranjs/core/testing');
+            const testing = require('@tranjs/testing');
             assert.equal(typeof testing.withTestTransaction, 'function');
             assert.equal(typeof require('@tranjs/core/dist/asyncLocal').AsyncLocal, 'function');
-            for (const subpath of ['jest']) {
-                const entry = require('@tranjs/core/testing/' + subpath);
-                assert.deepEqual(Object.keys(entry), ['matchers']);
-                assert.equal(entry.matchers, testing.matchers);
-            }
-            assert.throws(() => require.resolve('@tranjs/core/testing/jest/environment'), {
+            assert.throws(() => require.resolve('@tranjs/testing/jest/environment'), {
                 code: 'ERR_PACKAGE_PATH_NOT_EXPORTED',
             });
         `);
-        runNode(`
-            import assert from 'node:assert/strict';
-            for (const subpath of ['jest', 'vitest']) {
-                const entry = await import('@tranjs/core/testing/' + subpath);
-                assert.equal(typeof entry.matchers.toHaveCommitted, 'function');
-                assert.equal('useTestTransactions' in entry, false);
-                if (subpath === 'vitest') assert.deepEqual(Object.keys(entry), ['matchers']);
-            }
-        `, true);
     });
 
     it("allocates testing async-local storage only when a test session starts", () => {
@@ -124,7 +110,7 @@ describe("built package exports", () => {
                 core.useTransactionManager(new Manager());
                 await core.runInTransaction(() => 42);
                 assert.equal(allocations, 1);
-                const testing = require('@tranjs/core/testing');
+                const testing = require('@tranjs/testing');
                 assert.equal(allocations, 1);
                 await testing.mockTransactions(async () => {
                     await core.runInTransaction(() => 42);

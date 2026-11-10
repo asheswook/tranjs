@@ -1,8 +1,8 @@
-import { afterCommit, Propagation, runInTransaction, Transactional } from "../src";
+import { afterCommit, Propagation, runInTransaction, Transactional } from "@tranjs/core";
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions, TestTransactionProbe,
-} from "../src/testing";
+} from "../src";
 
 expect.extend(matchers);
 type BoundaryExpectation = Record<keyof typeof matchers, (other?: Function) => void> & { not: BoundaryExpectation };

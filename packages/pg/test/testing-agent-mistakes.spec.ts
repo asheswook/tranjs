@@ -3,8 +3,8 @@ import {
     afterCommit, clearTransactionManager, Propagation, runInTransaction,
     Transactional, useTransactionManager,
 } from "@tranjs/core";
-import { withTestTransaction } from "@tranjs/core/testing";
-import { matchers } from "@tranjs/core/testing/jest";
+import { withTestTransaction } from "@tranjs/testing";
+import { matchers } from "@tranjs/testing/jest";
 import { ctx, PostgreSQLTransactionManager } from "../src";
 
 expect.extend(matchers);

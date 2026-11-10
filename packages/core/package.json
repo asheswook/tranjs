@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/core",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
     "build": "tsc -b",
@@ -24,21 +24,12 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./testing": "./dist/testing/index.js",
-    "./testing/jest": "./dist/testing/jest.js",
-    "./testing/vitest": {
-      "types": "./dist/testing/vitest.d.mts",
-      "import": "./dist/testing/vitest.mjs"
-    },
     "./dist/asyncLocal": "./dist/asyncLocal.js",
     "./internal/testing-bridge": "./dist/internal/testing-bridge.js"
   },
   "typesVersions": {
     "*": {
-      "internal/testing-bridge": ["dist/internal/testing-bridge.d.ts"],
-      "testing": ["dist/testing/index.d.ts"],
-      "testing/jest": ["dist/testing/jest.d.ts"],
-      "testing/vitest": ["dist/testing/vitest.d.mts"]
+      "internal/testing-bridge": ["dist/internal/testing-bridge.d.ts"]
     }
   },
   "files": [
@@ -56,22 +47,7 @@
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
-    "@jest/globals": "^29.7.0",
-    "expect": "^29.7.0",
-    "vitest": "^3.2.7",
     "ts-jest": "^29.2.5"
-  },
-  "peerDependencies": {
-    "jest": "^29.7.0 || ^30.0.0",
-    "@jest/globals": "^29.7.0 || ^30.0.0",
-    "expect": "^29.7.0 || ^30.0.0",
-    "vitest": "^3.0.0 || ^4.0.0 || ^5.0.0"
-  },
-  "peerDependenciesMeta": {
-    "jest": { "optional": true },
-    "@jest/globals": { "optional": true },
-    "expect": { "optional": true },
-    "vitest": { "optional": true }
   },
   "gitHead": "7eff63661a41cb6adecdafb88eea4adb7726ef61",
   "jest": {
@@ -93,9 +69,22 @@
       "ts"
     ],
     "rootDir": "./",
+    "roots": ["<rootDir>/test", "<rootDir>/../testing/test"],
+    "moduleNameMapper": {
+      "^@tranjs/core$": "<rootDir>/src",
+      "^@tranjs/core/internal/testing-bridge$": "<rootDir>/src/internal/testing-bridge"
+    },
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)s$": ["ts-jest", {
+        "tsconfig": {
+          "baseUrl": ".",
+          "paths": {
+            "@tranjs/core": ["src"],
+            "@tranjs/core/internal/testing-bridge": ["src/internal/testing-bridge"]
+          }
+        }
+      }]
     },
     "collectCoverageFrom": [
       "src/**/*.ts"

@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/postgres",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "TranJS driver for postgres.js. (PostgreSQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,7 +15,7 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
-    "@tranjs/core": "^1.1.0",
+    "@tranjs/core": "^1.2.0",
     "postgres": "^3.4.0 || ^4.1.0"
   },
   "jest": {
@@ -62,6 +62,7 @@
     "testTimeout": 30000
   },
   "devDependencies": {
+    "@tranjs/testing": "1.2.0",
     "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5"

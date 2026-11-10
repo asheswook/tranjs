@@ -2,13 +2,13 @@ import { AssertionError } from "node:assert";
 import {
     afterCommit, afterRollback, clearTransactionManager, getTransactionManager, Propagation,
     runInTransaction, TransactionSystemError, useTransactionManager,
-} from "../src";
+} from "@tranjs/core";
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions,
     transactions, withTestTransaction,
-} from "../src/testing";
-import { FakeTransactionManager } from "../src/testing/fake";
+} from "../src";
+import { FakeTransactionManager } from "../src/fake";
 
 expect.extend(matchers);
 const check = expect as any;
@@ -453,9 +453,9 @@ describe("transactions() accessor and portable lifecycle", () => {
         });
         try {
             await jest.isolateModulesAsync(async () => {
-                const core = require("../src") as typeof import("../src");
+                const core = require("@tranjs/core") as typeof import("@tranjs/core");
                 expect(allocations).toBe(1);
-                const testing = require("../src/testing") as typeof import("../src/testing");
+                const testing = require("../src") as typeof import("../src");
                 expect(allocations).toBe(1);
                 await testing.mockTransactions(async t => {
                     const work = t.track(function work() {});

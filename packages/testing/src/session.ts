@@ -1,9 +1,8 @@
-import { DEFAULT_DATASOURCE } from "../config";
+import "./bridge";
+import { DEFAULT_DATASOURCE } from "@tranjs/core";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { DatasourceSetupError, TransactionSystemError } from "../error";
-import { clearTransactionManager, getTransactionManager, PlatformTransactionManager, useTransactionManager } from "../manager";
-import { AsyncLocal, TxState } from "../asyncLocal";
-import { currentTestSession, hasTestTransaction, runTestSession, testAccess, TestBoundaryInfo, TestSession, testSession } from "../internal";
+import { DatasourceSetupError, TransactionSystemError, clearTransactionManager, getTransactionManager, PlatformTransactionManager, useTransactionManager } from "@tranjs/core";
+import { AsyncLocal, TxState, currentTestSession, hasTestTransaction, runTestSession, testAccess, TestBoundaryInfo, TestSession, testSession } from "@tranjs/core/internal/testing-bridge";
 import { FakeTransactionManager } from "./fake";
 import { registerProbeOwner, registerTrackedFunction, trackedFunctionForOwner, TrackedFunction } from "./metadata";
 

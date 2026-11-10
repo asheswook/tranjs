@@ -3,7 +3,7 @@ import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions,
     transactions as currentTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction,
-} from "@tranjs/core/testing";
+} from "@tranjs/testing";
 
 // Compiled against the built package in Node10, Node16 and bundler resolution modes.
 export const mockResult: Promise<{ value: number }> = mockTransactions(async t => {

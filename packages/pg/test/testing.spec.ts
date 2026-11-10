@@ -4,7 +4,7 @@ import {
     runInTransaction, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
-import { withTestTransaction } from "@tranjs/core/testing";
+import { withTestTransaction } from "@tranjs/testing";
 import { ctx, PostgreSQLClientPerTransactionManager, PostgreSQLTransactionManager } from "../src";
 
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";

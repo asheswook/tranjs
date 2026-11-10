@@ -4,7 +4,7 @@ import {
     Transactional, TransactionTimeoutError, useTransactionManager,
 } from "@tranjs/core";
 const transactional = <R>(fn: () => R, config?: Parameters<typeof runInTransaction>[1]) => () => runInTransaction(fn, config);
-import { fixture, mockTransactions, withTestTransaction } from "@tranjs/core/testing";
+import { fixture, mockTransactions, withTestTransaction } from "@tranjs/testing";
 
 // Shared by all real-driver suites, including the isolated postgres-v3 runner
 // (which copies scripts/test). Deliberately use any for hostile API invocations.

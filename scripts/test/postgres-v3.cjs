@@ -22,7 +22,7 @@ function prepare(sandbox) {
     for (const file of ["package.json", "tsconfig.json"]) {
         fs.copyFileSync(path.join(root, file), path.join(sandbox, file));
     }
-    for (const name of ["core", "postgres"]) {
+    for (const name of ["core", "testing", "postgres"]) {
         assert(fs.existsSync(path.join(root, "packages", name, "dist/index.js")),
             `Missing built @tranjs/${name}; run npm run build first`);
         const target = path.join(sandbox, "packages", name);
@@ -42,7 +42,7 @@ function prepare(sandbox) {
     }
     link(alias, path.join(modules, "postgres"));
     fs.mkdirSync(path.join(modules, "@tranjs"));
-    for (const name of ["core", "postgres"]) {
+    for (const name of ["core", "testing", "postgres"]) {
         link(path.join(sandbox, "packages", name), path.join(modules, "@tranjs", name));
     }
     const resolve = createRequire(path.join(sandbox, "package.json")).resolve;
@@ -73,7 +73,9 @@ async function main() {
     const args = process.argv.slice(2);
     const compat = args[0] === "--compat";
     if (compat && args.length === 1) throw new Error("--compat requires a Node command");
-    const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "tranjs-postgres-v3-"));
+    const scratch = path.join(os.homedir(), "work/scratch");
+    fs.mkdirSync(scratch, { recursive: true });
+    const sandbox = fs.mkdtempSync(path.join(scratch, "tranjs-postgres-v3-"));
     try {
         const version = prepare(sandbox);
         console.log(`Testing actual postgres.js ${version} in an isolated workspace`);

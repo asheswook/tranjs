@@ -2,9 +2,9 @@ import {
     afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, runInTransaction,
     Transactional, TransactionSystemError, useTransactionManager,
-} from "../src";
-import { mockTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction } from "../src/testing";
-import { FakeTransactionManager } from "../src/testing/fake";
+} from "@tranjs/core";
+import { mockTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction } from "../src";
+import { FakeTransactionManager } from "../src/fake";
 
 function deferred() {
     let resolve!: () => void;

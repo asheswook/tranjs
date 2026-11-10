@@ -1,5 +1,5 @@
-import { matchers } from "../src/testing";
-import * as jestEntry from "../src/testing/jest";
+import { matchers } from "../src";
+import * as jestEntry from "../src/jest";
 
 it("exposes only matchers from the Jest entry", () => {
     expect(Object.keys(jestEntry)).toEqual(["matchers"]);
