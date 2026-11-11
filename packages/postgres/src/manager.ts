@@ -12,6 +12,9 @@ import {
 } from "@tranjs/core";
 import { ReservedTransactionSql, TransactionSql } from "./context";
 import { TransactionAbortedError } from "./errors";
+import type { TestConnectionLease } from "@tranjs/core/internal/testing-bridge";
+import { createPostgresTestConnection } from "./test-connection";
+import type { TestConnection } from "./test-connection";
 
 const DRIVER_NAME = Symbol("postgres");
 
@@ -52,25 +55,52 @@ export function ctx(datasource?: string | symbol): TransactionSql {
     if (!(manager instanceof PostgresTransactionManager) && !(manager instanceof PostgresConnectionPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
+    manager.assertCurrentTransactionOpen();
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
     return manager.wrapConnection(transaction);
 }
 
 abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTransactionSql> {
-    private readonly wrappers = new WeakMap<ReservedTransactionSql, TransactionSql>();
-    private readonly queries = new WeakMap<object, object>();
+    protected createTestConnection(tx: ReservedTransactionSql, lease: TestConnectionLease): TestConnection {
+        return createPostgresTestConnection(tx, lease);
+    }
+
+    protected testTransactionCommitError(cause: unknown): unknown {
+        if ((cause as { code?: string })?.code === "25P02") {
+            return Object.assign(new TransactionAbortedError(), { cause });
+        }
+        return cause;
+    }
+
+    private readonly wrappers = new WeakMap<object, TransactionSql>();
+    private readonly queries = new WeakMap<object, WeakMap<object, object>>();
     private readonly nativeQueries = new WeakMap<object, object>();
+    private readonly queryGuards = new WeakMap<object, { gate: object; assertOpen: () => void }>();
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
     public wrapConnection(connection: ReservedTransactionSql): TransactionSql {
-        const cached = this.wrappers.get(connection);
+        const gate = this.getConnectionGate(connection);
+        const assertOpen = () => this.assertConnectionOpen(gate);
+        assertOpen();
+        const cached = this.wrappers.get(gate);
         if (cached) return cached;
+        const wrapQuery = (query: any) => this.wrapQuery(query, assertOpen, gate);
+        const unwrapPart = (part: any) => {
+            const guard = part && (typeof part === "object" || typeof part === "function")
+                ? this.queryGuards.get(part) : undefined;
+            if (guard) {
+                guard.assertOpen();
+                if (guard.gate !== gate) throw new Error("Cannot batch queries from another transaction");
+            }
+            return this.nativeQueries.get(part) ?? part;
+        };
         const wrapper = new Proxy(connection, {
             apply: (target, receiver, args) => {
+                assertOpen();
                 this.checkDeadline();
-                return this.wrapQuery(Reflect.apply(target, receiver, args));
+                return wrapQuery(Reflect.apply(target, receiver, args));
             },
             has: (target, property) => !HIDDEN_MEMBERS.has(property) && Reflect.has(target, property),
             get: (target, property) => {
@@ -84,16 +114,21 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
                     return (channel: string, payload: string) =>
                         wrapper`select pg_notify(${channel}, ${"" + payload})`.then(() => undefined);
                 }
-                if ((property === "unsafe" || property === "file" || property === "batch") && typeof value === "function") return new Proxy(value, {
+                // Inherited bind/valueOf methods must receive the proxy, not the native SQL function.
+                if (!Object.prototype.hasOwnProperty.call(target, property)) return value;
+                // Pure serializer helpers must retain their identity and custom properties.
+                if (property === "typed" || property === "types") return value;
+                if (typeof value === "function") return new Proxy(value, {
                     apply: (fn, _receiver, args) => {
+                        assertOpen();
                         this.checkDeadline();
                         if (property === "batch" && Array.isArray(args[0])) {
                             // postgres.js settles/handles each part internally. Give it
                             // native queries so its own catch handlers cannot hit an
                             // expired wrapper deadline while settling a failed batch.
-                            args[0] = args[0].map(part => this.nativeQueries.get(part) ?? part);
+                            args[0] = args[0].map(unwrapPart);
                         }
-                        return this.wrapQuery(Reflect.apply(fn, target, args));
+                        return wrapQuery(Reflect.apply(fn, target, args));
                     },
                 });
                 // ReservedSql helpers are closure-based, not this-dependent methods.
@@ -104,25 +139,45 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
         });
         // The proxy hides the managed members at runtime, which is what TransactionSql describes.
         const publicWrapper = wrapper as unknown as TransactionSql;
-        this.wrappers.set(connection, publicWrapper);
+        this.wrappers.set(gate, publicWrapper);
         return publicWrapper;
     }
 
-    private wrapQuery(query: any): any {
+    private wrapQuery(query: any, assertOpen: () => void, gate: object): any {
         // sql(identifier), sql(object), etc. are helpers, not executable queries.
         if (!query || typeof query.then !== "function" || typeof query.cancel !== "function") return query;
-        const cached = this.queries.get(query);
+        let queries = this.queries.get(gate);
+        if (!queries) this.queries.set(gate, queries = new WeakMap());
+        const cached = queries.get(query);
         if (cached) return cached;
         let execution: Promise<any> | undefined;
+        let dispatched = false;
+        const nativeHandle = query.handle;
+        if (typeof nativeHandle === "function") query.handle = function (...args: any[]) {
+            if (!query.executed) {
+                assertOpen();
+                dispatched = true;
+            }
+            return Reflect.apply(nativeHandle, this, args);
+        };
+        const nativeCancel = query.cancel;
+        query.cancel = function (...args: any[]) {
+            assertOpen();
+            return Reflect.apply(nativeCancel, this, args);
+        };
         const execute = () => {
             if (execution) return execution;
-            const remaining = this.checkDeadline();
+            // Attaching another consumer to an already dispatched query is safe;
+            // Only starting new database work requires an open connection.
+            if (!dispatched) assertOpen();
+            const remaining = dispatched ? undefined : this.checkDeadline();
+            dispatched = true;
             let fired = false;
             const timer = remaining === undefined ? undefined : setTimeout(() => {
                 fired = true;
                 // Cancellation opens its own connection and can fail independently.
                 // Preserve the query's actual error rather than leaking a timer rejection.
-                try { Promise.resolve(query.cancel()).catch(() => {}); } catch {}
+                try { assertOpen(); Promise.resolve(query.cancel()).catch(() => {}); } catch {}
             }, remaining);
             const clear = () => { if (timer !== undefined) clearTimeout(timer); };
             execution = query.then((result: unknown) => {
@@ -148,20 +203,49 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
                         if (property === "catch") return execute().catch(...args);
                         if (property === "finally") return execute().finally(...args);
                         if (property === "execute") { execute(); return wrapper; }
+                        assertOpen();
                         // These APIs own their cursor/stream lifecycle. Check before
                         // dispatch, without cancellation or result interception.
                         if (["cursor", "forEach", "stream", "readable", "writable"].includes(String(property))) {
                             this.checkDeadline();
-                            return Reflect.apply(fn, target, args);
+                            if (property !== "cursor") dispatched = true;
+                            const result: any = Reflect.apply(fn, target, args);
+                            if (result === target) return target;
+                            // cursor() without a callback dispatches on the first
+                            // iterator.next(), not when the cursor is constructed.
+                            if (property === "cursor" && result?.[Symbol.asyncIterator]) {
+                                return new Proxy(result, {
+                                    get: (cursor, key) => key === Symbol.asyncIterator ? () => {
+                                        const iterator = cursor[Symbol.asyncIterator]();
+                                        return new Proxy(iterator, {
+                                            get: (native, method) => {
+                                                const member = Reflect.get(native, method, native);
+                                                if (typeof member !== "function") return member;
+                                                return (...iteratorArgs: any[]) => {
+                                                    if (method === "next" && !dispatched) {
+                                                        assertOpen();
+                                                        this.checkDeadline();
+                                                        dispatched = true;
+                                                    }
+                                                    return Reflect.apply(member, native, iteratorArgs);
+                                                };
+                                            },
+                                        });
+                                    } : Reflect.get(cursor, key, cursor),
+                                });
+                            }
+                            return result;
                         }
                         const result = Reflect.apply(fn, target, args);
-                        return result === target ? wrapper : this.wrapQuery(result);
+                        return result === target ? wrapper : this.wrapQuery(result, assertOpen, gate);
                     },
                 });
             },
         });
-        this.queries.set(query, wrapper);
+        queries.set(query, wrapper);
         this.nativeQueries.set(wrapper, query);
+        this.queryGuards.set(query, { gate, assertOpen });
+        this.queryGuards.set(wrapper, { gate, assertOpen });
         return wrapper;
     }
 
@@ -184,15 +268,27 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
         await tx.unsafe("ROLLBACK");
     }
 
+    protected async checkTestTransactionConstraints(tx: ReservedTransactionSql, name: string): Promise<void> {
+        await this.createSavepoint(tx, name);
+        this.assertTransactionConnectionOpen(tx);
+        await tx.unsafe("SET CONSTRAINTS ALL IMMEDIATE");
+        // Restore the exact constraint modes, including application overrides.
+        await this.rollbackToSavepoint(tx, name);
+        await this.releaseSavepoint(tx, name);
+    }
+
     protected async createSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.unsafe(`SAVEPOINT ${name}`);
     }
 
     protected async rollbackToSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.unsafe(`ROLLBACK TO SAVEPOINT ${name}`);
     }
 
     protected async releaseSavepoint(tx: ReservedTransactionSql, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.unsafe(`RELEASE SAVEPOINT ${name}`);
     }
 }

@@ -3,7 +3,7 @@ import {
     afterCommit, afterRollback, AsyncLocal, ctx, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, GlobalTransactionManager, IllegalTransactionStateException, IsolationLevel,
     Logger, MetadataWrappedTransaction, NestedTransactionNotSupportedError, NoTransactionContextError,
-    PlatformTransactionManager, Propagation, runInTransaction, Transactional, TransactionOptions,
+    PlatformTransactionManager, Propagation, transactional, Transactional, TransactionOptions,
     TransactionTimeoutError, useTransactionManager, ConcurrentNestedTransactionError,
     InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError,
 } from "../src";
@@ -388,6 +388,42 @@ describe("transaction hardening", () => {
         ]);
     });
 
+    it("does not let a completed NESTED sibling clear a newer sibling's guard", async () => {
+        let startedA!: () => void;
+        const callbackAStarted = new Promise<void>(resolve => { startedA = resolve; });
+        let startedB!: () => void;
+        const callbackBStarted = new Promise<void>(resolve => { startedB = resolve; });
+        let releaseB!: () => void;
+        const holdB = new Promise<void>(resolve => { releaseB = resolve; });
+        const callbackC = jest.fn();
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            const a = manager.executeTransaction(Propagation.NESTED, () => { startedA(); });
+            await callbackAStarted;
+            // A has released its savepoint and cleared its guard, but its returned
+            // promise has not settled. Its later cleanup must not clear B's guard.
+            await Promise.resolve();
+            await Promise.resolve();
+            const b = manager.executeTransaction(Propagation.NESTED, async () => {
+                startedB();
+                await holdB;
+            });
+            try {
+                await a;
+                await callbackBStarted;
+                await expect(manager.executeTransaction(Propagation.NESTED, callbackC))
+                    .rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                expect(callbackC).not.toHaveBeenCalled();
+            } finally {
+                releaseB();
+                await b;
+            }
+        });
+        expect(manager.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1",
+            "savepoint:1:tranjs_sp_2", "release:1:tranjs_sp_2", "commit:1",
+        ]);
+    });
+
     it("marks failed savepoint rollback rollback-only and rolls back the physical owner with hooks", async () => {
         const rollbackError = new Error("savepoint rollback failed");
         manager.savepointRollbackError = rollbackError;
@@ -612,17 +648,17 @@ describe("transaction hardening", () => {
         expect(order).toEqual(["B", "A"]);
     });
 
-    it("runInTransaction supports sync/async results, propagation, options, datasource and setup errors", async () => {
-        expect(await runInTransaction(() => 42)).toBe(42);
-        expect(await runInTransaction(async () => "async")).toBe("async");
+    it("transactional supports sync/async results, propagation, options, datasource and setup errors", async () => {
+        expect(await transactional(() => 42)()).toBe(42);
+        expect(await transactional(async () => "async")()).toBe("async");
         const b = new RecordingManager();
         useTransactionManager(b, datasourceB);
-        await runInTransaction(() => expect(b.getCurrentTransaction()).toBeDefined(), {
+        await transactional(() => expect(b.getCurrentTransaction()).toBeDefined(), {
             datasource: datasourceB, readOnly: true, isolationLevel: IsolationLevel.READ_COMMITTED,
-        });
+        })();
         expect(b.options).toEqual({ readOnly: true, isolationLevel: IsolationLevel.READ_COMMITTED });
-        await runInTransaction(() => expect(manager.getCurrentTransaction()).toBeUndefined(), { propagation: Propagation.NEVER });
-        await expect(runInTransaction(() => undefined, { datasource: "missing" })).rejects.toThrow(DatasourceSetupError);
+        await transactional(() => expect(manager.getCurrentTransaction()).toBeUndefined(), { propagation: Propagation.NEVER })();
+        await expect(transactional(() => undefined, { datasource: "missing" })()).rejects.toThrow(DatasourceSetupError);
     });
 
     it("decorator resolves config lazily, preserves this, arguments, method name and reflect metadata", async () => {

@@ -41,7 +41,14 @@ jobs:
         with:
           node-version: 20
       - run: npm install
+      - run: cmp README.md packages/core/README.md
       - run: npm run build
+      - name: Packed consumer singleton, version and mixed-loader checks
+        run: npm run test:packed
+      - name: Built-package runner matrix (Jest 29/30, Vitest 3/4/5, node:test)
+        run: |
+          npm ci --prefix scripts/test/runner-matrix
+          npm run test:runners
       - name: Built postgres.js CommonJS compatibility (Node 18, 20.10, 22 without require(ESM))
         run: bash scripts/test/postgres-node-compat.sh --all
       - run: npm test

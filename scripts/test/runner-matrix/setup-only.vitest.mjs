@@ -1,0 +1,1 @@
+import '@tranjs/testing/vitest';

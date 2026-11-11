@@ -1,6 +1,8 @@
 {
   "name": "@tranjs/postgres",
-  "version": "1.1.0",
+  "license": "LGPL-2.1-only",
+  "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/postgres" },
+  "version": "1.2.0",
   "description": "TranJS driver for postgres.js. (PostgreSQL)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,10 +17,28 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
-    "@tranjs/core": "^1.1.0",
+    "@tranjs/core": "^1.2.0",
     "postgres": "^3.4.0 || ^4.1.0"
   },
   "jest": {
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts"
+    ],
+    "coverageReporters": [
+      "json",
+      "json-summary",
+      "text",
+      "html"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 96.4,
+        "branches": 83.1,
+        "functions": 97.6,
+        "lines": 99.2
+      }
+    },
     "testEnvironment": "node",
     "testRegex": ".*\\.spec\\.ts$",
     "moduleFileExtensions": [
@@ -44,6 +64,7 @@
     "testTimeout": 30000
   },
   "devDependencies": {
+    "@tranjs/testing": "1.2.0",
     "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5"

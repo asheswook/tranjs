@@ -18,7 +18,7 @@ export function Transactional(arg: Propagation | TransactionConfig = Propagation
     ): TypedPropertyDescriptor<(...args: any[]) => Promise<T>> | void {
         const originalMethod = descriptor.value!;
 
-        descriptor.value = async function (...args: any[]): Promise<T> {
+        descriptor.value = function (...args: any[]): Promise<T> {
             return runInTransaction(() => originalMethod.apply(this, args), config);
         };
         Object.defineProperty(descriptor.value, "name", { value: originalMethod.name, configurable: true });

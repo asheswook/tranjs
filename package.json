@@ -5,12 +5,14 @@
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
     "build": "tsc -b",
-    "test": "lerna run test",
+    "test": "lerna run test && node scripts/test/core-testing-coverage.cjs",
     "test:postgres:v3": "node scripts/test/postgres-v3.cjs",
+    "test:runners": "node scripts/test/runner-matrix/run.cjs",
+    "test:packed": "node scripts/test/packed-consumer.cjs",
     "test:legacy": "bash scripts/legacy-smoke.sh",
-    "test:types": "tsc -p test/types/tsconfig.json --noEmit",
+    "test:types": "tsc -p test/types/tsconfig.json --noEmit && tsc -p test/types/tsconfig.testing-node10.json --noEmit && tsc -p test/types/tsconfig.testing-node16.json --noEmit && tsc -p test/types/tsconfig.testing-bundler.json --noEmit",
     "test:types:postgres:v3": "tsc -p test/types/tsconfig.postgres-v3.json --noEmit",
-    "publish": "lerna run test && npm run build && lerna publish"
+    "publish": "bash scripts/publish.sh"
   },
   "repository": {
     "type": "git",
@@ -39,6 +41,9 @@
   "devDependencies": {
     "@types/jest": "^29.5.14",
     "jest": "^29.7.0",
+    "istanbul-lib-coverage": "^3.2.2",
+    "istanbul-lib-report": "^3.0.1",
+    "istanbul-reports": "^3.2.0",
     "lerna": "^8.1.9",
     "postgres-v3": "npm:postgres@^3.4.9",
     "ts-jest": "^29.2.5",

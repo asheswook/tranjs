@@ -13,6 +13,9 @@ import {
 } from "@tranjs/core";
 import { PoolConnection } from "./context";
 import { UnsupportedIsolationLevelError } from "./error";
+import type { TestConnectionLease } from "@tranjs/core/internal/testing-bridge";
+import { createMysql2TestConnection } from "./test-connection";
+import type { TestConnection } from "./test-connection";
 
 const DRIVER_NAME = Symbol("mysql2");
 
@@ -41,26 +44,70 @@ export const ctx = (datasource?: string | symbol): PoolConnection => {
     if (!(manager instanceof MySQLTransactionManager) && !(manager instanceof MySQLConnectionPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
+    manager.assertCurrentTransactionOpen();
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
     return manager.wrapConnection(transaction);
 };
 
 abstract class MySQLManagerBase extends PlatformTransactionManager<PoolConnection> {
-    private readonly wrappers = new WeakMap<PoolConnection, PoolConnection>();
+    private readonly wrappers = new WeakMap<object, PoolConnection>();
+
+    protected createTestConnection(tx: PoolConnection, lease: TestConnectionLease): TestConnection {
+        return createMysql2TestConnection(tx, lease);
+    }
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
     public wrapConnection(connection: PoolConnection): PoolConnection {
-        let wrapper = this.wrappers.get(connection);
+        const gate = this.getConnectionGate(connection);
+        const assertOpen = () => this.assertConnectionOpen(gate);
+        assertOpen();
+        let wrapper = this.wrappers.get(gate);
         if (wrapper) return wrapper;
+        const nativeWrappers = new WeakMap<object, any>();
+        const wrapNative = (native: any): any => {
+            const cached = nativeWrappers.get(native);
+            if (cached) return cached;
+            const guarded = new Proxy(native, {
+                get: (target, property) => {
+                    const value = Reflect.get(target, property, target);
+                    // mysql2 publishes its callback connection on the promise API.
+                    // Preserve that API without letting it bypass this lease's gate.
+                    if ((property === "connection" || property === "statement") && value && typeof value === "object") return wrapNative(value);
+                    if (typeof value !== "function") return value;
+                    return (...args: any[]) => {
+                        assertOpen();
+                        if (property === "prepare" && typeof args[args.length - 1] === "function") {
+                            const callback = args[args.length - 1];
+                            args[args.length - 1] = (error: unknown, statement: any) =>
+                                callback(error, statement ? wrapNative(statement) : statement);
+                        }
+                        const result = value.apply(target, args);
+                        if (result === target) return guarded;
+                        if (property === "prepare" && result?.then) return result.then(wrapNative);
+                        return property === "promise" && result ? wrapNative(result) : result;
+                    };
+                },
+            });
+            nativeWrappers.set(native, guarded);
+            return guarded;
+        };
         wrapper = new Proxy(connection, {
             get: (target, property) => {
                 const value = Reflect.get(target, property, target);
+                if (property === "connection" && value && typeof value === "object") return wrapNative(value);
                 if (property !== "query" && property !== "execute") {
-                    return typeof value === "function" ? value.bind(target) : value;
+                    return typeof value === "function" ? (...args: any[]) => {
+                        assertOpen();
+                        const result = value.apply(target, args);
+                        if (property === "prepare" && result?.then) return result.then(wrapNative);
+                        if (property === "promise" && result) return wrapNative(result);
+                        return result === target ? wrapper : result;
+                    } : value;
                 }
                 return (...args: any[]) => {
+                    assertOpen();
                     const remaining = this.checkDeadline();
                     if (remaining === undefined) return value.apply(target, args);
                     const config = typeof args[0] === "string" ? { sql: args[0] } : args[0];
@@ -74,7 +121,7 @@ abstract class MySQLManagerBase extends PlatformTransactionManager<PoolConnectio
                 };
             },
         });
-        this.wrappers.set(connection, wrapper);
+        this.wrappers.set(gate, wrapper);
         return wrapper;
     }
 
@@ -87,14 +134,17 @@ abstract class MySQLManagerBase extends PlatformTransactionManager<PoolConnectio
     }
 
     protected async createSavepoint(tx: PoolConnection, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`SAVEPOINT ${name}`);
     }
 
     protected async rollbackToSavepoint(tx: PoolConnection, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`ROLLBACK TO SAVEPOINT ${name}`);
     }
 
     protected async releaseSavepoint(tx: PoolConnection, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`RELEASE SAVEPOINT ${name}`);
     }
 }

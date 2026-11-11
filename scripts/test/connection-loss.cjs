@@ -2,7 +2,7 @@
 // process, not get intercepted by Jest. Requires the public packages to be built.
 const assert = require("node:assert/strict");
 const { setTimeout: delay } = require("node:timers/promises");
-const { getTransactionManager, runInTransaction } = require("@tranjs/core");
+const { getTransactionManager, transactional } = require("@tranjs/core");
 
 function deferred() {
     let resolve;
@@ -58,7 +58,7 @@ async function main() {
     let transaction;
     // Attach rejection handling immediately; do not add test error listeners to
     // the transaction connection (that would hide the production bug).
-    const outcome = runInTransaction(async () => {
+    const outcome = transactional(async () => {
         transaction = manager.getCurrentTransaction();
         const cleanup = driver === "postgres" ? "release" : "end";
         const originalEnd = transaction[cleanup].bind(transaction);
@@ -101,7 +101,7 @@ async function main() {
                 catch (error) { queryRejected = true; throw error; }
             }
         }
-    }).then(() => ({ rejected: false }), error => ({ rejected: true, error }));
+    })().then(() => ({ rejected: false }), error => ({ rejected: true, error }));
     try {
         const id = await ready.promise;
         assert(Number.isInteger(id));

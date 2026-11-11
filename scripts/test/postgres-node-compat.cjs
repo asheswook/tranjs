@@ -17,7 +17,7 @@ async function main() {
         assert.equal(version.split(".")[0], process.env.POSTGRES_MAJOR,
             "Native imports must exercise the requested postgres.js major");
     }
-    const { runInTransaction } = require("../../packages/core/dist");
+    const { transactional } = require("../../packages/core/dist");
     const {
         ctx,
         usePostgresTransactionManager,
@@ -38,28 +38,28 @@ async function main() {
             else usePostgresConnectionPerTransaction(url);
 
             const committed = base + 1;
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 const [{ pid }] = await ctx()`SELECT pg_backend_pid() AS pid`;
                 assert(Number.isInteger(pid));
                 const rows = await ctx().unsafe(
                     `INSERT INTO ${table} VALUES ($1) RETURNING pg_backend_pid() AS pid`, [committed]);
                 assert.equal(rows[0].pid, pid, `${mode}: transaction changed connections`);
-            });
+            })();
             assert.equal((await sql.unsafe(`SELECT id FROM ${table} WHERE id = $1`, [committed])).length, 1);
 
             const failure = new Error(`${mode}: intentional rollback`);
-            await assert.rejects(runInTransaction(async () => {
+            await assert.rejects(transactional(async () => {
                 await ctx().unsafe(`INSERT INTO ${table} VALUES ($1)`, [base + 2]);
                 throw failure;
-            }), error => error === failure);
+            })(), error => error === failure);
             assert.equal((await sql.unsafe(`SELECT id FROM ${table} WHERE id = $1`, [base + 2])).length, 0);
 
             // Reuse after rollback must neither leak transaction state nor a reservation.
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 const rows = await ctx().unsafe(`SELECT id FROM ${table} WHERE id = $1`, [committed]);
                 assert.equal(rows[0].id, committed);
                 await ctx().unsafe(`INSERT INTO ${table} VALUES ($1)`, [base + 3]);
-            });
+            })();
         }
         assert.deepEqual((await sql.unsafe(`SELECT id FROM ${table} ORDER BY id`)).map(row => row.id), [1, 3, 4, 6]);
         console.log(`${process.version} ${process.execArgv.join(" ")} postgres.js ${version}: built CJS pool + per-tx commit/rollback passed`);

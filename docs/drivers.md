@@ -94,6 +94,16 @@ class Service {
 
 The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, then starts with `START TRANSACTION` or `START TRANSACTION READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout); connection-per-transaction isolation has the [policy below](#mysql).
 
+## Connection lifetime
+
+After a transaction or test ends, `ctx()` throws `TransactionClosedError` (exported by `@tranjs/core`) when called from work that outlived it. A connection you kept from `ctx()` throws the same error when you run a query through it, and so do methods you took from it or bound. The error is thrown before the query is passed to the driver. Before 1.2.0 these queries ran on a connection that had already gone back to the pool.
+
+A query already sent to the database can finish before cleanup. The test helper does not wait for calls you forgot to await. TranJS does not detect a missing `await`; use `@typescript-eslint/no-floating-promises` to catch it.
+
+Joined calls and `NESTED` scopes share their parent's connection from `ctx()`, which stays usable until that transaction ends. `REQUIRES_NEW` has its own connection from `ctx()` that stops working when the child transaction ends, even in tests where both use the same physical connection. The connection passed to a `withTestConnection` callback stops working when that callback or its enclosing test ends.
+
+The check covers the connection `ctx()` returns and its own query methods. It does not cover objects the driver hands out itself: the `this` of an event listener, properties such as `connection`, the internals of a query or command object, or the raw connection from `manager.getCurrentTransaction()`. Do not use any of these after the transaction ends. A query sent through them can run outside a transaction or land in whichever transaction holds that pooled connection next.
+
 ## Supported runtimes
 
 | Runtime | Setup |
@@ -109,7 +119,7 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 Enable [`nodejs_compat`](https://developers.cloudflare.com/workers/runtime-apis/nodejs/) in the Worker configuration and register once at module scope, not in the request handler. The examples assume a Hyperdrive binding named `HYPERDRIVE`.
 
-Connection-per-transaction managers do not share an application-side pool between transactions. Each physical transaction resolves its configuration, opens a connection, and calls `end()` automatically on completion, including failures. Use `runInTransaction` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
+Connection-per-transaction managers do not share an application-side pool between transactions. Each physical transaction resolves its configuration, opens a connection, and calls `end()` automatically on completion, including failures. Use `transactional` / `@Transactional` and the driver's `ctx()` as usual. Joined and `NESTED` scopes reuse the connection; `REQUIRES_NEW` opens another. On Node without Hyperdrive, prefer the pool managers to reuse connections.
 
 ### PostgreSQL
 

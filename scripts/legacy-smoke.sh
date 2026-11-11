@@ -109,42 +109,42 @@ async function smoke(name, driver, Manager, pool, acquire, isPostgres) {
   try {
     await pool.query(`CREATE TABLE ${table} (id INTEGER PRIMARY KEY)`);
 
-    assert.equal(await core.runInTransaction(async () => { await insert(1); return 'committed'; }), 'committed');
+    assert.equal(await core.transactional(async () => { await insert(1); return 'committed'; })(), 'committed');
     completion(1, 0);
     assert.equal(await count(), 1);
     console.log(`${name}: commit OK`);
 
     const applicationError = new Error(`${name}: rollback`);
-    await assert.rejects(core.runInTransaction(async () => {
+    await assert.rejects(core.transactional(async () => {
       await insert(2);
       throw applicationError;
-    }), error => error === applicationError);
+    })(), error => error === applicationError);
     completion(0, 1);
     assert.equal(await count(), 1);
     console.log(`${name}: rollback OK`);
 
     const beforeJoin = records.length;
-    await core.runInTransaction(async () => {
+    await core.transactional(async () => {
       const outer = await insert(3);
-      await core.runInTransaction(async () => {
+      await core.transactional(async () => {
         assert.strictEqual(await insert(4), outer);
         assert.equal(records.at(-1).releases, 0);
-      }, { propagation: core.Propagation.REQUIRED });
+      }, { propagation: core.Propagation.REQUIRED })();
       assert.strictEqual(driver.ctx(), outer);
       assert.equal(records.at(-1).commits, 0);
-    }, { propagation: core.Propagation.REQUIRED });
+    }, { propagation: core.Propagation.REQUIRED })();
     assert.equal(records.length, beforeJoin + 1);
     completion(1, 0);
     assert.equal(await count(), 3);
     console.log(`${name}: REQUIRED joins one physical transaction OK`);
 
     failCommit = true;
-    await assert.rejects(core.runInTransaction(() => insert(5)), error => error === commitError);
+    await assert.rejects(core.transactional(() => insert(5))(), error => error === commitError);
     completion(1, 0);
     assert.equal(await count(), 4);
     // Single-connection pools make leaked checkouts observable here. A second
     // transaction also checks that no failed scope remains in AsyncLocalStorage.
-    await core.runInTransaction(() => insert(6));
+    await core.transactional(() => insert(6))();
     completion(1, 0);
     assert.equal(await count(), 5);
     console.log(`${name}: commit failure releases once; pool remains healthy OK`);

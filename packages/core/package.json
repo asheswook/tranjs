@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/core",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Node.js transaction management framework inspired by Spring's `@Transactional` annotation.",
   "scripts": {
     "build": "tsc -b",
@@ -13,8 +13,6 @@
   "keywords": [
     "transaction",
     "transactional",
-    "typeorm",
-    "orm",
     "database",
     "query"
   ],
@@ -24,7 +22,13 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./dist/asyncLocal": "./dist/asyncLocal.js"
+    "./dist/asyncLocal": "./dist/asyncLocal.js",
+    "./internal/testing-bridge": "./dist/internal/testing-bridge.js"
+  },
+  "typesVersions": {
+    "*": {
+      "internal/testing-bridge": ["dist/internal/testing-bridge.d.ts"]
+    }
   },
   "files": [
     "dist",
@@ -48,6 +52,7 @@
     "collectCoverage": true,
     "coverageReporters": [
       "json",
+      "json-summary",
       "text",
       "html"
     ],
@@ -62,13 +67,36 @@
       "ts"
     ],
     "rootDir": "./",
+    "roots": ["<rootDir>/test", "<rootDir>/src"],
+    "moduleNameMapper": {
+      "^@tranjs/core$": "<rootDir>/src",
+      "^@tranjs/core/internal/testing-bridge$": "<rootDir>/src/internal/testing-bridge"
+    },
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
-      "^.+\\.(t|j)s$": "ts-jest"
+      "^.+\\.(t|j)s$": ["ts-jest", {
+        "tsconfig": {
+          "baseUrl": ".",
+          "paths": {
+            "@tranjs/core": ["src"],
+            "@tranjs/core/internal/testing-bridge": ["src/internal/testing-bridge"]
+          }
+        }
+      }]
     },
     "collectCoverageFrom": [
-      "**/*.(t|j)s"
+      "src/**/*.ts"
     ],
+    "coverageThreshold": {
+      "global": {
+        "statements": 94.3,
+        "branches": 89.7,
+        "functions": 85.9,
+        "lines": 94.2
+      },
+      "./src/manager.ts": {},
+      "./src/internal": {}
+    },
     "testEnvironment": "node",
     "coverageDirectory": "coverage"
   }

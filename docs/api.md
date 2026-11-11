@@ -16,6 +16,15 @@ Do not re-register per request. Registration replaces the shared manager, but ac
 
 For a [custom driver](self-implement-guide.md), use `useTransactionManager(manager, name?)`. Omitting the name selects the default datasource. `getTransactionManager(name?)` retrieves a registered manager.
 
+`clearTransactionManager(name?)` removes the default or named manager registration and does nothing if none is registered. Transactions already in progress are unchanged. Future manager lookups throw `DatasourceSetupError` until a manager is registered again. Use it for registration teardown, not while other work is using that datasource.
+
+```typescript
+import { clearTransactionManager } from "@tranjs/core";
+
+clearTransactionManager(); // Default datasource.
+clearTransactionManager("analytics"); // Named datasource; symbols are also accepted.
+```
+
 ## Transaction scopes
 
 `@Transactional()` wraps an async method. It accepts either a `Propagation` value or a `TransactionConfig`. It preserves the method's `this`, name, and `reflect-metadata` metadata when that optional package is present, including when used with decorators such as NestJS's.
@@ -40,18 +49,34 @@ class UserService {
 }
 ```
 
-`runInTransaction(fn, config?)` is the functional equivalent. The callback may return a value or a Promise; the result is always a Promise, including setup failures as rejections.
+`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` used when you call it. The function can be synchronous or asynchronous. The wrapper always returns a Promise: it waits for the result and rejects if the call fails. It copies the configuration when you create it and looks up the manager when you call it.
 
 ```typescript
-import { IsolationLevel, runInTransaction } from "@tranjs/core";
+function transactional<This, Args extends unknown[], R>(
+    fn: (this: This, ...args: Args) => R, config?: Propagation | TransactionConfig,
+): (this: This, ...args: Args) => Promise<Awaited<R>>;
+```
+
+```typescript
+import { IsolationLevel, transactional } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
-const createUser = (name: string) => runInTransaction(async () => {
+const createUser = transactional(async (name: string) => {
     const { rows } = await ctx().query(
         "INSERT INTO users(name) VALUES ($1) RETURNING *", [name],
     );
     return rows[0];
 }, { isolationLevel: IsolationLevel.SERIALIZABLE });
+
+const user = await createUser("Ada");
+```
+
+You can also pass a `Propagation` value directly:
+
+```typescript
+import { Propagation, transactional } from "@tranjs/core";
+
+const isolated = transactional(() => 42, Propagation.REQUIRES_NEW);
 ```
 
 ### TransactionConfig
@@ -78,7 +103,7 @@ const createUser = (name: string) => runInTransaction(async () => {
 | `NEVER` | Throw `IllegalTransactionStateException` | Run without a transaction |
 | `NESTED` | Create a savepoint on the same connection | Begin one, as with `REQUIRED` |
 
-Propagation is tracked per datasource. A scope on datasource B never joins a transaction on datasource A. Both native drivers support savepoints.
+Propagation is tracked per datasource. A scope on datasource B never joins a transaction on datasource A. All native drivers support savepoints.
 
 ## Rollback rules
 
@@ -137,6 +162,8 @@ class OrderService {
 
 Without an active transaction, `afterCommit` invokes the callback immediately and returns its result; `afterRollback` does nothing. Use `manager.setLogger(logger)` to replace the default console-backed logger.
 
+By the time `afterCommit` runs, the transaction is finished and its `ctx()` connection rejects queries. Start a new transaction inside the hook if it needs SQL. That transaction uses a second connection, because the hook runs before the first one goes back to the pool, so size the pool for it.
+
 ## Multiple datasources
 
 Register each manager under a string or symbol name, then use the same name in the transaction config, `ctx()`, and hooks.
@@ -159,6 +186,19 @@ class ReportService {
 }
 ```
 
+## Testing helpers
+
+| Entry point | Exports |
+|---|---|
+| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `currentProbe`, `withTestConnection`, `matchers`; types: `TestOptions`, `TestTransactionProbe`, `TestTransactionRecord`, `TestFailureSelector`; assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
+| `@tranjs/testing/jest` | Registers six matchers with Jest's `expect`; exports `matchers` and matcher types |
+| `@tranjs/testing/vitest` | Registers six matchers with Vitest's `expect`; exports `matchers` and matcher types |
+| `@tranjs/pg`, `@tranjs/mysql2`, `@tranjs/postgres` | Each exports its own `TestConnection` type for `withTestConnection` |
+
+See the testing guide for [setup](testing.md#setup) and [checking transaction boundaries](testing.md#checking-boundaries).
+
+`@tranjs/core` doesn't load any testing code.
+
 ## Errors
 
 All classes are exported by `@tranjs/core` except where a driver package is named.
@@ -168,6 +208,7 @@ All classes are exported by `@tranjs/core` except where a driver package is name
 | `TransactionSystemError` | Physical rollback fails | Message: `"Transaction rollback failed after application error"`. `cause` is the rollback error; `applicationError` is the original exception, timeout, or rollback-only decision. The original error is also logged. |
 | `UnexpectedRollbackError` | An owner or `NESTED` callback returns while rollback-only | See [rollback rules](#rollback-rules) for savepoint reset behaviour. |
 | `TransactionTimeoutError` | A transaction deadline expires or its injected query timer fires | Marks rollback-only; physical rollback can replace it with `TransactionSystemError`. |
+| `TransactionClosedError` | See [connection lifetime](drivers.md#connection-lifetime). | |
 | `InvalidIsolationLevelError` | A new physical transaction receives an invalid isolation level | Extends `TypeError`; validation happens before begin. |
 | `ConcurrentNestedTransactionError` | A sibling `NESTED` scope is still open in the same parent scope | Run siblings sequentially. |
 | `NestedTransactionNotSupportedError` | A manager without savepoint support receives `NESTED` inside a transaction | Extends `UnsupportedTransactionPropagationException`. |

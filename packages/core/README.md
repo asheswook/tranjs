@@ -38,7 +38,7 @@ class AccountService {
 
 ## Features
 
-- ✅ **Declarative transactions** with `@Transactional`, or `runInTransaction` for plain functions
+- ✅ **Declarative transactions** with `@Transactional`, or `transactional` for plain functions
 - 🔁 **All 7 Spring propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `NESTED` (savepoints)
 - 🛡️ **Spring rollback rules**: a failure in a joined method marks the whole transaction rollback-only
 - 🎛️ **Isolation level, read-only and timeout** per transaction
@@ -88,14 +88,18 @@ Register managers once, not inside a request handler. Re-registering per request
 ## Without decorators
 
 ```ts
-import { runInTransaction, IsolationLevel } from "@tranjs/core";
+import { transactional, IsolationLevel } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
-const order = await runInTransaction(async () => {
+const createOrder = transactional(async (userId: string) => {
     const { rows } = await ctx().query("INSERT INTO orders (user_id) VALUES ($1) RETURNING *", [userId]);
     return rows[0];
 }, { isolationLevel: IsolationLevel.SERIALIZABLE, timeout: 5000 });
+
+const order = await createOrder(userId);
 ```
+
+`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` used when you call it. The function can be synchronous or asynchronous. The wrapper always returns a Promise: it waits for the result and rejects if the call fails. It copies the configuration when you create it and looks up the manager when you call it.
 
 ## Rollback rules
 
@@ -113,6 +117,36 @@ async placeOrder(order: Order) {
     }
 }
 ```
+
+## Testing
+
+Use `@tranjs/testing` to check transactions and roll back test data. This example uses the PostgreSQL manager and `docs_users` table from the guide's setup.
+
+```ts
+import { expect, test } from "@jest/globals";
+import { transactional } from "@tranjs/core";
+import { ctx } from "@tranjs/pg";
+import { withTestTransaction } from "@tranjs/testing";
+import "@tranjs/testing/jest";
+
+const repository = {
+    async save(name: string) {
+        await ctx().query("INSERT INTO docs_users(name) VALUES ($1)", [name]);
+    },
+};
+function createUserService(repo: typeof repository) {
+    return { create: transactional(async (name: string) => repo.save(name)) };
+}
+
+test("create saves a user in a transaction", () => withTestTransaction(async tx => {
+    const trackedRepository = tx.track(repository);
+    const service = createUserService(trackedRepository);
+    await service.create("Ada");
+    expect(trackedRepository.save).toHaveCommitted();
+}));
+```
+
+See [connection lifetime](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#connection-lifetime) for connection rules and the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup and examples.
 
 ## Supported platforms
 
@@ -142,6 +176,7 @@ MySQL works the same way with `useMySQLConnectionPerTransaction`, but Hyperdrive
 
 - [API](https://github.com/asheswook/tranjs/blob/main/docs/api.md): propagation, options, hooks, multiple datasources, errors
 - [Drivers](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md): PostgreSQL, MySQL, Cloudflare Workers
+- [Testing](https://github.com/asheswook/tranjs/blob/main/docs/testing.md): mockTransactions, withTestTransaction, Jest, Vitest
 - [Writing your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
 

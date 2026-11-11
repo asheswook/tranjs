@@ -7,7 +7,7 @@ import {
     getTransactionManager,
     PlatformTransactionManager,
     Propagation,
-    runInTransaction,
+    transactional,
     TransactionContextMixingError,
     TransactionTimeoutError,
     UnexpectedRollbackError,
@@ -60,103 +60,179 @@ describe("PostgreSQL driver (real database)", () => {
     it("reports a COMMIT that PostgreSQL turned into ROLLBACK after a caught statement error", async () => {
         const afterCommit = jest.fn();
         const afterRollback = jest.fn();
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             registerAfterCommit(afterCommit);
             registerAfterRollback(afterRollback);
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             try { await ctx().query("SELECT 1 / 0"); } catch { /* caught by application code */ }
             return "service returned normally";
-        })).rejects.toBeInstanceOf(TransactionAbortedError);
+        })()).rejects.toBeInstanceOf(TransactionAbortedError);
         expect(await ids()).toEqual([]);
         expect(afterCommit).not.toHaveBeenCalled();
         expect(afterRollback).toHaveBeenCalledTimes(1);
     });
 
     it("commits normally after a NESTED step failed and rolled back to its savepoint", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
-            await runInTransaction(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED }).catch(() => {});
-        });
+            await transactional(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED })().catch(() => {});
+        })();
         expect(await ids()).toEqual([1]);
     });
 
+    it("rejects the owner COMMIT after a joined REQUIRED scope catches a SQL error", async () => {
+        const afterCommit = jest.fn();
+        const afterRollback = jest.fn();
+        const result = transactional(async () => {
+            registerAfterCommit(afterCommit);
+            registerAfterRollback(afterRollback);
+            const outer = ctx();
+            await outer.query(`INSERT INTO ${table} VALUES (1)`);
+            await expect(transactional(async () => {
+                expect(ctx()).toBe(outer);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                await expect(ctx().query("SELECT 1 / 0")).rejects.toMatchObject({ code: "22012" });
+                return "joined scope returned normally";
+            }, { propagation: Propagation.REQUIRED })()).resolves.toBe("joined scope returned normally");
+            expect(afterRollback).not.toHaveBeenCalled();
+            return "owner returned normally";
+        })();
+        await expect(result).rejects.toBeInstanceOf(TransactionAbortedError);
+        await expect(result).rejects.not.toBeInstanceOf(UnexpectedRollbackError);
+        expect(afterCommit).not.toHaveBeenCalled();
+        expect(afterRollback).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([]);
+        await transactional(async () => { await ctx().query(`INSERT INTO ${table} VALUES (3)`); })();
+        expect(await ids()).toEqual([3]);
+    });
+
+    it("rejects an aborted REQUIRES_NEW COMMIT without affecting the outer transaction", async () => {
+        const innerAfterCommit = jest.fn();
+        const innerAfterRollback = jest.fn();
+        const outerAfterCommit = jest.fn();
+        const outerAfterRollback = jest.fn();
+        await transactional(async () => {
+            registerAfterCommit(outerAfterCommit);
+            registerAfterRollback(outerAfterRollback);
+            const outer = ctx();
+            await outer.query(`INSERT INTO ${table} VALUES (1)`);
+            const inner = transactional(async () => {
+                expect(ctx()).not.toBe(outer);
+                registerAfterCommit(innerAfterCommit);
+                registerAfterRollback(innerAfterRollback);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                await expect(ctx().query("SELECT 1 / 0")).rejects.toMatchObject({ code: "22012" });
+            }, { propagation: Propagation.REQUIRES_NEW })();
+            await expect(inner).rejects.toBeInstanceOf(TransactionAbortedError);
+            await expect(inner).rejects.not.toBeInstanceOf(UnexpectedRollbackError);
+            expect(innerAfterCommit).not.toHaveBeenCalled();
+            expect(innerAfterRollback).toHaveBeenCalledTimes(1);
+            expect(ctx()).toBe(outer);
+            await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+        })();
+        expect(outerAfterCommit).toHaveBeenCalledTimes(1);
+        expect(outerAfterRollback).not.toHaveBeenCalled();
+        expect(await ids()).toEqual([1, 3]);
+        await transactional(async () => { await ctx().query(`INSERT INTO ${table} VALUES (4)`); })();
+        expect(await ids()).toEqual([1, 3, 4]);
+    });
+
     it("commits and releases its connection", async () => {
-        const result = await runInTransaction(async () => {
+        const result = await transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             return 42;
-        });
+        })();
         expect(result).toBe(42);
         expect(await ids()).toEqual([1]);
     });
 
     it("rolls back and preserves the application error", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([]);
     });
 
     it("REQUIRES_NEW uses a separate connection and survives outer rollback", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect(ctx()).not.toBe(outer);
                 expect((await ctx().query(`SELECT id FROM ${table}`)).rows).toEqual([]);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
-            }, { propagation: Propagation.REQUIRES_NEW });
+            }, { propagation: Propagation.REQUIRES_NEW })();
             expect(ctx()).toBe(outer);
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([2]);
     });
 
     it("NESTED rolls back to a savepoint without losing the outer transaction", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
-            await expect(runInTransaction(async () => {
+            await expect(transactional(async () => {
                 expect(ctx()).toBe(outer);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
                 throw failure;
-            }, { propagation: Propagation.NESTED })).rejects.toBe(failure);
-            await runInTransaction(async () => {
+            }, { propagation: Propagation.NESTED })()).rejects.toBe(failure);
+            await transactional(async () => {
                 await ctx().query(`INSERT INTO ${table} VALUES (3)`);
-            }, { propagation: Propagation.NESTED });
-        });
+            }, { propagation: Propagation.NESTED })();
+        })();
         expect(await ids()).toEqual([1, 3]);
     });
 
     it("applies the requested isolation level", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const result = await ctx().query("SHOW transaction_isolation");
             expect(result.rows[0].transaction_isolation).toBe("serializable");
-        }, { isolationLevel: IsolationLevel.SERIALIZABLE });
+        }, { isolationLevel: IsolationLevel.SERIALIZABLE })();
     });
 
     it("rejects writes in read-only transactions", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
-        }, { readOnly: true })).rejects.toMatchObject({ code: "25006" });
+        }, { readOnly: true })()).rejects.toMatchObject({ code: "25006" });
         expect(await ids()).toEqual([]);
     });
 
+    it("rejects a read-only COMMIT after the callback catches a rejected write", async () => {
+        const afterCommit = jest.fn();
+        const afterRollback = jest.fn();
+        const result = transactional(async () => {
+            registerAfterCommit(afterCommit);
+            registerAfterRollback(afterRollback);
+            expect((await ctx().query("SHOW transaction_read_only")).rows[0].transaction_read_only).toBe("on");
+            await expect(ctx().query(`INSERT INTO ${table} VALUES (1)`)).rejects.toMatchObject({ code: "25006" });
+            return "service returned normally";
+        }, { readOnly: true })();
+        await expect(result).rejects.toBeInstanceOf(TransactionAbortedError);
+        await expect(result).rejects.not.toBeInstanceOf(UnexpectedRollbackError);
+        expect(afterCommit).not.toHaveBeenCalled();
+        expect(afterRollback).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([]);
+        await transactional(async () => { await ctx().query(`INSERT INTO ${table} VALUES (2)`); })();
+        expect(await ids()).toEqual([2]);
+    });
+
     it.each(["string", "config", "callback"])("times out a slow %s query and rolls back", async format => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             if (format === "string") await ctx().query("SELECT pg_sleep($1)", [0.2]);
             else if (format === "config") await ctx().query({ text: "SELECT pg_sleep($1)", values: [0.2] });
             else await new Promise((resolve, reject) => {
                 ctx().query("SELECT pg_sleep($1)", [0.2], (error, result) => error ? reject(error) : resolve(result));
             });
-        }, { timeout: 50 })).rejects.toThrow(TransactionTimeoutError);
+        }, { timeout: 50 })()).rejects.toThrow(TransactionTimeoutError);
         expect(await ids()).toEqual([]);
         expect((await pool.query("SHOW statement_timeout")).rows[0].statement_timeout).toBe("0");
     });
 
     it("passes decreasing remaining time in query configs without mutating user options", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
             const query = jest.spyOn(connection, "query");
             const config = { text: "SELECT $1::integer AS value", values: [42], query_timeout: 5000 };
@@ -177,11 +253,11 @@ describe("PostgreSQL driver (real database)", () => {
                 const escape = ctx().escapeIdentifier;
                 expect(escape('a"b')).toBe('"a""b"');
             } finally { query.mockRestore(); }
-        }, { timeout: 1000 });
+        }, { timeout: 1000 })();
     });
 
     it("passes query options and callbacks through untouched without a deadline", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
             const query = jest.spyOn(connection, "query");
             const config = { text: "SELECT 42 AS value", query_timeout: 200 };
@@ -196,7 +272,7 @@ describe("PostgreSQL driver (real database)", () => {
                 });
                 expect(config.query_timeout).toBe(200);
             } finally { query.mockRestore(); }
-        });
+        })();
     });
 
     it.each(["promise", "callback", "config callback"])(
@@ -208,7 +284,7 @@ describe("PostgreSQL driver (real database)", () => {
                     clock.mockReturnValue(now);
                     const error = timer ? new Error("Query read timeout")
                         : Object.assign(new Error("connection reset"), { code: "ECONNRESET" });
-                    await expect(runInTransaction(async () => {
+                    await expect(transactional(async () => {
                         const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
                         const query = jest.spyOn(connection, "query").mockImplementationOnce(((...args: any[]) => {
                             if (!timer) clock.mockReturnValue(now + 1001);
@@ -229,7 +305,7 @@ describe("PostgreSQL driver (real database)", () => {
                                 expect(Date.now()).toBe(now); // Timer fired before the wall-clock deadline.
                             } else await expect(result).rejects.toBe(error);
                         } finally { query.mockRestore(); }
-                    }, { timeout: 1000 })).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
+                    }, { timeout: 1000 })()).rejects.toThrow(timer ? UnexpectedRollbackError : TransactionTimeoutError);
                 }
             } finally { clock.mockRestore(); }
         },
@@ -239,7 +315,7 @@ describe("PostgreSQL driver (real database)", () => {
         const streamPool = new Pool({ connectionString: url, max: 1, idleTimeoutMillis: 0 });
         usePostgreSQLTransactionManager(streamPool);
         try {
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
                 const query = jest.spyOn(connection, "query");
                 const timers = jest.spyOn(global, "setTimeout");
@@ -259,7 +335,7 @@ describe("PostgreSQL driver (real database)", () => {
                     submit.mockRestore();
                     stream.destroy();
                 }
-            }, { timeout: 10000 });
+            }, { timeout: 10000 })();
         } finally {
             await streamPool.end();
             usePostgreSQLTransactionManager(pool);
@@ -267,7 +343,7 @@ describe("PostgreSQL driver (real database)", () => {
     });
 
     it.each(["QueryStream", "Query"])("preserves %s SQL errors delivered by error events", async format => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const submittable = format === "QueryStream" ? new QueryStream("SELECT FROM") : new Query("SELECT FROM");
             await new Promise<void>((resolve, reject) => {
                 (submittable as EventEmitter).once("error", reject);
@@ -275,12 +351,12 @@ describe("PostgreSQL driver (real database)", () => {
                 if (submittable instanceof QueryStream) submittable.resume();
                 expect(ctx().query(submittable)).toBe(submittable);
             });
-        }, { timeout: 1000 })).rejects.toMatchObject({ code: "42601" });
+        }, { timeout: 1000 })()).rejects.toMatchObject({ code: "42601" });
     });
 
     it.each(["QueryStream", "Query", "custom"])(
         "synchronously rejects an expired %s before native query or submit dispatch", async format => {
-            await expect(runInTransaction(async () => {
+            await expect(transactional(async () => {
                 const connection = getTransactionManager().getCurrentTransaction() as NativeClient;
                 const submittable = format === "QueryStream" ? new QueryStream("SELECT 1")
                     : format === "Query" ? new Query("SELECT 1") : { submit: jest.fn() };
@@ -297,29 +373,29 @@ describe("PostgreSQL driver (real database)", () => {
                     submit.mockRestore();
                     if (submittable instanceof QueryStream) submittable.destroy();
                 }
-            }, { timeout: 1000 })).rejects.toThrow(UnexpectedRollbackError);
+            }, { timeout: 1000 })()).rejects.toThrow(UnexpectedRollbackError);
         },
     );
 
     it("cleans up a real deferred-constraint COMMIT failure exactly once", async () => {
         let release: jest.SpyInstance | undefined;
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             release = jest.spyOn(getTransactionManager().getCurrentTransaction() as NativeClient, "release");
             await ctx().query(`INSERT INTO ${table} VALUES (1), (1)`);
-        })).rejects.toMatchObject({ code: "23505" });
+        })()).rejects.toMatchObject({ code: "23505" });
         expect(release).toHaveBeenCalledTimes(1);
         release?.mockRestore();
         expect(await ids()).toEqual([]);
-        await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+        await transactional(async () => { await ctx().query("SELECT 1"); })();
     });
 
     it("rejects injected isolation SQL before acquiring a connection without affecting data", async () => {
         await pool.query(`INSERT INTO ${table} VALUES (1)`);
         const connect = jest.spyOn(pool, "connect");
         try {
-            await expect(runInTransaction(async () => {
+            await expect(transactional(async () => {
                 await ctx().query(`DELETE FROM ${table}`);
-            }, { isolationLevel: "READ COMMITTED; COMMIT; SELECT 1 --" as IsolationLevel }))
+            }, { isolationLevel: "READ COMMITTED; COMMIT; SELECT 1 --" as IsolationLevel })())
                 .rejects.toThrow(InvalidIsolationLevelError);
             // Direct driver use also validates before acquiring a connection.
             await expect((new PostgreSQLTransactionManager(pool) as any).beginTransaction({
@@ -351,10 +427,10 @@ describe("PostgreSQL driver (real database)", () => {
             const connect = jest.spyOn(pool, "connect").mockResolvedValueOnce(connection as never);
             const log = jest.spyOn(console, "error").mockImplementation(() => {});
             try {
-                const result = runInTransaction(async () => {
+                const result = transactional(async () => {
                     await ctx().query(`INSERT INTO ${table} VALUES (1)`);
                     if (path === "rollback") throw primaryError;
-                });
+                })();
                 if (path === "rollback") await expect(result).rejects.toMatchObject({
                     name: "TransactionSystemError", cause: rollbackError, applicationError: primaryError,
                 });
@@ -370,32 +446,32 @@ describe("PostgreSQL driver (real database)", () => {
                 release.mockRestore();
                 log.mockRestore();
             }
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect((await ctx().query("SELECT pg_backend_pid() AS pid")).rows[0].pid).not.toBe(oldPid);
                 expect((await ctx().query(`SELECT id FROM ${table}`)).rows).toEqual([]);
                 await ctx().query(`INSERT INTO ${table} VALUES (2)`);
-            });
+            })();
             expect(await ids()).toEqual([2]);
         },
     );
 
     it("rejects invalid timeout configuration before BEGIN", async () => {
-        await expect(runInTransaction(async () => {}, { timeout: NaN })).rejects.toThrow(RangeError);
-        await runInTransaction(async () => { await ctx().query("SELECT 1"); });
+        await expect(transactional(async () => {}, { timeout: NaN })()).rejects.toThrow(RangeError);
+        await transactional(async () => { await ctx().query("SELECT 1"); })();
     });
 
     it("keeps two named datasources independent", async () => {
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             const outer = ctx();
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
             expect(() => ctx(second)).toThrow("Transaction context not initialized");
-            await runInTransaction(async () => {
+            await transactional(async () => {
                 expect(ctx()).toBe(outer);
                 expect(ctx(second)).not.toBe(outer);
                 await ctx(second).query(`INSERT INTO ${table} VALUES (2)`);
-            }, { datasource: second });
+            }, { datasource: second })();
             throw failure;
-        })).rejects.toBe(failure);
+        })()).rejects.toBe(failure);
         expect(await ids()).toEqual([2]);
     });
 
@@ -405,9 +481,9 @@ describe("PostgreSQL driver (real database)", () => {
 
     it("rejects a different driver's manager", async () => {
         useTransactionManager(new OtherDriverManager());
-        await runInTransaction(async () => {
+        await transactional(async () => {
             expect(() => ctx()).toThrow(TransactionContextMixingError);
-        });
+        })();
     });
 
     it("exports the manager for direct registration", () => {
