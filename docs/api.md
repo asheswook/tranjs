@@ -162,7 +162,7 @@ class OrderService {
 
 Without an active transaction, `afterCommit` invokes the callback immediately and returns its result; `afterRollback` does nothing. Use `manager.setLogger(logger)` to replace the default console-backed logger.
 
-By the time `afterCommit` runs, the transaction is finished and its `ctx()` connection rejects queries. Start a new transaction inside the hook if it needs SQL.
+By the time `afterCommit` runs, the transaction is finished and its `ctx()` connection rejects queries. Start a new transaction inside the hook if it needs SQL. That transaction uses a second connection, because the hook runs before the first one goes back to the pool, so size the pool for it.
 
 ## Multiple datasources
 
