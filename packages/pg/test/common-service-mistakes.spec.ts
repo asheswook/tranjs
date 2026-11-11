@@ -70,7 +70,7 @@ class ImmediateEmailOrderService extends OrderService {
 
 class MissingAwaitOrderService extends OrderService {
     protected override async saveOrder(id: string) {
-        // Deliberate missing await. The test retains the Promise only to drain it safely.
+        // Deliberate missing await. The test keeps the Promise to check its result later.
         void this.orders.save(id);
     }
 }

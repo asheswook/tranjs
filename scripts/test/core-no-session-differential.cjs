@@ -25,8 +25,8 @@ try {
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.equal(expected.length, 88, 'Keep all 86 existing production probes and both closed-connection probes');
-    for (const name of ['non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
+    assert.equal(expected.length, 89, 'Keep all 87 production probes and both closed-connection probes');
+    for (const name of ['detached/new-transaction-after-commit', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
         'async-logger/hook-failure', 'async-logger/rollback-failure',
@@ -67,7 +67,7 @@ try {
         }
         assert.equal(actual[index].outside, null, `Leaked transaction: ${actual[index].name}`);
     }
-    assert.equal(unchanged, 86, 'All existing production scenarios must remain exactly identical');
+    assert.equal(unchanged, 87, 'All existing production scenarios and detached new transactions must remain exactly identical');
     process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, passed: true }) + '\n');
 } finally {
     rmSync(temporary, { recursive: true, force: true });

@@ -448,7 +448,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             });
         });
 
-        it("fails and drains pending queries at callback completion without scanning returned data", async () => {
+        it("fails on pending queries at callback completion and waits for them without scanning returned data", async () => {
             await test(async () => {
                 let settled = false;
                 let pending!: Promise<any>;
@@ -622,6 +622,94 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             }
         });
 
+        it("lets a detached production task start its own transaction after its parent commits", async () => {
+            const start = deferred();
+            let background!: Promise<unknown>;
+            let parent: any;
+            try {
+                await tx(async () => {
+                    parent = ambient();
+                    await insert(parent, 1);
+                    background = start.promise.then(() => tx(async () => {
+                        expect(ambient()).not.toBe(parent);
+                        await insert(ambient(), 2);
+                    }));
+                    void background.catch(() => {});
+                });
+                start.resolve();
+                await background;
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table} ORDER BY id`)).map(row => Number(row.id)))
+                    .toEqual([1, 2]);
+            } finally {
+                start.resolve();
+                await Promise.allSettled([background]);
+                await driver.outside(`DELETE FROM ${table}`);
+            }
+        });
+
+        it("lets a production interval started inside a transaction open a new transaction on each tick", async () => {
+            const start = deferred();
+            let timer: ReturnType<typeof setInterval> | undefined;
+            const ticks: Promise<unknown>[] = [];
+            let scheduled = 0;
+            let resolveScheduled!: () => void;
+            const scheduledAll = new Promise<void>(resolve => { resolveScheduled = resolve; });
+            try {
+                await tx(async () => {
+                    await insert(ambient(), 1);
+                    timer = setInterval(() => {
+                        const id = ++scheduled + 1;
+                        const tick = start.promise.then(() => tx(() => insert(ambient(), id)));
+                        void tick.catch(() => {});
+                        ticks.push(tick);
+                        if (scheduled === 3) {
+                            clearInterval(timer);
+                            resolveScheduled();
+                        }
+                    }, 5);
+                });
+                start.resolve();
+                await scheduledAll;
+                await Promise.all(ticks);
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table} ORDER BY id`)).map(row => Number(row.id)))
+                    .toEqual([1, 2, 3, 4]);
+            } finally {
+                clearInterval(timer);
+                start.resolve();
+                await Promise.allSettled(ticks);
+                await driver.outside(`DELETE FROM ${table}`);
+            }
+        });
+
+        it("lets a background task open a new transaction while its test is live but rejects it after test exit", async () => {
+            const start = deferred();
+            let background!: Promise<unknown>;
+            let repeat!: () => Promise<unknown>;
+            try {
+                await test(async () => {
+                    await tx(async () => {
+                        const parent = ambient();
+                        await insert(parent, 1);
+                        repeat = AsyncResource.bind(() => tx(async () => {
+                            expect(ambient()).not.toBe(parent);
+                            await insert(ambient(), 2);
+                        }));
+                        background = start.promise.then(repeat);
+                        void background.catch(() => {});
+                    });
+                    start.resolve();
+                    await background;
+                    expect(await fix(ids)).toEqual([1, 2]);
+                });
+                await assertClosed([repeat]);
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+                await test(() => fix(async db => { expect(await ids(db)).toEqual([]); }));
+            } finally {
+                start.resolve();
+                await Promise.allSettled([background]);
+            }
+        });
+
         it.each(["commit", "rollback"])("revokes production ctx and bound methods after %s, including detached helpers", async outcome => {
             let cached: any;
             let late!: (() => unknown)[];
@@ -659,8 +747,8 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             const rollback = driver.manager.rollbackTransaction.bind(driver.manager);
             const rollbackSpy = jest.spyOn(driver.manager, "rollbackTransaction").mockImplementation(async (...args: any[]) => {
                 try {
-                    // Rollback is invoked now, not after a registry drains queries
-                    // or callers. The native connection serializes the SQL.
+                    // Rollback starts without waiting for queries or callbacks.
+                    // The native connection serializes the SQL.
                     expect(nativeSettled).toBe(false);
                     expect(resumed).toBe(false);
                     expect(dispatches.mock.calls.some(call => /^INSERT INTO /i.test(String(call[1])) && /sleep/i.test(String(call[1])))).toBe(true);

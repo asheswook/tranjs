@@ -428,7 +428,7 @@ describe("withTestConnection", () => {
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
     });
 
-    it.each([false, true])("revokes and drains unawaited query work before recovery (query fails: %s)", async fails => {
+    it.each([false, true])("revokes the connection and waits for unawaited queries before recovery (query fails: %s)", async fails => {
         const query = deferred<number>();
         const returned = deferred();
         const queryError = new Error("late query");
@@ -459,7 +459,7 @@ describe("withTestConnection", () => {
         expect(manager.query).toHaveBeenCalledTimes(1);
     });
 
-    it("drains multiple floating queries and retains a callback failure including undefined", async () => {
+    it("waits for multiple unawaited queries and retains a callback failure including undefined", async () => {
         const first = deferred();
         const second = deferred();
         const returned = deferred();

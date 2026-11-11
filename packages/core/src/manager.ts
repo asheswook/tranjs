@@ -413,13 +413,10 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         callback: (tx: Tx) => R | Promise<R>,
         options?: TransactionOptions,
     ): Promise<R> {
-        const retained = AsyncLocal.Frame?.txs.get(this);
-        if (retained) {
-            if (!retained.active) throw new TransactionClosedError();
-            if (retained.gate) this.assertConnectionOpen(retained.gate);
-        }
         const current = currentTestSession();
         if (!current) return this.dispatchTransaction(propagation, callback, options);
+        const retained = AsyncLocal.Frame?.txs.get(this);
+        if (retained?.gate?.parent?.closed) throw new TransactionClosedError();
         if (testProvenance() === "withTestConnection") throw new Error("A transaction cannot start inside a withTestConnection callback");
         if (current.testConnectionActive) throw new Error("A transaction overlaps an active withTestConnection callback");
         const session = testSession(this);

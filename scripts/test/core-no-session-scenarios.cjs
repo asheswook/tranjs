@@ -273,6 +273,20 @@ async function main() {
     }
     await add('propagation/invalid', ({ run }) => run(() => 42, { propagation: 'INVALID' }));
     await add('datasource/missing', ({ run }) => run(() => 42, { datasource: 'missing' }));
+    await add('detached/new-transaction-after-commit', async ({ run, mark, manager }) => {
+        let resume;
+        const ready = new Promise(resolve => { resume = resolve; });
+        let detached;
+        await run(() => {
+            mark('parent');
+            detached = ready.then(() => run(() => {
+                mark('detached');
+                return manager.connection().query();
+            }));
+        });
+        resume();
+        return detached;
+    });
     for (const completion of ['commit', 'rollback']) {
         await add(`closed-connection/retained-after-${completion}`, async ({ run, manager }) => {
             const capture = callback => {
