@@ -12,7 +12,7 @@ npm install --save-dev @tranjs/testing
 
 Pass the objects returned by `tx.track(...)` to the service you are testing. These wrappers record calls; the original objects keep working as before, but calls through them are not recorded.
 
-This service saves a user and an audit entry in one transaction. The [setup below](#setup) registers PostgreSQL and creates its tables.
+This service saves a user and an audit entry in one transaction. [Setup](#setup) shows how to register PostgreSQL and create its tables.
 
 ```typescript
 // users.test.ts (Jest)
@@ -119,7 +119,7 @@ As a per-file alternative, import `"@tranjs/testing/jest"` or `"@tranjs/testing/
 Use `withTestConnection` for setup and checks inside `withTestTransaction`. Its `db` argument gives you a small set of SQL methods. Annotate it with the matching driver's `TestConnection` type; choose the matching registered datasource too, since the annotation only checks TypeScript types.
 
 ```typescript
-// seed.test.ts (Jest, using the setup above)
+// seed.test.ts (Jest)
 import { expect, test } from "@jest/globals";
 import type { TestConnection } from "@tranjs/pg";
 import { withTestConnection, withTestTransaction } from "@tranjs/testing";
@@ -345,7 +345,7 @@ Both helpers pass a probe as `tx` and return a Promise of the callback's result.
 | `tx.txOf(fn, index = 0)` | The record for a zero-based call, or `undefined` for a call outside a transaction; missing calls and untracked functions throw |
 | `tx.records` | A read-only snapshot of transactions started by your code, including failed begins |
 | `tx.datasource` | The selected datasource |
-| `tx.failNext(operation, selector?)` | Registers a failure as described [above](#simulating-failures) |
+| `tx.failNext(operation, selector?)` | Registers a failure; see [Simulating failures](#simulating-failures) |
 
 A record has `id`, `propagation`, requested `options`, `parent`, and `outcome` (`"active"`, `"committed"`, or `"rolled-back"`). Joined calls and `NESTED` share a record. `REQUIRES_NEW` has a separate record; `parent` identifies the transaction active when it started, so a transaction inside `NOT_SUPPORTED` has no parent.
 
