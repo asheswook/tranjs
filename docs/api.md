@@ -16,7 +16,7 @@ Do not re-register per request. Registration replaces the shared manager, but ac
 
 For a [custom driver](self-implement-guide.md), use `useTransactionManager(manager, name?)`. Omitting the name selects the default datasource. `getTransactionManager(name?)` retrieves a registered manager.
 
-`clearTransactionManager(name?)` is a public export from the main `@tranjs/core` entry point. It removes the default or named registration and does nothing if none is registered. Transactions already in progress are unchanged; future manager lookups throw `DatasourceSetupError` until a manager is registered again. Use it for registration teardown, not while other work is using that datasource.
+`clearTransactionManager(name?)` removes the default or named manager registration and does nothing if none is registered. Transactions already in progress are unchanged. Future manager lookups throw `DatasourceSetupError` until a manager is registered again. Use it for registration teardown, not while other work is using that datasource.
 
 ```typescript
 import { clearTransactionManager } from "@tranjs/core";
@@ -49,11 +49,11 @@ class UserService {
 }
 ```
 
-`transactional(fn, config?)` creates a callable transaction wrapper. Calling it forwards arguments unchanged and preserves dynamic, invocation-time `this`. Synchronous values and thenables are accepted; every propagation returns a Promise of the awaited result, including setup failures as rejections. Configuration is snapshotted at wrapper creation; manager lookup happens at invocation.
+`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` used when you call it. The function can be synchronous or asynchronous. The wrapper always returns a Promise: it waits for the result and rejects if the call fails. It copies the configuration when you create it and looks up the manager when you call it.
 
 ```typescript
 function transactional<This, Args extends unknown[], R>(
-    fn: (this: This, ...args: Args) => R, config?: TransactionConfig,
+    fn: (this: This, ...args: Args) => R, config?: Propagation | TransactionConfig,
 ): (this: This, ...args: Args) => Promise<Awaited<R>>;
 ```
 
@@ -69,6 +69,14 @@ const createUser = transactional(async (name: string) => {
 }, { isolationLevel: IsolationLevel.SERIALIZABLE });
 
 const user = await createUser("Ada");
+```
+
+You can also pass a `Propagation` value directly:
+
+```typescript
+import { Propagation, transactional } from "@tranjs/core";
+
+const isolated = transactional(() => 42, Propagation.REQUIRES_NEW);
 ```
 
 ### TransactionConfig
@@ -180,7 +188,7 @@ class ReportService {
 
 | Entry point | Exports |
 |---|---|
-| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `currentProbe`, `withTestConnection`, `matchers`; types: `TestOptions`, `TestTransactionProbe`, `TestTransactionInfo`, `TestFailureSelector`; assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
+| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `currentProbe`, `withTestConnection`, `matchers`; types: `TestOptions`, `TestTransactionProbe`, `TestTransactionRecord`, `TestFailureSelector`; assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
 | `@tranjs/testing/jest` | Registers six matchers with Jest's `expect`; exports `matchers` and matcher types |
 | `@tranjs/testing/vitest` | Registers six matchers with Vitest's `expect`; exports `matchers` and matcher types |
 | `@tranjs/pg`, `@tranjs/mysql2`, `@tranjs/postgres` | Each exports its own `TestConnection` type for `withTestConnection` |

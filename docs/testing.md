@@ -1,6 +1,6 @@
 # Testing
 
-`@tranjs/testing` lets you run a service against a real database and roll back its changes after the test. You can also check which calls share a transaction, or test transaction handling with mocked repositories and no database. It works with any runner; we test it with Jest, Vitest and node:test.
+`@tranjs/testing` lets you run a service against a real database and roll back its changes after the test. You can also check which calls share a transaction, or test transaction handling with mocked repositories and no database. It works with any runner. We test it with Jest, Vitest and node:test.
 
 Add the testing package to a project that already uses TranJS and a driver:
 
@@ -10,9 +10,9 @@ npm install --save-dev @tranjs/testing
 
 ## First test
 
-Pass the objects returned by `tx.track(...)` to the service you are testing. These wrappers record calls; the original objects keep working as before, but calls through them are not recorded.
+Pass the objects returned by `tx.track(...)` to the service you are testing. These wrappers record calls. The original objects keep working as before, but calls through them are not recorded.
 
-This service saves a user and an audit entry in one transaction. [Setup](#setup) shows how to register PostgreSQL and create its tables.
+This service saves a user and an audit entry in one transaction. It needs the PostgreSQL registration, tables and matcher registration in [Setup](#setup).
 
 ```typescript
 // users.test.ts (Jest)
@@ -39,7 +39,39 @@ test("saves the user and audit entry together", () => withTestTransaction(async 
 }));
 ```
 
-`transactional(fn)` creates a function; calling that function starts the transaction. Here, `service.create("Ada")` makes that call.
+The callback's `tx` is a probe: it records calls and transactions for your assertions.
+
+`transactional(fn)` creates a function. Calling that function starts the transaction. Here, `service.create("Ada")` makes that call.
+
+Classes with `@Transactional` methods work the same way. Pass the tracked repositories to the constructor. This example uses the same setup and tables, and needs TypeScript's `experimentalDecorators` option:
+
+```typescript
+// decorated.test.ts (Jest)
+import { expect, test } from "@jest/globals";
+import { Transactional } from "@tranjs/core";
+import { ctx } from "@tranjs/pg";
+import { withTestTransaction } from "@tranjs/testing";
+
+const usersRepo = { save: (name: string) => ctx().query("INSERT INTO docs_users VALUES ($1)", [name]) };
+const auditRepo = { record: (name: string) => ctx().query("INSERT INTO docs_audit VALUES ($1)", [name]) };
+class UserService {
+    constructor(private readonly users: typeof usersRepo, private readonly audit: typeof auditRepo) {}
+
+    @Transactional()
+    async create(name: string) {
+        await this.users.save(name);
+        await this.audit.record(name);
+    }
+}
+
+test("saves through a decorated service", () => withTestTransaction(async tx => {
+    const users = tx.track(usersRepo);
+    const audit = tx.track(auditRepo);
+    const service = new UserService(users, audit);
+    await service.create("Ada");
+    expect(users.save).toRunInSameTransactionAs(audit.record);
+}));
+```
 
 ## Setup
 
@@ -63,7 +95,7 @@ beforeAll(() => { usePostgreSQLTransactionManager(pool); });
 afterAll(() => pool.end());
 ```
 
-Each running test holds one connection until its callback and cleanup finish. When test files run in parallel, allow enough connections across all workers' pools and the database's connection limit. Keep data prepared outside the callback separate from data that another test may change.
+Each running test holds one connection until its callback and cleanup finish. When test files run in parallel, allow enough connections across all workers' pools and the database's connection limit. If you prepare data outside the callback, make sure other tests cannot change it.
 
 ### Register matchers
 
@@ -116,27 +148,35 @@ As a per-file alternative, import `"@tranjs/testing/jest"` or `"@tranjs/testing/
 
 ## Seeding and reading data
 
-Use `withTestConnection` for setup and checks inside `withTestTransaction`. Its `db` argument gives you a small set of SQL methods. Annotate it with the matching driver's `TestConnection` type; choose the matching registered datasource too, since the annotation only checks TypeScript types.
+Use `withTestConnection` for setup and checks inside `withTestTransaction`. Its `db` argument gives you a small set of SQL methods. Annotate it with the matching driver's `TestConnection` type. The type does not select a driver: register that driver's manager for the datasource you use.
 
 ```typescript
 // seed.test.ts (Jest)
 import { expect, test } from "@jest/globals";
 import type { TestConnection } from "@tranjs/pg";
 import { withTestConnection, withTestTransaction } from "@tranjs/testing";
-import type { TestOptions } from "@tranjs/testing";
-
-const withPgTestConnection = <R>(fn: (db: TestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
 
 test("reads the data prepared for this test", () => withTestTransaction(async () => {
-    await withPgTestConnection(async db => {
+    await withTestConnection(async (db: TestConnection) => {
         await db.query("INSERT INTO docs_users VALUES ($1)", ["Ada"]);
     });
-    const names = await withPgTestConnection(async db => {
+    const names = await withTestConnection(async (db: TestConnection) => {
         const { rows } = await db.query("SELECT name FROM docs_users ORDER BY name");
         return rows.map(row => row.name);
     });
     expect(names).toEqual(["Ada"]);
 }));
+```
+
+Tip: if you use this type often, an optional helper saves repeating the annotation:
+
+```typescript
+// Optional helper (partial example)
+import type { TestConnection } from "@tranjs/pg";
+import { withTestConnection } from "@tranjs/testing";
+import type { TestOptions } from "@tranjs/testing";
+
+const withPgTestConnection = <R>(fn: (db: TestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
 ```
 
 The other drivers export their own `TestConnection`. For example, these callbacks insert the same data:
@@ -155,7 +195,7 @@ export const seedPostgres = (db: PostgresConnection) => db`INSERT INTO docs_user
 | mysql2 | `query(text, values?)`, `execute(text, values?)` | A Promise of the driver's `[rows, fields]` pair |
 | postgres.js | Tagged SQL and `unsafe(text, values?)` | A plain Promise of the driver's row list |
 
-These methods take SQL text and parameters, rather than query config objects or callback arguments. Connection controls, streams, cursors and driver query modifiers are outside this interface.
+These methods take SQL text and parameters, not query config objects or callback arguments. Connection controls, streams, cursors and driver query modifiers are outside this interface.
 
 In JavaScript, use JSDoc for the callback type:
 
@@ -168,7 +208,7 @@ export const seedAda = () => withTestConnection(
 );
 ```
 
-Call services outside `withTestConnection`, and use `db` only inside its callback: the connection and its methods stop working when the callback finishes. Each call uses its own savepoint, a database checkpoint that lets a failed statement roll back without breaking the rest of the test. Await every query; a query left running makes the call fail after it drains that query.
+Call services outside `withTestConnection`, and use `db` only inside its callback: the connection and its methods stop working when the callback finishes. Each call uses its own savepoint, a database checkpoint that lets a failed statement roll back without breaking the rest of the test. Await every query. If a query is still running when the callback returns, the helper waits for it to finish, then fails the call.
 
 ## Checking boundaries
 
@@ -183,7 +223,9 @@ Call services outside `withTestConnection`, and use `db` only inside its callbac
 | `expect(a).toHaveCommitted()` | `assertCommitted(a)` | The call's transaction finished successfully |
 | `expect(a).toHaveRolledBack()` | `assertRolledBack(a)` | The call's transaction rolled back |
 
-Use functions from the same `tx`, with exactly one recorded call each, and await the transaction before checking its outcome. For repeated calls, compare records from `tx.txOf(fn, index)` instead. `.not` reverses a valid check; it still throws for untracked functions, missing calls or multiple calls. Two calls outside a transaction count as neither the same nor separate transactions.
+Compare functions tracked by the same `tx`, with exactly one recorded call each. For repeated calls, compare records from `tx.txOf(fn, index)` instead. Await the transaction before checking whether it committed or rolled back.
+
+`.not` reverses a valid check. It still throws for untracked functions, missing calls or multiple calls. Two calls outside a transaction count as neither the same nor separate transactions.
 
 A failure might include:
 
@@ -192,11 +234,11 @@ Received: save → tx#1 (REQUIRED, committed), event 1
 Other: record → tx#2 (REQUIRED, committed), event 3
 ```
 
-`tx#1` identifies a transaction in this test, not a database connection. `event N` gives its place in the test's recorded sequence of calls and transaction completions; gaps between displayed calls are normal. Here the functions ran in different transactions. If the message says "0 calls recorded through the wrapper returned by track()", check that the service received the tracked objects.
+`tx#1` identifies a transaction in this test, not a database connection. `event N` gives its place in the test's recorded sequence of calls and transaction completions. Gaps between displayed calls are normal. Here the functions ran in different transactions. If the message says "0 calls recorded through the wrapper returned by track()", check that the service received the tracked objects.
 
-The portable assertions throw ordinary assertion errors and work without matcher registration.
+The `assert*` functions in the table throw ordinary assertion errors and work without matcher registration.
 
-Tracking follows calls through the returned objects, not calls through the originals or internal `this.otherMethod()` calls. It preserves method receivers, including private-field access. The checks describe call entry, completion and hooks; use SQL assertions to check what your service wrote.
+Tracking follows calls through the returned objects, not calls through the originals or internal `this.otherMethod()` calls. Methods still use the original object as `this`, so private fields keep working. These checks tell you which transaction a call ran in and how it finished. To check what was written, query the table.
 
 To check service rollback, catch its failure inside the callback and read back its rows with `withTestConnection` before the callback ends. That distinguishes the service's rollback from the test's final cleanup.
 
@@ -226,7 +268,7 @@ test("publishes after saving", () => mockTransactions(async tx => {
 
 `toRunAfterCommitOf` checks that the call came through that transaction's hook. Calling a function later, outside a transaction, is a different case.
 
-For node:test, call the portable assertions directly:
+For node:test, call the `assert*` functions directly:
 
 ```typescript
 // boundaries.test.ts (node:test)
@@ -270,11 +312,18 @@ test("skips publication when commit fails", () => mockTransactions(async tx => {
 }));
 ```
 
-Use `containing` to select a transaction that called a tracked function, or `where` to select by its record. Choose one of these filters. `times` sets how many matching operations fail and defaults to one; `error` is the value to throw. With no selector, the next matching operation fails. For begin failures, use `where` or no filter, since the function has not run yet. This simulates transaction operations, rather than statement errors or network failures.
+| Selector option | Meaning |
+|---|---|
+| `containing` | Selects a transaction that called this tracked function |
+| `where` | Selects a transaction by its record |
+| `times` | Number of matching operations to fail; defaults to one |
+| `error` | The value to throw |
+
+Choose either `containing` or `where`, not both. With no selector, the next matching operation fails. For begin failures, use `where` or no filter, since the function has not run yet. This simulates transaction operations, not statement errors or network failures.
 
 ## How tests differ from production
 
-`withTestTransaction` opens a test transaction and rolls it back when the callback finishes. A transaction your code starts uses a savepoint inside it. In this mode, "committed" means that transaction finished successfully and its changes are visible to later calls in the test; the final rollback still removes them.
+`withTestTransaction` opens a test transaction and rolls it back when the callback finishes. A transaction your code starts uses a savepoint inside it. In this mode, "committed" means that transaction finished successfully and its changes are visible to later calls in the test. The final rollback still removes them.
 
 | Behavior | Production | `withTestTransaction` |
 |---|---|---|
@@ -289,17 +338,19 @@ Use `containing` to select a transaction that called a tracked function, or `whe
 | Deferred PostgreSQL constraints | Checked according to their modes, including at COMMIT | Checked when a service or `NESTED` savepoint finishes, with the prior modes restored |
 | Caught PostgreSQL statement error | An aborted COMMIT rejects with `TransactionAbortedError` in pg and postgres.js | Savepoint completion rejects with the same class and retains the native error as `cause` |
 | Injected commit/rollback failures | Real failures can leave the result uncertain | Savepoint recovery rolls back the affected writes; it does not reproduce an uncertain COMMIT |
-| A transaction still running when the callback returns | The caller must await it | The helper drains it and fails the test for the forgotten `await` |
+| A transaction still running when the callback returns | The caller must await it | The helper waits for it to finish, then fails the test for the forgotten `await` |
 | Parallel transactions | Can use independent connections | Separate tests can run in parallel; transaction branches inside one callback must run sequentially |
 
-Await all work, including timers, inside the callback. Put rollback-sensitive setup and checks there too; runner hooks run outside it. Run `withTestConnection` calls and service calls one at a time, and use separate top-level callbacks rather than nested `withTestTransaction` calls.
+Await all work, including timers, inside the callback. Put rollback-sensitive setup and checks there too. Runner hooks run outside it. Run `withTestConnection` calls and service calls one at a time. Use separate top-level callbacks instead of nested `withTestTransaction` calls.
+
+`withTestTransaction` waits for unfinished work before failing. After one second, it warns once that it is still waiting. If the work never finishes, the helper keeps waiting and your runner's own timeout still applies.
 
 ### What is not rolled back
 
 - SQL on raw connections, other datasources, or independent work started with `NOT_SUPPORTED`.
 - Explicit transaction-control SQL and DDL that commits implicitly, such as MySQL schema changes. Apply migrations separately.
 - Sequence increments, emails, HTTP calls, files, caches and mock state. Mock external effects or clean them up separately.
-- Detached work that runs after the callback, including unawaited timers or runner callbacks. A missing `await` is detectable only while the helper can still track the work.
+- Detached work that runs after the callback, including unawaited timers or runner callbacks. The helper cannot catch a missing `await` for work that starts after it has finished.
 
 ## Tests that need real commits
 
@@ -347,10 +398,14 @@ Both helpers pass a probe as `tx` and return a Promise of the callback's result.
 | `tx.datasource` | The selected datasource |
 | `tx.failNext(operation, selector?)` | Registers a failure; see [Simulating failures](#simulating-failures) |
 
-A record has `id`, `propagation`, requested `options`, `parent`, and `outcome` (`"active"`, `"committed"`, or `"rolled-back"`). Joined calls and `NESTED` share a record. `REQUIRES_NEW` has a separate record; `parent` identifies the transaction active when it started, so a transaction inside `NOT_SUPPORTED` has no parent.
+A `TestTransactionRecord` has `id`, `propagation`, requested `options`, `parent`, and `outcome` (`"active"`, `"committed"`, or `"rolled-back"`). Joined calls and `NESTED` share a record. `REQUIRES_NEW` has a separate record. Its `parent` is the transaction it started inside. `NOT_SUPPORTED` suspends the current transaction, so a transaction started there has no parent.
 
-All three helpers accept `TestOptions`: `{ datasource?: string | symbol }`. `withTestTransaction` and `mockTransactions` select the default registration when it is omitted; `withTestConnection` uses the current test's datasource. Put transaction policy such as `timeout` on the service's `transactional` or `@Transactional` call.
+All three helpers accept `TestOptions`: `{ datasource?: string | symbol }`. `withTestTransaction` and `mockTransactions` select the default registration when it is omitted. `withTestConnection` uses the current test's datasource. Put transaction policy such as `timeout` on the service's `transactional` or `@Transactional` call.
 
 ### Errors
 
-Pending work produces an `AggregateError` with the unfinished-work message and any callback or operation errors in `errors`. Cleanup and recovery failures preserve earlier errors through `TransactionSystemError.cause` and `.applicationError`; see the [error reference](api.md#errors). If recovery fails, finish ordinary resource cleanup in `finally` and let the test fail; if final database cleanup fails, reset the test database before reusing it.
+If your callback returns while a transaction is still running, `withTestTransaction` waits for it to finish and fails with an `AggregateError`. Check its `errors` array for errors from your code. An unawaited call that rejects before the callback returns still produces an unhandled rejection.
+
+If cleanup also fails, `TransactionSystemError.cause` holds the cleanup error and `.applicationError` keeps the earlier error. See the [error reference](api.md#errors).
+
+Finish ordinary resource cleanup in `finally` and let the test fail. If the final database cleanup fails, reset the test database before reusing it.
