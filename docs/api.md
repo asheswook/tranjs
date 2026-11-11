@@ -180,7 +180,7 @@ class ReportService {
 
 | Entry point | Exports |
 |---|---|
-| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `transactions`, `fixture`, `FixtureOptions` (type), `matchers`, and portable assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
+| `@tranjs/testing` | `withTestTransaction`, `mockTransactions`, `currentProbe`, `withTestConnection`, `TestOptions` (type), `matchers`, and portable assertions: `assertSameTransaction`, `assertSeparateTransaction`, `assertOutsideTransaction`, `assertAfterCommitOf`, `assertCommitted`, `assertRolledBack` |
 | `@tranjs/testing/jest` | Side-effect registration of six matchers through `expect` from `@jest/globals`, plus `matchers` and types (Jest 29/30; supports `injectGlobals: false`) |
 | `@tranjs/testing/vitest` | ESM side-effect registration of six matchers through Vitest's `expect`, plus `matchers` and types (Vitest 3/4/5) |
 
@@ -188,23 +188,23 @@ class ReportService {
 
 - `withTestTransaction(fn, options?)`: rolls back awaited transactional work through the selected manager, including services, `transactional` and `@Transactional`. It does not contain raw connections, other datasources, detached work, external effects, or fixtures outside the callback. Owners use savepoints; "committed" is logical completion, not physical durability.
 - `mockTransactions(fn, options?)`: runs `fn` with a fake manager and no database, to check transaction boundaries and failure handling.
-- `transactions()`: returns the current live session's probe (also passed to `fn`); throws outside a live session. It exposes `track`, `txOf`, `fail`, `transactions`, and `datasource`.
+- `currentProbe()`: returns the current live session's probe (also passed to `fn`); throws outside a live session. It exposes `track`, `txOf`, `failNext`, `records`, and `datasource`.
 - `options` is `{ datasource?: string | symbol }`.
 
 ```typescript
-function fixture<C, R>(
-    fn: (ctx: C) => R, options?: FixtureOptions,
+function withTestConnection<C, R>(
+    fn: (db: C) => R, options?: TestOptions,
 ): Promise<Awaited<R>>;
-// FixtureOptions: { datasource?: string | symbol }
+// TestOptions: { datasource?: string | symbol }
 ```
 
-`fixture` requires a live integration `withTestTransaction` session, not `mockTransactions`. It supplies a restricted connection without changing what driver `ctx()` or `getCurrentTransaction()` returns. Use type-only `PgFixtureConnection`, `Mysql2FixtureConnection`, or `PostgresFixtureConnection` from the matching driver. Annotations do not validate datasource wiring. Do not pass this connection into application code.
+`withTestConnection` requires a live integration `withTestTransaction` session, not `mockTransactions`. It supplies a restricted connection without changing what driver `ctx()` or `getCurrentTransaction()` returns. Use type-only `import("@tranjs/pg").TestConnection`, `import("@tranjs/mysql2").TestConnection`, or `import("@tranjs/postgres").TestConnection` from the matching driver. Annotations do not validate datasource wiring. Do not pass this connection into application code.
 
 Each fixture call uses one savepoint. A fixture does not create a service transaction or add a transaction to the probe. TranJS timeouts do not apply; database timeouts still do. You cannot start transactions through TranJS inside a fixture callback, on any datasource; all seven propagation modes are rejected before their callbacks run. Do not nest fixtures or call them from transactional callbacks or commit/rollback hooks, including `afterCommit` callbacks that run immediately without a transaction. Run fixtures and transactional work sequentially: overlapping calls are rejected as soon as they start, even before the first await. Await the callback's returned value and every query. The connection and its methods stop working when the callback finishes. Queries still pending at that point fail the fixture call, which waits for them to finish before releasing the savepoint. When the session ends, it rejects new fixture calls, waits for existing calls, and preserves unfinished-work and cleanup errors.
 
 SQL errors roll back to and release the fixture savepoint while preserving native errors. If recovery fails, the session cannot continue safely: both errors are preserved, and session cleanup fails even if you catch the fixture error. This recovery differs from production. Keep the connection and its methods inside the callback. Returned data is not checked for nested connection references, and not every missing await is detectable. Fixtures are not a SQL sandbox: explicit COMMIT, DDL, sequences, and external effects can escape rollback.
 
-**The hidden transaction is not ambient.** Application and assertion SQL needs `transactional` or `@Transactional`; test-only DML can use `fixture`. Fixtures do not make the hidden transaction available through driver `ctx()`. Schema migrations run separately. For real commit semantics, use no session, seed/work via `transactional`, verify through a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests use independent physical transactions outside sessions. Full policies, examples and limitations: [testing guide](testing.md).
+**The hidden transaction is not ambient.** Application and assertion SQL needs `transactional` or `@Transactional`; test-only DML can use `withTestConnection`. Fixtures do not make the hidden transaction available through driver `ctx()`. Schema migrations run separately. For real commit semantics, use no session, seed/work via `transactional`, verify through a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests use independent physical transactions outside sessions. Full policies, examples and limitations: [testing guide](testing.md).
 
 The core main entry loads no `@tranjs/testing`, probe, fake manager, matcher or runner code. Testing AsyncLocalStorage is allocated only when a session starts; the internal bridge is inert without a session.
 

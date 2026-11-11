@@ -124,16 +124,16 @@ Install `@tranjs/testing@1.2.0` separately with its required, exact peer `@tranj
 
 `withTestTransaction` rolls back awaited work routed through the selected manager. Owners use savepoints; "committed" means logical completion, not durable physical commit. Raw connections, other datasources, detached work, and external effects can escape rollback.
 
-**The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. Use `fixture` for test-only DML through a restricted connection. Apply schema migrations separately.
+**The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. Use `withTestConnection` for test-only DML through a restricted connection. Apply schema migrations separately.
 
 ```ts
-import { fixture, withTestTransaction } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
+import { withTestConnection, withTestTransaction } from "@tranjs/testing";
+import type { TestConnection } from "@tranjs/pg";
 import { transactional } from "@tranjs/core";
 
 test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
-  await fixture(async (ctx: PgFixtureConnection) => {
-    await ctx.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
+  await withTestConnection(async (db: TestConnection) => {
+    await db.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
   });
   await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
   expect(await transactional(countOrders)()).toBe(0);

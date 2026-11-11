@@ -6,16 +6,16 @@
 |---|---|
 | Real SQL, service atomicity, rollback isolation | [`withTestTransaction`](#real-database-isolation) |
 | Propagation, hooks, failure policy without SQL | [`mockTransactions`](#unit-tests-without-sql) |
-| Test-only DML in an integration session | [`fixture`](#restricted-fixtures) |
+| Test-only DML in an integration session | [`withTestConnection`](#restricted-fixtures) |
 | Assertions in Jest 29/30 or Vitest 3/4/5 | [Side-effect runner imports or manual registration](#six-matchers-and-portable-assertions) |
 | Assertions in node:test, Mocha, or another runner | [Portable `assert*` functions](#six-matchers-and-portable-assertions) from `@tranjs/testing` |
 | Durability, locks, races, independent transaction visibility | [Real commits and separate cleanup](#differences-from-production), without a test session |
 
-`withTestTransaction` rolls back **awaited work routed through the selected manager**, via services, `transactional`, `@Transactional`, or `fixture`. It does not contain raw connections, other datasources, detached work, external effects, or fixtures outside its callback.
+`withTestTransaction` rolls back **awaited work routed through the selected manager**, via services, `transactional`, `@Transactional`, or `withTestConnection`. It does not contain raw connections, other datasources, detached work, external effects, or fixtures outside its callback.
 
 ## Key ideas
 
-- **The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. `fixture` supplies a restricted connection for test-only DML without changing ambient context. Keeping the hidden transaction non-ambient lets services own savepoints so atomicity remains observable.
+- **The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. `withTestConnection` supplies a restricted connection for test-only DML without changing ambient context. Keeping the hidden transaction non-ambient lets services own savepoints so atomicity remains observable.
 - Await everything inside the callback, including timer work. Runner hooks and fixtures outside it need separate cleanup.
 - "Committed" means the logical owner completed: its savepoint was released, not a durable physical commit. Cleanup attempts a physical rollback even when the test fails.
 - Track dependencies inside the boundary, not the decorated service method: tracking observes function entry, before an outer decorator opens its transaction.
@@ -27,7 +27,7 @@ Install `@tranjs/testing@1.2.0` separately with its required exact peer `@tranjs
 
 The core main entry loads no `@tranjs/testing`, probe, fake manager, matcher or runner code. No testing AsyncLocalStorage is allocated until a session starts; the internal bridge is inert without a session. Drivers have no runtime dependency on `@tranjs/testing`.
 
-The callback receives the probe as `tx`. `transactions()` returns that same probe and throws outside a live session; `transactions().transactions` is its record snapshot.
+The callback receives the probe as `tx`. `currentProbe()` returns that same probe and throws outside a live session; `currentProbe().records` is its record snapshot.
 
 ### Portable callback: real PostgreSQL with node:test
 
@@ -39,8 +39,8 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { Pool } from "pg";
 import { transactional } from "@tranjs/core";
-import { fixture, withTestTransaction } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
+import { withTestConnection, withTestTransaction } from "@tranjs/testing";
+import type { TestConnection as PgTestConnection } from "@tranjs/pg";
 import { ctx, usePostgreSQLTransactionManager } from "@tranjs/pg";
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -51,8 +51,8 @@ after(() => pool.end());
 test("inserts without keeping the row", async () => {
     const batch = randomUUID();
     await withTestTransaction(async () => {
-        await fixture(async (ctx: PgFixtureConnection) => {
-            await ctx.query("INSERT INTO test_entries(batch) VALUES ($1)", [batch]);
+        await withTestConnection(async (db: PgTestConnection) => {
+            await db.query("INSERT INTO test_entries(batch) VALUES ($1)", [batch]);
         });
         await transactional(async () => {
             const { rows } = await ctx().query(
@@ -77,7 +77,7 @@ Both `withTestTransaction(fn, options?)` and `mockTransactions(fn, options?)` re
 ```typescript
 import { expect, test } from "@jest/globals";
 import { transactional } from "@tranjs/core";
-import { transactions, withTestTransaction } from "@tranjs/testing";
+import { currentProbe, withTestTransaction } from "@tranjs/testing";
 import "@tranjs/testing/jest";
 import { ctx } from "@tranjs/pg";
 
@@ -86,7 +86,7 @@ const it = (name: string, fn: Parameters<typeof withTestTransaction>[0]) =>
 
 // Register a real manager and create the users table in suite setup.
 it("saves in a logical transaction", async () => {
-    const save = transactions().track(async () => {
+    const save = currentProbe().track(async () => {
         await ctx().query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
     });
     await transactional(save)();
@@ -103,58 +103,58 @@ Use the same helper with `expect` and `test` from `vitest`, and the ESM side-eff
 ## Restricted fixtures
 
 ```typescript
-function fixture<C, R>(fn: (ctx: C) => R, options?: FixtureOptions): Promise<Awaited<R>>;
-// FixtureOptions: { datasource?: string | symbol }
+function withTestConnection<C, R>(fn: (db: C) => R, options?: TestOptions): Promise<Awaited<R>>;
+// TestOptions: { datasource?: string | symbol }
 ```
 
-Use `fixture` only inside a live integration `withTestTransaction` session. It rejects calls outside a session, in a closed session, or in `mockTransactions`. Custom managers must support fixtures. It does not change what imported driver `ctx()` or `getCurrentTransaction()` returns.
+Use `withTestConnection` only inside a live integration `withTestTransaction` session. It rejects calls outside a session, in a closed session, or in `mockTransactions`. Custom managers must support fixtures. It does not change what imported driver `ctx()` or `getCurrentTransaction()` returns.
 
-Annotate callbacks with the matching restricted **type-only** driver export, not a native connection type. **Annotations do not validate datasource wiring.** Select the datasource with `FixtureOptions` and register its matching driver.
+Annotate callbacks with the matching restricted **type-only** driver export, not a native connection type. **Annotations do not validate datasource wiring.** Select the datasource with `TestOptions` and register its matching driver.
 
 ### pg
 
 ```typescript
-import { fixture } from "@tranjs/testing";
-import type { FixtureOptions } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
+import { withTestConnection } from "@tranjs/testing";
+import type { TestOptions } from "@tranjs/testing";
+import type { TestConnection as PgTestConnection } from "@tranjs/pg";
 
-export const pgFixture = <R>(fn: (ctx: PgFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
+export const withPgTestConnection = <R>(fn: (db: PgTestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
 
 // Inside withTestTransaction, with a registered pg manager:
-await pgFixture(async (ctx: PgFixtureConnection) => {
-    const { rows } = await ctx.query("SELECT $1::text AS name", ["Ada"]);
+await withPgTestConnection(async (db: PgTestConnection) => {
+    const { rows } = await db.query("SELECT $1::text AS name", ["Ada"]);
     return rows[0];
 });
 ```
 
-`PgFixtureConnection` exposes only `query(text, values?)`, returning a Promise of the native `QueryResult`. Query config objects, callbacks, Submittables, cursors and streams are unavailable.
+`PgTestConnection` exposes only `query(text, values?)`, returning a Promise of the native `QueryResult`. Query config objects, callbacks, Submittables, cursors and streams are unavailable.
 
 ### mysql2
 
 ```typescript
-import { fixture } from "@tranjs/testing";
-import type { Mysql2FixtureConnection } from "@tranjs/mysql2";
+import { withTestConnection } from "@tranjs/testing";
+import type { TestConnection as Mysql2TestConnection } from "@tranjs/mysql2";
 
 // Inside withTestTransaction, with a registered mysql2 manager:
-await fixture(async (ctx: Mysql2FixtureConnection) => {
-    await ctx.execute("INSERT INTO users(name) VALUES (?)", ["Ada"]);
-    const [rows, fields] = await ctx.query("SELECT name FROM users WHERE name = ?", ["Ada"]);
+await withTestConnection(async (db: Mysql2TestConnection) => {
+    await db.execute("INSERT INTO users(name) VALUES (?)", ["Ada"]);
+    const [rows, fields] = await db.query("SELECT name FROM users WHERE name = ?", ["Ada"]);
     return rows;
 });
 ```
 
-`Mysql2FixtureConnection` exposes only string-and-parameters `query` and `execute`, preserving native result tuples. Config objects and callbacks are unavailable.
+`Mysql2TestConnection` exposes only string-and-parameters `query` and `execute`, preserving native result tuples. Config objects and callbacks are unavailable.
 
 ### postgres.js v3 / v4
 
 ```typescript
-import { fixture } from "@tranjs/testing";
-import type { PostgresFixtureConnection } from "@tranjs/postgres";
+import { withTestConnection } from "@tranjs/testing";
+import type { TestConnection as PostgresTestConnection } from "@tranjs/postgres";
 
 // Inside withTestTransaction, with a registered postgres.js manager:
-await fixture(async (ctx: PostgresFixtureConnection) => {
-    await ctx`INSERT INTO users(name) VALUES (${"Ada"})`;
-    return await ctx.unsafe("SELECT name FROM users WHERE name = $1", ["Ada"]);
+await withTestConnection(async (db: PostgresTestConnection) => {
+    await db`INSERT INTO users(name) VALUES (${"Ada"})`;
+    return await db.unsafe("SELECT name FROM users WHERE name = $1", ["Ada"]);
 });
 ```
 
@@ -163,11 +163,11 @@ Tagged calls and `unsafe(text, values?)` return plain Promises of native row lis
 ### JavaScript
 
 ```javascript
-import { fixture } from "@tranjs/testing";
+import { withTestConnection } from "@tranjs/testing";
 
 // Inside withTestTransaction, with a registered pg manager:
-await fixture(/** @param {import("@tranjs/pg").PgFixtureConnection} ctx */ async (ctx) => {
-    await ctx.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
+await withTestConnection(/** @param {import("@tranjs/pg").TestConnection} db */ async (db) => {
+    await db.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
 });
 ```
 
@@ -262,7 +262,7 @@ test("creates through Nest dependency injection", async () => {
         try {
             await module.get(UsersService).create("Ada");
             assertCommitted(users.save);
-            expect(tx.transactions).toHaveLength(1);
+            expect(tx.records).toHaveLength(1);
         } finally {
             await module.close();
         }
@@ -449,11 +449,11 @@ Object tracking creates a fresh wrapper, supports frozen objects, and invokes me
 
 Joined `REQUIRED`, `MANDATORY`, and `SUPPORTS` calls share the owner record, as does `NESTED`. Outcome matchers describe that owner, not whether an individual `NESTED` savepoint rolled back. `REQUIRES_NEW` gets a distinct record even on the same physical test connection. `parent` is not the last record created: a boundary inside `NOT_SUPPORTED` has no active logical parent.
 
-`tx.transactions` is a read-only snapshot of owner records, including failed begins as `"rolled-back"`. Joined calls and ordinary savepoints add no records. `tx.datasource` identifies the selected datasource. Mock outcomes describe TranJS policy, not database writes.
+`tx.records` is a read-only snapshot of owner records, including failed begins as `"rolled-back"`. Joined calls and ordinary savepoints add no records. `tx.datasource` identifies the selected datasource. Mock outcomes describe TranJS policy, not database writes.
 
 ### Inject failures at a chosen boundary
 
-Both helpers support `tx.fail("begin" | "commit" | "rollback", selector?)`. Register failures before the matching operation. These target owner operations, not arbitrary SQL or savepoint-operation failures.
+Both helpers support `tx.failNext("begin" | "commit" | "rollback", selector?)`. Register failures before the matching operation. These target owner operations, not arbitrary SQL or savepoint-operation failures.
 
 ```typescript
 import { expect, test, vi } from "vitest";
@@ -466,7 +466,7 @@ test("does not publish when commit fails", async () => {
         const publish = vi.fn();
         const rollback = vi.fn();
         const error = new Error("connection lost");
-        tx.fail("commit", { containing: save, times: 1, error });
+        tx.failNext("commit", { containing: save, times: 1, error });
 
         await expect(transactional(async () => {
             await save();
@@ -487,11 +487,11 @@ test("does not publish when commit fails", async () => {
 | `times?: number` | Positive number of matching operations to fail; defaults to one |
 | `error?: unknown` | Value to throw; omit for a generated error |
 
-Omit the selector to fail the next matching operation. Do not combine `containing` and `where`. Begin failures cannot use `containing`: the call has not run. Use `tx.fail("begin")` or select with `where`. Failed begins have records but no callback calls.
+Omit the selector to fail the next matching operation. Do not combine `containing` and `where`. Begin failures cannot use `containing`: the call has not run. Use `tx.failNext("begin")` or select with `where`. Failed begins have records but no callback calls.
 
 ### Timeouts
 
-Targeted timeout injection (choosing which transaction times out) is **not provided**; `tx.fail` accepts only begin, commit, and rollback. Test deadlines with the ordinary transaction `timeout` option:
+Targeted timeout injection (choosing which transaction times out) is **not provided**; `tx.failNext` accepts only begin, commit, and rollback. Test deadlines with the ordinary transaction `timeout` option:
 
 ```typescript
 import { expect, test } from "@jest/globals";

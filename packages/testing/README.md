@@ -18,15 +18,15 @@ Register the real driver manager once and apply schema migrations separately. Aw
 ```typescript
 import { expect, test } from "@jest/globals";
 import { transactional } from "@tranjs/core";
-import { fixture, withTestTransaction } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
+import { withTestConnection, withTestTransaction } from "@tranjs/testing";
+import type { TestConnection } from "@tranjs/pg";
 import { ctx } from "@tranjs/pg";
 import "@tranjs/testing/jest";
 
 test("writes through a logical owner", async () => {
     await withTestTransaction(async tx => {
-        await fixture(async (ctx: PgFixtureConnection) => {
-            await ctx.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
+        await withTestConnection(async (db: TestConnection) => {
+            await db.query("INSERT INTO users(name) VALUES ($1)", ["Ada"]);
         });
         const read = tx.track(async () => {
             return (await ctx().query("SELECT name FROM users WHERE name = $1", ["Ada"])).rows;
@@ -39,17 +39,17 @@ test("writes through a logical owner", async () => {
 
 `withTestTransaction(fn, { datasource? }?)` rolls back awaited work routed through the selected manager. Owners use savepoints: "committed" means logical completion, not physical durability. The hidden transaction is not ambient; application SQL still needs `transactional` or `@Transactional`. `transactional(fn, config?)` returns a callable preserving dynamic `this` and arguments, always returning a Promise of the awaited result. It snapshots configuration at creation and resolves the manager at invocation.
 
-`fixture(fn, options?)` supplies a restricted connection usable only during its callback, without changing what driver `ctx()` or `getCurrentTransaction()` returns. It requires a live integration session, not mock mode. Use only the matching type-only `PgFixtureConnection`, `Mysql2FixtureConnection`, or `PostgresFixtureConnection` export from the driver. pg supports `query(text, values?)`; mysql2 supports `query`/`execute` with native tuples; postgres.js supports tagged calls and `unsafe(text, values?)` returning plain Promises of row lists, not lazy query handles. Native connection controls, callback/config-object queries, streams and cursors are unavailable.
+`withTestConnection(fn, options?)` supplies a restricted connection usable only during its callback, without changing what driver `ctx()` or `getCurrentTransaction()` returns. It requires a live integration session, not mock mode. Use only the matching type-only `import("@tranjs/pg").TestConnection`, `import("@tranjs/mysql2").TestConnection`, or `import("@tranjs/postgres").TestConnection` export from the driver. pg supports `query(text, values?)`; mysql2 supports `query`/`execute` with native tuples; postgres.js supports tagged calls and `unsafe(text, values?)` returning plain Promises of row lists, not lazy query handles. Native connection controls, callback/config-object queries, streams and cursors are unavailable.
 
 ```typescript
-import { fixture } from "@tranjs/testing";
-import type { FixtureOptions } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
+import { withTestConnection } from "@tranjs/testing";
+import type { TestOptions } from "@tranjs/testing";
+import type { TestConnection } from "@tranjs/pg";
 
-export const pgFixture = <R>(fn: (ctx: PgFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
+export const withPgTestConnection = <R>(fn: (db: TestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
 ```
 
-`FixtureOptions` is `{ datasource?: string | symbol }`. Annotations do not validate datasource wiring. Do not pass this connection into application code.
+`TestOptions` is `{ datasource?: string | symbol }`. Annotations do not validate datasource wiring. Do not pass this connection into application code.
 
 Each fixture call uses one savepoint. A fixture does not create a service transaction or add a transaction to the probe. TranJS timeouts do not apply; database timeouts still do. You cannot start transactions through TranJS inside a fixture callback, on any datasource; all seven propagation modes are rejected before their callbacks run. Do not nest fixtures or call them from transactional callbacks or commit/rollback hooks, including `afterCommit` callbacks that run immediately without a transaction. Run fixtures and transactional work sequentially: overlapping calls are rejected as soon as they start, even before the first await. The connection and its methods stop working when the callback finishes. Queries still pending at that point fail the fixture call, which waits for them to finish before releasing the savepoint. Await every query. When the session ends, it rejects new fixture calls, waits for existing calls, and preserves unfinished-work and cleanup errors.
 
@@ -57,12 +57,12 @@ SQL-error recovery rolls back to and releases the savepoint while preserving the
 
 ## Unit policy and assertions
 
-`mockTransactions(async tx => …, { datasource? }?)` checks propagation, rollback-only policy, deadlines and hooks with no SQL. Real driver `ctx()` rejects in mock mode. `transactions()` returns the live session's probe and throws outside it.
+`mockTransactions(async tx => …, { datasource? }?)` checks propagation, rollback-only policy, deadlines and hooks with no SQL. Real driver `ctx()` rejects in mock mode. `currentProbe()` returns the live session's probe and throws outside it.
 
 - `tx.track(target)` observes call entry; call through the returned wrapper.
 - `tx.txOf(fn, index = 0)` selects a recorded call's owner, or `undefined` for an outside call.
-- `tx.transactions` is a read-only snapshot of logical owner records.
-- `tx.fail("begin" | "commit" | "rollback", selector?)` injects owner-operation failures. Select with `containing` or `where`, not both; `times` defaults to one and `error` is optional. Begin failures cannot use `containing`. Timeout injection is not supported; use ordinary transaction `timeout`.
+- `tx.records` is a read-only snapshot of logical owner records.
+- `tx.failNext("begin" | "commit" | "rollback", selector?)` injects owner-operation failures. Select with `containing` or `where`, not both; `times` defaults to one and `error` is optional. Begin failures cannot use `containing`. Timeout injection is not supported; use ordinary transaction `timeout`.
 
 | Matcher | Portable assertion |
 |---|---|
