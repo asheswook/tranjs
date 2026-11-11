@@ -13,12 +13,15 @@ import {
     TransactionTimeoutError,
     UnexpectedRollbackError,
     useTransactionManager,
+    afterCommit as registerAfterCommit,
+    afterRollback as registerAfterRollback,
 } from "@tranjs/core";
 import {
     ctx,
     PostgreSQLClientPerTransactionManager,
     usePostgreSQLClientPerTransaction,
     usePostgreSQLTransactionManager,
+    TransactionAbortedError,
 } from "../src";
 
 const connectionString = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
@@ -51,6 +54,29 @@ describe("PostgreSQL client per transaction (real database)", () => {
     async function pid() {
         return (await ctx().query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
     }
+
+    it("reports a COMMIT that PostgreSQL turned into ROLLBACK after a caught statement error", async () => {
+        const afterCommit = jest.fn();
+        const afterRollback = jest.fn();
+        await expect(runInTransaction(async () => {
+            registerAfterCommit(afterCommit);
+            registerAfterRollback(afterRollback);
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            try { await ctx().query("SELECT 1 / 0"); } catch { /* caught by application code */ }
+            return "service returned normally";
+        })).rejects.toBeInstanceOf(TransactionAbortedError);
+        expect(await ids()).toEqual([]);
+        expect(afterCommit).not.toHaveBeenCalled();
+        expect(afterRollback).toHaveBeenCalledTimes(1);
+    });
+
+    it("commits normally after a NESTED step failed and rolled back to its savepoint", async () => {
+        await runInTransaction(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            await runInTransaction(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED }).catch(() => {});
+        });
+        expect(await ids()).toEqual([1]);
+    });
 
     it("commits and ends the client exactly once", async () => {
         expect(await runInTransaction(async () => {
@@ -162,11 +188,12 @@ describe("PostgreSQL client per transaction (real database)", () => {
     });
 
     it("applies isolation and read-only SQL", async () => {
-        await runInTransaction(async () => {
+        // The rejected write aborts the transaction, so PostgreSQL turns COMMIT into ROLLBACK.
+        await expect(runInTransaction(async () => {
             expect((await ctx().query("SHOW transaction_isolation")).rows[0].transaction_isolation).toBe("serializable");
             expect((await ctx().query("SHOW transaction_read_only")).rows[0].transaction_read_only).toBe("on");
             await expect(ctx().query(`INSERT INTO ${table} VALUES (1)`)).rejects.toMatchObject({ code: "25006" });
-        }, { isolationLevel: IsolationLevel.SERIALIZABLE, readOnly: true });
+        }, { isolationLevel: IsolationLevel.SERIALIZABLE, readOnly: true })).rejects.toBeInstanceOf(TransactionAbortedError);
         expect(end).toHaveBeenCalledTimes(1);
         expect(await ids()).toEqual([]);
     });

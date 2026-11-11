@@ -28,6 +28,8 @@ class Service {
 
 Isolation uses `BEGIN ISOLATION LEVEL …`; read-only uses `BEGIN … READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout), including the special handling of PostgreSQL Submittables.
 
+If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` (exported by `@tranjs/pg`) so the failure isn't silent. If a step is allowed to fail, run it in a `Propagation.NESTED` method and catch the error outside that method, so its savepoint is rolled back.
+
 ## PostgreSQL (postgres.js)
 
 ```bash
@@ -56,7 +58,7 @@ class Service {
 
 For direct registration, pass `new PostgresTransactionManager(sql)` to `useTransactionManager`. Both registration helpers accept an optional datasource name as their second argument.
 
-If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` so the failure isn't silent. Use `Propagation.NESTED` if a step should be allowed to fail.
+If a query fails inside a transaction, PostgreSQL aborts the transaction, even when your code catches the error. The later `COMMIT` is turned into a rollback, and TranJS throws `TransactionAbortedError` so the failure isn't silent. If a step is allowed to fail, run it in a `Propagation.NESTED` method and catch the error outside that method, so its savepoint is rolled back.
 
 postgres.js has no per-query timeout, so a transaction `timeout` is enforced by cancelling the running query when the deadline passes; this surfaces as `TransactionTimeoutError`. Batch queries have the same deadline checks at construction and first execution, and the same cancellation behavior, as normal queries. `cursor()`, `forEach()`, `stream()` and `readable()` are only checked before they start and are not cancelled mid-way. Finish them inside the transaction.
 

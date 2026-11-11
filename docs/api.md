@@ -174,6 +174,7 @@ All classes are exported by `@tranjs/core` except where a driver package is name
 | `DatasourceSetupError` | The requested datasource has no registered manager | Its `.name` is `"TransactionDatasourceSetupError"`. |
 | `IllegalTransactionStateException` | `MANDATORY` has no transaction, or `NEVER` has one | Propagation constraint violation. |
 | `TransactionContextMixingError` | A native driver's `ctx()` resolves a manager of another driver | Match the driver and datasource. |
+| `TransactionAbortedError` (`@tranjs/pg`, `@tranjs/postgres`) | PostgreSQL rolls back a `COMMIT` because a query in the transaction failed | `afterRollback` hooks run. Nothing from the transaction was saved. |
 | `NoTransactionContextError` | The deprecated core `ctx()` has no active context | Native `ctx()` instead throws `Error("Transaction context not initialized")` when its registered manager has no active transaction. |
 | `UnsupportedTransactionPropagationException` | An unsupported propagation value is passed | Use a member of `Propagation`. |
 | `UnsupportedIsolationLevelError` (`@tranjs/mysql2`) | Connection-per-transaction mode receives an explicit isolation level with its default rejection policy | Rejected before connecting; exposes `isolationLevel`. See [Hyperdrive limitations](drivers.md#mysql). |
