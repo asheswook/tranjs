@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
@@ -7,14 +8,14 @@ const { join, resolve } = require('node:path');
 const root = resolve(__dirname, '../..');
 const temporary = mkdtempSync(join(tmpdir(), 'tranjs-differential-'));
 const baseline = '@tranjs/core@1.1.0';
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+const archive = join(__dirname, 'fixtures/tranjs-core-1.1.0.tgz');
+const integrity = 'sha512-b7zLSA0QFgcud7hlUDTxvw9PL2uyNQ+9opSFlSNa2vTrPjw3YhNihX01hzLkH2YEQDdTbMZPOeW7UKmmi7URuQ==';
 const command = (file, args, cwd = root) => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: 'pipe' });
 try {
-    // Preserve the published release's behavior, independently of branch history.
-    const [packed] = JSON.parse(command(npm, ['pack', baseline, '--json', '--ignore-scripts'], temporary));
-    assert.equal(packed.name, '@tranjs/core');
-    assert.equal(packed.version, '1.1.0');
-    command('tar', ['-xzf', join(temporary, packed.filename), '-C', temporary]);
+    // Use the original published tarball so the baseline needs no network access.
+    const actualIntegrity = 'sha512-' + createHash('sha512').update(readFileSync(archive)).digest('base64');
+    assert.equal(actualIntegrity, integrity, 'Published baseline tarball checksum changed');
+    command('tar', ['-xzf', archive, '-C', temporary]);
     const metadata = JSON.parse(readFileSync(join(temporary, 'package/package.json'), 'utf8'));
     assert.equal(metadata.name, '@tranjs/core');
     assert.equal(metadata.version, '1.1.0');
