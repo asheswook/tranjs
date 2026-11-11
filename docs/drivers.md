@@ -96,9 +96,13 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 ## Connection lifetime
 
-TranJS rejects queries through a finished transaction with the core-exported `TransactionClosedError` (`"Transaction already finished"`) before dispatch. The check covers `ctx()` lookups in an inherited closed context, cached connections and bound methods. A cached `ctx()` connection cannot send queries to a released connection.
+After a transaction or test ends, calling `ctx()` from work that outlived it throws `TransactionClosedError` (exported by `@tranjs/core`) before sending SQL. Queries through a connection or method kept from `ctx()` throw too. Before 1.2.0 these queries ran on a connection that had already been returned to the pool.
 
-Joined calls and `NESTED` scopes share the physical transaction's handle. Returning from an inner scope leaves that handle usable while the transaction is active; physical transaction completion closes it for all callers. Production `REQUIRES_NEW` uses its own connection and handle. For savepoint-backed test handles, see [connection lifetimes in tests](testing.md#connection-lifetimes).
+A query already sent to the database can finish before cleanup. The test helper does not wait for calls you forgot to await. TranJS does not detect a missing `await`; use `@typescript-eslint/no-floating-promises` to catch it.
+
+Joined calls and `NESTED` scopes share their parent's connection from `ctx()`, which stays usable until that transaction ends. `REQUIRES_NEW` has its own connection from `ctx()` that stops working when the child transaction ends, even in tests where both use the same physical connection. The connection passed to a `withTestConnection` callback stops working when that callback or its enclosing test ends.
+
+The lifetime check applies to connections from `ctx()`; `manager.getCurrentTransaction()` returns the raw connection for custom `ctx()` implementations.
 
 ## Supported runtimes
 
