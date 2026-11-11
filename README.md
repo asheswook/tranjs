@@ -99,7 +99,7 @@ const createOrder = transactional(async (userId: string) => {
 const order = await createOrder(userId);
 ```
 
-`transactional(fn, config?)` returns a callable that preserves invocation-time `this` and arguments. It accepts synchronous or asynchronous functions and always returns a Promise of the awaited result, including failures as rejections. Configuration is snapshotted when the wrapper is created; the manager is resolved when it is called.
+`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` used when you call it. The function can be synchronous or asynchronous. The wrapper always returns a Promise: it waits for the result and rejects if the call fails. It copies the configuration when you create it and looks up the manager when you call it.
 
 ## Rollback rules
 
@@ -120,37 +120,33 @@ async placeOrder(order: Order) {
 
 ## Testing
 
-Install `@tranjs/testing@1.2.0` separately with its required, exact peer `@tranjs/core@1.2.0`. Compatible drivers are `@tranjs/pg@1.3.0`, `@tranjs/mysql2@1.3.0`, and `@tranjs/postgres@1.2.0`. Jest and Vitest are optional peers; the base entry works with any runner.
-
-`withTestTransaction` rolls back awaited work routed through the selected manager. Owners use savepoints; "committed" means logical completion, not durable physical commit. Raw connections, other datasources, detached work, and external effects can escape rollback.
-
-**The hidden transaction is not ambient.** Application SQL needs `transactional` or `@Transactional`; `ctx()` alone is unavailable. Use `withTestConnection` for test-only DML through a restricted connection. Apply schema migrations separately.
+Use `@tranjs/testing` to check transactions and roll back test data. This example uses the PostgreSQL manager and `docs_users` table from the guide's setup.
 
 ```ts
-import { withTestConnection, withTestTransaction } from "@tranjs/testing";
-import type { TestConnection } from "@tranjs/pg";
+import { expect, test } from "@jest/globals";
 import { transactional } from "@tranjs/core";
+import { ctx } from "@tranjs/pg";
+import { withTestTransaction } from "@tranjs/testing";
+import "@tranjs/testing/jest";
 
-test("place() leaves no order when stock is short", () => withTestTransaction(async () => {
-  await withTestConnection(async (db: TestConnection) => {
-    await db.query("INSERT INTO stock(sku, quantity) VALUES ($1, $2)", ["A", 0]);
-  });
-  await expect(orderService.place({ sku: "A" })).rejects.toThrow(OutOfStock);
-  expect(await transactional(countOrders)()).toBe(0);
+const repository = {
+    async save(name: string) {
+        await ctx().query("INSERT INTO docs_users(name) VALUES ($1)", [name]);
+    },
+};
+function createUserService(repo: typeof repository) {
+    return { create: transactional(async (name: string) => repo.save(name)) };
+}
+
+test("create saves a user in a transaction", () => withTestTransaction(async tx => {
+    const trackedRepository = tx.track(repository);
+    const service = createUserService(trackedRepository);
+    await service.create("Ada");
+    expect(trackedRepository.save).toHaveCommitted();
 }));
 ```
 
-`import "@tranjs/testing/jest"` auto-registers six matchers through `@jest/globals`, including with `injectGlobals: false`. `import "@tranjs/testing/vitest"` is an ESM entry that auto-registers them through Vitest. Manual `expect.extend(matchers)` remains available from `@tranjs/testing`. Supports Jest 29/30, Vitest 3/4/5, node:test and Mocha. Matchers observe tracked call entry, logical outcomes, and hook provenance, not async completion or external delivery.
-
-To register matchers for all tests without a setup file, configure the runner entry and load its TypeScript types globally: [Registering matchers for all tests](https://github.com/asheswook/tranjs/blob/main/docs/testing.md#registering-matchers-for-all-tests). Per-file imports are an alternative.
-
-Fixture annotations do not validate datasource wiring. Do not pass this connection into application code. Fixtures do not sandbox SQL: explicit COMMIT, DDL, and external effects can persist. Not every missing await is detectable. Fixture savepoint recovery after SQL errors differs from production.
-
-For durability, locking, or races, use no test session: migrate separately, seed and run work through `transactional`, verify in a fresh independent transaction, and clean up in `finally` or use a disposable database. Concurrency tests need independent physical transactions.
-
-The core main entry loads no `@tranjs/testing`, probe, fake manager, matcher, or runner code. No testing AsyncLocalStorage is allocated until a session starts; the internal bridge is inert without a session.
-
-Details, limitations and examples: [Testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md).
+See the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup and examples.
 
 ## Supported platforms
 
