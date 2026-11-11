@@ -13,9 +13,9 @@ import {
 } from "@tranjs/core";
 import { PoolConnection } from "./context";
 import { UnsupportedIsolationLevelError } from "./error";
-import type { FixtureLease } from "@tranjs/core/internal/testing-bridge";
-import { createMysql2FixtureConnection } from "./fixture";
-import type { Mysql2FixtureConnection } from "./fixture";
+import type { TestConnectionLease } from "@tranjs/core/internal/testing-bridge";
+import { createMysql2TestConnection } from "./test-connection";
+import type { TestConnection } from "./test-connection";
 
 const DRIVER_NAME = Symbol("mysql2");
 
@@ -52,8 +52,8 @@ export const ctx = (datasource?: string | symbol): PoolConnection => {
 abstract class MySQLManagerBase extends PlatformTransactionManager<PoolConnection> {
     private readonly wrappers = new WeakMap<PoolConnection, PoolConnection>();
 
-    protected createFixtureConnection(tx: PoolConnection, lease: FixtureLease): Mysql2FixtureConnection {
-        return createMysql2FixtureConnection(tx, lease);
+    protected createTestConnection(tx: PoolConnection, lease: TestConnectionLease): TestConnection {
+        return createMysql2TestConnection(tx, lease);
     }
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }

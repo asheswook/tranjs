@@ -1,7 +1,7 @@
 import { afterCommit, clearTransactionManager, PlatformTransactionManager, transactional, useTransactionManager } from "@tranjs/core";
-import { fixture, mockTransactions, withTestTransaction } from "../src";
+import { withTestConnection, mockTransactions, withTestTransaction } from "../src";
 
-class FixtureManager extends PlatformTransactionManager<object> {
+class TestConnectionManager extends PlatformTransactionManager<object> {
     constructor() { super(); }
     protected async beginTransaction() { return { transaction: {}, metadata: { driverName: "provenance" } }; }
     protected async commitTransaction() {}
@@ -9,18 +9,18 @@ class FixtureManager extends PlatformTransactionManager<object> {
     protected async createSavepoint() {}
     protected async rollbackToSavepoint() {}
     protected async releaseSavepoint() {}
-    protected createFixtureConnection() { return Object.create(null); }
+    protected createTestConnection() { return Object.create(null); }
 }
 
 afterEach(() => clearTransactionManager());
 
-it.each([false, true])("retains fixture denial through nested test sessions and immediate hooks (hook=%s)", async hook => {
-    useTransactionManager(new FixtureManager());
+it.each([false, true])("retains withTestConnection denial through nested test sessions and immediate hooks (hook=%s)", async hook => {
+    useTransactionManager(new TestConnectionManager());
     await withTestTransaction(async () => {
-        await fixture(async () => {
+        await withTestConnection(async () => {
             const nested = () => mockTransactions(async () => {
                 let calls = 0;
-                await expect(transactional(() => { calls++; })()).rejects.toThrow("forbidden inside a fixture callback");
+                await expect(transactional(() => { calls++; })()).rejects.toThrow("forbidden inside a withTestConnection callback");
                 expect(calls).toBe(0);
             });
             if (hook) await afterCommit(nested);

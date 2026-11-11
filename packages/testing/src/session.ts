@@ -2,15 +2,13 @@ import "./bridge";
 import { DEFAULT_DATASOURCE } from "@tranjs/core";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { DatasourceSetupError, TransactionSystemError, clearTransactionManager, getTransactionManager, PlatformTransactionManager, useTransactionManager } from "@tranjs/core";
-import { AsyncLocal, TxState, currentTestSession, hasTestTransaction, runTestSession, testAccess, TestBoundaryInfo, TestSession, testSession } from "@tranjs/core/internal/testing-bridge";
+import { AsyncLocal, TxState, currentTestSession, hasTestTransaction, runTestSession, testAccess, TestBoundaryInfo, TestSession, testSession, createTestSessionId } from "@tranjs/core/internal/testing-bridge";
 import { FakeTransactionManager } from "./fake";
 import { registerProbeOwner, registerTrackedFunction, trackedFunctionForOwner, TrackedFunction } from "./metadata";
+import type { TestOptions } from "./options";
 
 export interface TestTransactionInfo extends TestBoundaryInfo {
     readonly parent?: TestTransactionInfo;
-}
-export interface TestTransactionOptions {
-    datasource?: string | symbol;
 }
 export interface TestFailureSelector {
     containing?: Function;
@@ -20,16 +18,16 @@ export interface TestFailureSelector {
 }
 export interface TestTransactionProbe {
     readonly datasource: string | symbol;
-    readonly transactions: readonly TestTransactionInfo[];
+    readonly records: readonly TestTransactionInfo[];
     track<T extends object>(target: T): T;
     txOf(fn: Function, call?: number): TestTransactionInfo | undefined;
-    fail(operation: "begin" | "commit" | "rollback", selector?: TestFailureSelector): void;
+    failNext(operation: "begin" | "commit" | "rollback", selector?: TestFailureSelector): void;
 }
 
 function createProbe(manager: PlatformTransactionManager<any>, datasource: string | symbol, kind: TestSession["kind"]): {
     probe: TestTransactionProbe; session: TestSession;
 } {
-    const transactions: TestTransactionInfo[] = [];
+    const records: TestTransactionInfo[] = [];
     const states = new WeakMap<TxState, TestTransactionInfo>();
     const outcomes = new WeakMap<TestTransactionInfo, TestTransactionInfo["outcome"]>();
     const calls = new WeakMap<Function, (TestTransactionInfo | undefined)[]>();
@@ -99,7 +97,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
     };
     const track = <T extends object>(target: T, propertyName?: string): T => {
         if (!target || (typeof target !== "object" && typeof target !== "function")) {
-            throw new TypeError("t.track expects a function or an object");
+            throw new TypeError("tx.track expects a function or an object");
         }
         const existing = wrappers.get(target);
         if (existing) {
@@ -156,7 +154,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
     };
     const probe: TestTransactionProbe = {
         datasource,
-        get transactions() { return Object.freeze(transactions.slice()); },
+        get records() { return Object.freeze(records.slice()); },
         track,
         txOf(fn, call = 0) {
             const recorded = trackedCalls(fn);
@@ -165,7 +163,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
             }
             return recorded[call];
         },
-        fail(operation, selector = {}) {
+        failNext(operation, selector = {}) {
             if (!["begin", "commit", "rollback"].includes(operation)) throw new TypeError("Unknown transaction failure operation");
             if (selector.containing && selector.where) throw new TypeError("Choose containing or where, not both");
             if (selector.containing) {
@@ -178,19 +176,20 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
         },
     };
     const session: TestSession = {
+        id: createTestSessionId(), datasource,
         kind, lifecycle: kind === "mock" ? "ready" : "initializing",
         counter: 0, closed: false, root: { open: false },
-        admitting: true, fixtureActive: false, managedActive: 0, pendingFixtures: new Set(),
+        admitting: true, testConnectionActive: false, managedActive: 0, pendingConnections: new Set(), pendingTransactions: new Set(),
         begin(options, propagation, parent) {
             const info: TestTransactionInfo = Object.freeze({
-                id: transactions.length + 1,
+                id: records.length + 1,
                 options: Object.freeze({ ...options }),
                 parent: parent ? states.get(parent) : undefined,
                 propagation,
                 get outcome() { return outcomes.get(info)!; },
             });
             outcomes.set(info, "active");
-            transactions.push(info);
+            records.push(info);
             return info;
         },
         attach(state, info) { states.set(state, info); },
@@ -204,7 +203,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
             hookContext ??= new AsyncLocalStorage<TestBoundaryInfo>();
             return hookContext.run(info, callback);
         },
-        fail(operation, info) {
+        failNext(operation, info) {
             const rule = failures.find(rule => rule.remaining > 0 && rule.operation === operation &&
                 (!rule.selector.containing || trackedCalls(rule.selector.containing).includes(info)) &&
                 (!rule.selector.where || rule.selector.where(info)));
@@ -221,12 +220,12 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
 const probes = new WeakMap<TestSession, TestTransactionProbe>();
 
 /** The current test's probe. A retained async task cannot access a closed test. */
-export function transactions(datasource?: string | symbol): TestTransactionProbe {
+export function currentProbe(datasource?: string | symbol): TestTransactionProbe {
     const manager = datasource === undefined ? undefined : registeredManager(datasource);
     const session = datasource === undefined ? currentTestSession() : manager && testSession(manager);
-    if (!session || session.closed) throw new Error("transactions() requires an active transaction test session");
+    if (!session || session.closed) throw new Error("currentProbe() requires an active transaction test session");
     const probe = probes.get(session);
-    if (!probe) throw new Error("transactions() requires an active transaction test session");
+    if (!probe) throw new Error("currentProbe() requires an active transaction test session");
     return probe;
 }
 
@@ -240,7 +239,7 @@ function registeredManager(datasource: string | symbol): PlatformTransactionMana
 const mocking = new Set<string | symbol>();
 
 /** Unit-test transaction policy. Mock data access: real driver ctx() rejects this manager. */
-export async function mockTransactions<T>(fn: (t: TestTransactionProbe) => T | Promise<T>, options: TestTransactionOptions = {}): Promise<T> {
+export async function mockTransactions<T>(fn: (tx: TestTransactionProbe) => T | Promise<T>, options: TestOptions = {}): Promise<T> {
     const datasource = options.datasource ?? DEFAULT_DATASOURCE;
     if (mocking.has(datasource)) throw new Error(`Concurrent or nested mockTransactions for datasource ${String(datasource)} is not supported`);
     mocking.add(datasource);
@@ -259,7 +258,7 @@ export async function mockTransactions<T>(fn: (t: TestTransactionProbe) => T | P
 }
 
 /** Savepoint-based integration test; always roll back the hidden physical transaction. */
-export async function withTestTransaction<T>(fn: (t: TestTransactionProbe) => T | Promise<T>, options: TestTransactionOptions = {}): Promise<T> {
+export async function withTestTransaction<T>(fn: (tx: TestTransactionProbe) => T | Promise<T>, options: TestOptions = {}): Promise<T> {
     const datasource = options.datasource ?? DEFAULT_DATASOURCE;
     const manager = getTransactionManager(datasource);
     const existing = testSession(manager);
@@ -284,12 +283,18 @@ export async function withTestTransaction<T>(fn: (t: TestTransactionProbe) => T 
             throw error;
         } finally {
             session.admitting = false;
-            if (session.pendingFixtures.size) {
-                const settled = await Promise.allSettled([...session.pendingFixtures]);
-                const errors = [new Error("withTestTransaction callback exited with pending fixture work"),
+            const runningTransactions = session.pendingTransactions.size;
+            const runningConnections = session.pendingConnections.size;
+            if (runningTransactions || runningConnections) {
+                const message = runningTransactions
+                    ? `withTestTransaction callback returned while ${runningTransactions} transaction${runningTransactions === 1 ? " was" : "s were"} still running`
+                    : "Pending withTestConnection work drained before test rollback";
+                const settled = await Promise.allSettled([...session.pendingTransactions, ...session.pendingConnections]);
+                const errors = [...(runningTransactions ? [new Error(message)] : []),
+                    ...(runningConnections ? [new Error("withTestTransaction callback exited with pending withTestConnection work")] : []),
                     ...(failure ? [failure.error] : []),
                     ...settled.flatMap(result => result.status === "rejected" ? [result.reason] : [])];
-                failure = { error: new AggregateError(errors, "Pending fixture work drained before test rollback") };
+                failure = { error: new AggregateError(errors, message) };
             }
             session.closed = true;
             // A caught owner failure cannot make an unrecoverable session pass.

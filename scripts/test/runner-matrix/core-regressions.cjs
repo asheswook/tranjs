@@ -71,8 +71,8 @@ async function recoveryInjection() {
         const save = tx.track(async function save() {
             await driver.ctx().query(`INSERT INTO ${h.table} VALUES ('recovery')`);
         });
-        tx.fail('commit', { containing: save, error: commit });
-        tx.fail('rollback', { error: rollback });
+        tx.failNext('commit', { containing: save, error: commit });
+        tx.failNext('rollback', { error: rollback });
         await core.transactional(() => {})(); // Selectors must survive unrelated success.
         await assert.rejects(core.transactional(async () => {
             core.afterCommit(() => { commitHooks++; });
@@ -130,7 +130,7 @@ async function brokenSavepointRecovery() {
                 assert.equal(error.name, 'TransactionSystemError');
                 assert.equal(error.applicationError, application);
                 assert.equal(error.cause, recovery);
-                assert.equal(probe.transactions[0].outcome, 'rolled-back');
+                assert.equal(probe.records[0].outcome, 'rolled-back');
                 await assert.rejects(core.transactional(() => assert.fail('broken session admitted work'), { datasource })(), /broken|aborted|recovery/i);
                 throw error;
             } finally { callbackFinally = true; }

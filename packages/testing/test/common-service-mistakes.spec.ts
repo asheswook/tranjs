@@ -56,16 +56,16 @@ class PrematureEmailOrderService extends OrderService {
         await this.mailer.sendReceipt();
     }
 }
-function sample(t: TestTransactionProbe, Order = OrderService, Audit = AuditService) {
-    const repository = t.track({ async insertOrder() {}, async insertAudit() {} });
-    const mailer = t.track({ async sendReceipt() {} });
+function sample(tx: TestTransactionProbe, Order = OrderService, Audit = AuditService) {
+    const repository = tx.track({ async insertOrder() {}, async insertAudit() {} });
+    const mailer = tx.track({ async sendReceipt() {} });
     return { repository, mailer, service: new Order(repository, new Audit(repository), mailer) };
 }
 
 describe("common service mistakes", () => {
     it("names explicit mocks and unnamed object properties in an actionable debit/credit diagnostic", async () => {
-        await mockTransactions(async t => {
-            const accounts = t.track({ debit: jest.fn().mockName('accounts.debit'), credit: jest.fn() });
+        await mockTransactions(async tx => {
+            const accounts = tx.track({ debit: jest.fn().mockName('accounts.debit'), credit: jest.fn() });
             await transactional(accounts.debit)();
             accounts.credit();
             expect(message(() => assertSameTransaction(accounts.debit, accounts.credit))).toMatchInlineSnapshot(`
@@ -77,8 +77,8 @@ Other: credit → outside transaction, event 3"
     });
 
     it("accepts the correctly decorated, atomic service with email after commit", async () => {
-        await mockTransactions(async t => {
-            const { repository, mailer, service } = sample(t);
+        await mockTransactions(async tx => {
+            const { repository, mailer, service } = sample(tx);
             await service.placeOrder();
             assertSameTransaction(repository.insertOrder, repository.insertAudit);
             assertCommitted(repository.insertOrder);
@@ -105,8 +105,8 @@ Received: sendReceipt → outside transaction, event 4, afterCommit callback",
     });
 
     it("identifies the outside write after @Transactional is removed", async () => {
-        await mockTransactions(async t => {
-            const { repository, service } = sample(t, MissingDecoratorOrderService);
+        await mockTransactions(async tx => {
+            const { repository, service } = sample(tx, MissingDecoratorOrderService);
             await service.placeOrder();
             const diagnostic = message(() => assertSameTransaction(repository.insertOrder, repository.insertAudit));
             expect(diagnostic).toMatchInlineSnapshot(`
@@ -119,8 +119,8 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2"
     });
 
     it("names both physical transactions and the flipped REQUIRES_NEW propagation", async () => {
-        await mockTransactions(async t => {
-            const { repository, service } = sample(t, OrderService, IndependentAuditService);
+        await mockTransactions(async tx => {
+            const { repository, service } = sample(tx, OrderService, IndependentAuditService);
             await service.placeOrder();
             const diagnostic = message(() => assertSameTransaction(repository.insertOrder, repository.insertAudit));
             expect(diagnostic).toMatchInlineSnapshot(`
@@ -140,8 +140,8 @@ Other: insertAudit → tx#2 (REQUIRES_NEW, committed), event 2"
     });
 
     it("identifies email inside the transaction instead of an afterCommit callback", async () => {
-        await mockTransactions(async t => {
-            const { repository, mailer, service } = sample(t, PrematureEmailOrderService);
+        await mockTransactions(async tx => {
+            const { repository, mailer, service } = sample(tx, PrematureEmailOrderService);
             await service.placeOrder();
             const diagnostic = message(() => assertAfterCommitOf(mailer.sendReceipt, repository.insertOrder));
             expect(diagnostic).toMatchInlineSnapshot(`
@@ -159,9 +159,9 @@ Received: sendReceipt → tx#1 (REQUIRED, committed), event 3"
     });
 
     it("does not confuse an unrelated later email with afterCommit provenance", async () => {
-        await mockTransactions(async t => {
-            const insertOrder = t.track(function insertOrder() {});
-            const sendReceipt = t.track(function sendReceipt() {});
+        await mockTransactions(async tx => {
+            const insertOrder = tx.track(function insertOrder() {});
+            const sendReceipt = tx.track(function sendReceipt() {});
             await transactional(insertOrder)();
             sendReceipt();
             expect(message(() => assertAfterCommitOf(sendReceipt, insertOrder))).toMatchInlineSnapshot(`
@@ -174,10 +174,10 @@ Requires an observed afterCommit callback for the committed transaction (later o
     });
 
     it("snapshots separate-transaction and outcome failures, including .not", async () => {
-        await mockTransactions(async t => {
-            const insertOrder = t.track(function insertOrder() {});
-            const insertAudit = t.track(function insertAudit() {});
-            const failedWrite = t.track(function failedWrite() {});
+        await mockTransactions(async tx => {
+            const insertOrder = tx.track(function insertOrder() {});
+            const insertAudit = tx.track(function insertAudit() {});
+            const failedWrite = tx.track(function failedWrite() {});
             await transactional(() => { insertOrder(); insertAudit(); })();
             await expect(transactional(() => { failedWrite(); throw new Error("write failed"); })()).rejects.toThrow("write failed");
             assertRolledBack(failedWrite);
@@ -214,9 +214,9 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
     });
 
     it("reports missing and ambiguous evidence as usage errors even under .not", async () => {
-        await mockTransactions(async t => {
-            const neverCalled = t.track(function neverCalled() {});
-            const calledTwice = t.track(function calledTwice() {});
+        await mockTransactions(async tx => {
+            const neverCalled = tx.track(function neverCalled() {});
+            const calledTwice = tx.track(function calledTwice() {});
             calledTwice();
             calledTwice();
             expect({
@@ -227,20 +227,20 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
 {
   "ambiguous": "toHaveRolledBack: received must have exactly one recorded call; received 2",
   "missing": "toHaveCommitted: received: 0 calls recorded through the wrapper returned by track()",
-  "untracked": "toRunOutsideTransaction: received must be a function tracked by transactions().track or the test probe's track",
+  "untracked": "toRunOutsideTransaction: received must be a function tracked by currentProbe().track or the test probe's track",
 }
 `);
         });
     });
 
     it.each(Object.keys(matchers) as (keyof typeof matchers)[])("never lets .not %s pass with untracked, zero-call or multiple-call operands", async matcher => {
-        await mockTransactions(t => {
-            const once = t.track(function once() {});
-            const neverCalled = t.track(function neverCalled() {});
-            const twice = t.track(function twice() {});
+        await mockTransactions(tx => {
+            const once = tx.track(function once() {});
+            const neverCalled = tx.track(function neverCalled() {});
+            const twice = tx.track(function twice() {});
             once(); twice(); twice();
             expect(() => boundary(function untracked() {}).not[matcher](once)).toThrow(new TypeError(
-                `${matcher}: received must be a function tracked by transactions().track or the test probe's track`,
+                `${matcher}: received must be a function tracked by currentProbe().track or the test probe's track`,
             ));
             expect(() => boundary(neverCalled).not[matcher](once)).toThrow(new TypeError(
                 `${matcher}: received: 0 calls recorded through the wrapper returned by track()`,
@@ -253,10 +253,10 @@ Other: insertAudit → tx#1 (REQUIRED, committed), event 2",
 
     it.each(["toRunInSameTransactionAs", "toRunInSeparateTransactionFrom", "toRunAfterCommitOf"] as const)("validates the other operand and probe ownership under .not %s", async matcher => {
         let foreign!: () => void;
-        await mockTransactions(t => { foreign = t.track(function foreign() {}); foreign(); });
-        await mockTransactions(t => {
-            const once = t.track(function once() {});
-            const neverCalled = t.track(function neverCalled() {});
+        await mockTransactions(tx => { foreign = tx.track(function foreign() {}); foreign(); });
+        await mockTransactions(tx => {
+            const once = tx.track(function once() {});
+            const neverCalled = tx.track(function neverCalled() {});
             once();
             expect(() => boundary(once).not[matcher](neverCalled)).toThrow(new TypeError(
                 `${matcher}: other: 0 calls recorded through the wrapper returned by track()`,

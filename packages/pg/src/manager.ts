@@ -12,9 +12,9 @@ import {
 } from "@tranjs/core";
 import { TransactionAbortedError } from "./errors";
 import { PoolClient } from "./context";
-import type { FixtureLease } from "@tranjs/core/internal/testing-bridge";
-import { createPgFixtureConnection } from "./fixture";
-import type { PgFixtureConnection } from "./fixture";
+import type { TestConnectionLease } from "@tranjs/core/internal/testing-bridge";
+import { createPgTestConnection } from "./test-connection";
+import type { TestConnection } from "./test-connection";
 
 const DRIVER_NAME = Symbol("pg");
 
@@ -45,8 +45,8 @@ export const ctx = (datasource?: string | symbol): PoolClient => {
 abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClient> {
     private readonly wrappers = new WeakMap<PoolClient, PoolClient>();
 
-    protected createFixtureConnection(tx: PoolClient, lease: FixtureLease): PgFixtureConnection {
-        return createPgFixtureConnection(tx, lease);
+    protected createTestConnection(tx: PoolClient, lease: TestConnectionLease): TestConnection {
+        return createPgTestConnection(tx, lease);
     }
 
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }

@@ -13,7 +13,7 @@ function deferred() {
 function write(id, observation) {
     return async () => {
         let probe;
-        try { probe = testing.transactions(); } catch (error) { observation.probeError = error; }
+        try { probe = testing.currentProbe(); } catch (error) { observation.probeError = error; }
         observation.probe = probe;
         const save = async () => {
             observation.pid = await pid();
@@ -45,8 +45,8 @@ async function fakeTimerInsideB(clock, source = 'real') {
             assert.notEqual(observed.probe, a);
             assert.equal(observed.pid, backend, 'late fake timer did not use B physical connection');
             assert.equal(observed.info.outcome, 'committed');
-            assert.equal(a.transactions.length, 0, 'A unexpectedly acquired late evidence');
-            assert.equal(b.transactions.length, 2, 'B must own both logical boundaries');
+            assert.equal(a.records.length, 0, 'A unexpectedly acquired late evidence');
+            assert.equal(b.records.length, 2, 'B must own both logical boundaries');
             assert.equal(await h.count(id), 0, 'B write became externally visible');
         });
         assert.equal(await h.count(id), 0);
@@ -60,16 +60,16 @@ async function detachedInsideB() {
     let bodies = 0;
     await testing.withTestTransaction(async a => {
         task = gate.promise.then(async () => {
-            assert.throws(() => testing.transactions(), /active.*session/i);
+            assert.throws(() => testing.currentProbe(), /active.*session/i);
             await assert.rejects(core.transactional(() => { bodies++; })(), /closed/i);
-            assert.equal(a.transactions.length, 0);
+            assert.equal(a.records.length, 0);
         });
     });
     await testing.withTestTransaction(async b => {
         gate.resolve();
         await task;
-        assert.equal(testing.transactions(), b);
-        assert.equal(b.transactions.length, 0, 'native detached Promise rebound to B');
+        assert.equal(testing.currentProbe(), b);
+        assert.equal(b.records.length, 0, 'native detached Promise rebound to B');
     });
     assert.equal(bodies, 0);
     console.log('LIFETIME_DETACHED_B:owner=closed-A:rejected=1:B-evidence=0');
@@ -94,14 +94,14 @@ async function mockDetached({ afterAll = false } = {}) {
     try {
         await testing.mockTransactions(async a => {
             task = gate.promise.then(async () => {
-                assert.throws(() => testing.transactions(), /active.*session/i);
+                assert.throws(() => testing.currentProbe(), /active.*session/i);
                 for (const propagation of Object.values(core.Propagation)) {
                     await assert.rejects(core.transactional(async () => {
                         bodies++;
                         await driver.ctx(datasource).query('SELECT 1');
                     }, { datasource, propagation })(), /closed/i);
                 }
-                assert.equal(a.transactions.length, 0);
+                assert.equal(a.records.length, 0);
             });
         }, { datasource });
         assert.equal(core.getTransactionManager(datasource), manager, 'real manager was not restored after mock A');
@@ -124,7 +124,7 @@ async function mockDetached({ afterAll = false } = {}) {
     const outsideAndCleanup = async () => {
         try {
             const before = begins;
-            assert.throws(() => testing.transactions(), /active.*session/i);
+            assert.throws(() => testing.currentProbe(), /active.*session/i);
             const result = await core.transactional(async () => {
                 const backend = await pidFor(datasource);
                 const { rows } = await driver.ctx(datasource).query('SELECT 1 AS live');
@@ -141,8 +141,8 @@ async function mockDetached({ afterAll = false } = {}) {
         await testing.withTestTransaction(async b => {
             assert.equal(begins, 1, 'B must own exactly one real physical BEGIN');
             await finish();
-            assert.equal(testing.transactions(datasource), b);
-            assert.equal(b.transactions.length, 0, 'late mock Promise rebound to B');
+            assert.equal(testing.currentProbe(datasource), b);
+            assert.equal(b.records.length, 0, 'late mock Promise rebound to B');
         }, { datasource });
         await outsideAndCleanup();
     } finally { core.clearTransactionManager(datasource); }
@@ -165,7 +165,7 @@ async function scheduleAfterAll(clock) {
             setTimeout(() => { item.timerTask = write(item.id, observed)(); }, 1);
             item.promiseTask = gate.promise.then(async () => {
                 await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), /closed/i);
-                assert.equal(a.transactions.length, 0);
+                assert.equal(a.records.length, 0);
             });
         });
     }
@@ -196,7 +196,7 @@ async function verifyCompletion(observed, a) {
     assert.equal(observed.probe, undefined, 'runner completion hook unexpectedly retained an active probe');
     assert.match(observed.probeError.message, /active.*session/i);
     assert.equal(typeof observed.pid, 'number');
-    assert.equal(a.transactions.length, 0);
+    assert.equal(a.records.length, 0);
     assert.equal(await h.count('completion-hook'), 1);
     console.log('LIFETIME_COMPLETION:owner=production:backend=physical:persisted=1:A-evidence=0');
 }

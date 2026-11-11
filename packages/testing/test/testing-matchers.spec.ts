@@ -6,7 +6,7 @@ import {
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers, mockTransactions,
-    transactions, withTestTransaction,
+    currentProbe, withTestTransaction,
 } from "../src";
 import { FakeTransactionManager } from "../src/fake";
 
@@ -29,9 +29,9 @@ describe("framework-neutral transaction assertions", () => {
         let ready = 0;
         let release!: () => void;
         const bothReady = new Promise<void>(resolve => { release = resolve; });
-        const wrappers = await Promise.all([0, 1].map(index => withTestTransaction(async t => {
-            const repository = t.track(original);
-            const peer = t.track(function peer() {});
+        const wrappers = await Promise.all([0, 1].map(index => withTestTransaction(async tx => {
+            const repository = tx.track(original);
+            const peer = tx.track(function peer() {});
             const work = transactional(() => {
                 repository.save();
                 peer();
@@ -43,7 +43,7 @@ describe("framework-neutral transaction assertions", () => {
             await bothReady;
             await Promise.resolve();
             assertSameTransaction(original.save, peer);
-            expect(t.txOf(original.save)).toBe(t.txOf(repository.save));
+            expect(tx.txOf(original.save)).toBe(tx.txOf(repository.save));
             if (index) {
                 assertRolledBack(original.save);
                 check(original.save).not.toHaveCommitted();
@@ -71,8 +71,8 @@ describe("framework-neutral transaction assertions", () => {
         let releaseSecond!: () => void;
         const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
         let dangling!: Promise<void>;
-        const first = withTestTransaction(async t => {
-            const work = t.track(original);
+        const first = withTestTransaction(async tx => {
+            const work = tx.track(original);
             await transactional(work)();
             await started;
             dangling = danglingGate.then(() => {
@@ -80,8 +80,8 @@ describe("framework-neutral transaction assertions", () => {
                 assertCommitted(work);
             });
         });
-        const second = withTestTransaction(async t => {
-            const work = t.track(original);
+        const second = withTestTransaction(async tx => {
+            const work = tx.track(original);
             await expect(transactional(() => { work(); throw new Error("second"); })()).rejects.toThrow("second");
             secondReady();
             await secondGate;
@@ -111,9 +111,9 @@ describe("framework-neutral transaction assertions", () => {
 
     it("rejects tracking another session's wrapper without changing its immutable evidence", async () => {
         let wrapper!: () => void;
-        await mockTransactions(t => { wrapper = t.track(function original() {}); wrapper(); });
-        await mockTransactions(t => {
-            expect(() => t.track(wrapper)).toThrow("Cannot track a wrapper belonging to a different transaction probe");
+        await mockTransactions(tx => { wrapper = tx.track(function original() {}); wrapper(); });
+        await mockTransactions(tx => {
+            expect(() => tx.track(wrapper)).toThrow("Cannot track a wrapper belonging to a different transaction probe");
             assertOutsideTransaction(wrapper);
         });
         assertOutsideTransaction(wrapper);
@@ -124,9 +124,9 @@ describe("framework-neutral transaction assertions", () => {
             "toRunInSameTransactionAs", "toRunInSeparateTransactionFrom", "toRunOutsideTransaction",
             "toRunAfterCommitOf", "toHaveCommitted", "toHaveRolledBack",
         ]);
-        await mockTransactions(async t => {
+        await mockTransactions(async tx => {
             const original = { save() {}, decrease() {}, nested() {} };
-            const repository = t.track(original);
+            const repository = tx.track(original);
             await transactional(async () => {
                 repository.save();
                 await transactional(repository.decrease)();
@@ -145,12 +145,12 @@ describe("framework-neutral transaction assertions", () => {
     });
 
     it("asserts separate REQUIRES_NEW and consecutive transactions but never equates two outside calls", async () => {
-        await mockTransactions(async t => {
-            const outer = t.track(function save() {});
-            const inner = t.track(function audit() {});
-            const later = t.track(function later() {});
-            const outside = t.track(function mail() {});
-            const otherOutside = t.track(function otherMail() {});
+        await mockTransactions(async tx => {
+            const outer = tx.track(function save() {});
+            const inner = tx.track(function audit() {});
+            const later = tx.track(function later() {});
+            const outside = tx.track(function mail() {});
+            const otherOutside = tx.track(function otherMail() {});
             await transactional(async () => {
                 outer();
                 await transactional(inner, { propagation: Propagation.REQUIRES_NEW })();
@@ -172,11 +172,11 @@ describe("framework-neutral transaction assertions", () => {
     });
 
     it("reports rollback and injected commit failure without considering either committed", async () => {
-        await mockTransactions(async t => {
-            const failed = t.track(function save() {});
-            const commitFailed = t.track(function update() {});
+        await mockTransactions(async tx => {
+            const failed = tx.track(function save() {});
+            const commitFailed = tx.track(function update() {});
             await expect(transactional(() => { failed(); throw new Error("application"); })()).rejects.toThrow("application");
-            t.fail("commit", { containing: commitFailed });
+            tx.failNext("commit", { containing: commitFailed });
             await expect(transactional(commitFailed)()).rejects.toThrow("commit failed");
             assertRolledBack(failed);
             assertRolledBack(commitFailed);
@@ -187,11 +187,11 @@ describe("framework-neutral transaction assertions", () => {
     });
 
     it("requires genuine asynchronous afterCommit provenance, not merely a later outside call", async () => {
-        await mockTransactions(async t => {
-            const save = t.track(function save() {});
-            const mail = t.track(function mail() {});
-            const ordinary = t.track(function ordinary() {});
-            const immediateHook = t.track(function immediateHook() {});
+        await mockTransactions(async tx => {
+            const save = tx.track(function save() {});
+            const mail = tx.track(function mail() {});
+            const ordinary = tx.track(function ordinary() {});
+            const immediateHook = tx.track(function immediateHook() {});
             await transactional(() => {
                 save();
                 afterCommit(async () => { await Promise.resolve(); mail(); });
@@ -208,11 +208,11 @@ describe("framework-neutral transaction assertions", () => {
     });
 
     it("does not confuse an inner owner's callback with the outer owner or callbacks that start transactions", async () => {
-        await mockTransactions(async t => {
-            const outer = t.track(function outer() {});
-            const inner = t.track(function inner() {});
-            const mail = t.track(function mail() {});
-            const transactionalMail = t.track(function transactionalMail() {});
+        await mockTransactions(async tx => {
+            const outer = tx.track(function outer() {});
+            const inner = tx.track(function inner() {});
+            const mail = tx.track(function mail() {});
+            const transactionalMail = tx.track(function transactionalMail() {});
             await transactional(async () => {
                 outer();
                 await transactional(() => {
@@ -229,9 +229,9 @@ describe("framework-neutral transaction assertions", () => {
     });
 
     it("does not attribute rollback synchronizations to afterCommit", async () => {
-        await mockTransactions(async t => {
-            const save = t.track(function save() {});
-            const mail = t.track(function mail() {});
+        await mockTransactions(async tx => {
+            const save = tx.track(function save() {});
+            const mail = tx.track(function mail() {});
             await expect(transactional(() => {
                 save();
                 afterRollback(mail);
@@ -244,9 +244,9 @@ describe("framework-neutral transaction assertions", () => {
 
     it("uses the same provenance and assertions in the integration helper", async () => {
         useTransactionManager(new FakeTransactionManager());
-        await withTestTransaction(async t => {
-            const save = t.track(function save() {});
-            const mail = t.track(function mail() {});
+        await withTestTransaction(async tx => {
+            const save = tx.track(function save() {});
+            const mail = tx.track(function mail() {});
             await transactional(() => { save(); afterCommit(mail); })();
             assertCommitted(save);
             assertAfterCommitOf(mail, save);
@@ -255,8 +255,8 @@ describe("framework-neutral transaction assertions", () => {
 
     it("preserves immutable recorded evidence after the test session closes", async () => {
         let save!: () => void;
-        await mockTransactions(async t => {
-            save = t.track(function save() {});
+        await mockTransactions(async tx => {
+            save = tx.track(function save() {});
             await transactional(save)();
         });
         assertCommitted(save);
@@ -266,7 +266,7 @@ describe("framework-neutral transaction assertions", () => {
 
 describe("matcher usage errors and exact diagnostics", () => {
     it("prefers explicit mock names, then object properties, then standalone function names", async () => {
-        await mockTransactions(t => {
+        await mockTransactions(tx => {
             const vitestDefault = jest.fn();
             vitestDefault.getMockName = () => "vi.fn()";
             const constructorDefault = jest.fn();
@@ -278,7 +278,7 @@ describe("matcher usage errors and exact diagnostics", () => {
                 vitestDefault, constructorDefault, vitest3Default,
                 propertyLabel: function implementationName() {},
             };
-            const accounts = t.track(original);
+            const accounts = tx.track(original);
             for (const fn of Object.values(accounts)) fn();
             for (const [key, expected] of [
                 ["debit", "accounts.debit"], ["credit", "credit"],
@@ -292,13 +292,13 @@ describe("matcher usage errors and exact diagnostics", () => {
             }
             accounts.credit.mockName("accounts.credit");
             expect(matchers.toHaveCommitted.call({}, accounts.credit).message()).toContain("Received: accounts.credit →");
-            const standalone = t.track(function standaloneName() {});
+            const standalone = tx.track(function standaloneName() {});
             standalone();
             expect(matchers.toHaveCommitted.call({}, standalone).message()).toContain("Received: standaloneName →");
-            const unnamed = t.track(function spy() {});
+            const unnamed = tx.track(function spy() {});
             unnamed();
             expect(matchers.toHaveCommitted.call({}, unnamed).message()).toContain("Received: <anonymous> →");
-            const defaultSpy = t.track(Object.defineProperty(jest.fn(), "name", { value: "spy" }));
+            const defaultSpy = tx.track(Object.defineProperty(jest.fn(), "name", { value: "spy" }));
             defaultSpy();
             expect(matchers.toHaveCommitted.call({}, defaultSpy).message()).toContain("Received: <anonymous> →");
             defaultSpy.mockName("named operation");
@@ -307,15 +307,15 @@ describe("matcher usage errors and exact diagnostics", () => {
     });
 
     it.each(Object.keys(matchers) as (keyof typeof matchers)[])("%s throws malformed operands even under .not", async name => {
-        await mockTransactions(t => {
-            const once = t.track(function once() {});
-            const never = t.track(function never() {});
-            const twice = t.track(function twice() {});
+        await mockTransactions(tx => {
+            const once = tx.track(function once() {});
+            const never = tx.track(function never() {});
+            const twice = tx.track(function twice() {});
             once(); twice(); twice();
             const matcher = matchers[name];
             const binary = name.endsWith("As") || name.endsWith("From") || name.endsWith("Of");
             const invoke = (received: unknown, other = once) => matcher.call({ isNot: true }, received, other);
-            expect(() => invoke(() => {})).toThrow(new TypeError(`${name}: received must be a function tracked by transactions().track or the test probe's track`));
+            expect(() => invoke(() => {})).toThrow(new TypeError(`${name}: received must be a function tracked by currentProbe().track or the test probe's track`));
             expect(() => invoke(null)).toThrow(TypeError);
             expect(() => invoke(never)).toThrow(new TypeError(`${name}: received: 0 calls recorded through the wrapper returned by track()`));
             expect(() => invoke(twice)).toThrow(new TypeError(`${name}: received must have exactly one recorded call; received 2`));
@@ -324,7 +324,7 @@ describe("matcher usage errors and exact diagnostics", () => {
             if (binary) {
                 expect(() => invoke(once, never)).toThrow(new TypeError(`${name}: other: 0 calls recorded through the wrapper returned by track()`));
                 expect(() => invoke(once, twice)).toThrow(new TypeError(`${name}: other must have exactly one recorded call; received 2`));
-                expect(() => matcher.call({ isNot: true }, once)).toThrow(new TypeError(`${name}: other must be a function tracked by transactions().track or the test probe's track`));
+                expect(() => matcher.call({ isNot: true }, once)).toThrow(new TypeError(`${name}: other must be a function tracked by currentProbe().track or the test probe's track`));
             }
         });
     });
@@ -332,9 +332,9 @@ describe("matcher usage errors and exact diagnostics", () => {
     it.each(["toRunInSameTransactionAs", "toRunInSeparateTransactionFrom", "toRunAfterCommitOf"] as const)(
         "%s rejects operands belonging to distinct test sessions, including under .not", async name => {
             let first!: () => void;
-            await mockTransactions(t => { first = t.track(function first() {}); first(); });
-            await mockTransactions(t => {
-                const second = t.track(function second() {});
+            await mockTransactions(tx => { first = tx.track(function first() {}); first(); });
+            await mockTransactions(tx => {
+                const second = tx.track(function second() {});
                 second();
                 expect(() => matchers[name].call({ isNot: true }, first, second)).toThrow(
                     new TypeError(`${name}: Functions belong to different transaction probes`),
@@ -345,9 +345,9 @@ describe("matcher usage errors and exact diagnostics", () => {
     );
 
     it("names the missed transaction, propagation, outcome and call event exactly", async () => {
-        await mockTransactions(async t => {
-            const save = t.track(function save() {});
-            const mail = t.track(function mail() {});
+        await mockTransactions(async tx => {
+            const save = tx.track(function save() {});
+            const mail = tx.track(function mail() {});
             await transactional(save)();
             mail();
             const result = matchers.toRunInSameTransactionAs.call({}, mail, save);
@@ -376,12 +376,12 @@ describe("matcher usage errors and exact diagnostics", () => {
     });
 
     it("fails successful positive assertions under .not with their full diagnostic", async () => {
-        await mockTransactions(async t => {
-            const save = t.track(function save() {});
-            const decrease = t.track(function decrease() {});
-            const audit = t.track(function audit() {});
-            const mail = t.track(function mail() {});
-            const rollback = t.track(function rollback() {});
+        await mockTransactions(async tx => {
+            const save = tx.track(function save() {});
+            const decrease = tx.track(function decrease() {});
+            const audit = tx.track(function audit() {});
+            const mail = tx.track(function mail() {});
+            const rollback = tx.track(function rollback() {});
             await transactional(() => { save(); decrease(); afterCommit(mail); })();
             await transactional(audit, { propagation: Propagation.REQUIRES_NEW })();
             await expect(transactional(() => { rollback(); throw new Error("rollback"); })()).rejects.toThrow();
@@ -399,27 +399,27 @@ describe("matcher usage errors and exact diagnostics", () => {
     });
 });
 
-describe("transactions() accessor and portable lifecycle", () => {
+describe("currentProbe() accessor and portable lifecycle", () => {
     it("rejects every propagation while the helper's native begin is initializing", async () => {
         const manager = new FakeTransactionManager();
         useTransactionManager(manager);
         const callback = jest.fn();
         const begin = jest.spyOn(manager as any, "beginTransaction").mockImplementation(async () => {
-            const probe = transactions();
+            const probe = currentProbe();
             for (const propagation of Object.values(Propagation)) {
                 await expect(transactional(callback, { propagation })()).rejects.toThrow("initialization is still in progress");
             }
-            expect(probe.transactions).toHaveLength(0);
+            expect(probe.records).toHaveLength(0);
             expect(callback).not.toHaveBeenCalled();
             return { transaction: {} };
         });
-        await withTestTransaction(async t => {
-            expect(transactions()).toBe(t);
+        await withTestTransaction(async tx => {
+            expect(currentProbe()).toBe(tx);
             await transactional(callback)();
         });
         expect(begin).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledTimes(1);
-        expect(() => transactions()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("active transaction test session");
     });
 
     it("keeps failed initialization's cause in retained native-begin tasks", async () => {
@@ -437,7 +437,7 @@ describe("transactions() accessor and portable lifecycle", () => {
                     await expect(result).rejects.toThrow("initialization failed");
                     await expect(result).rejects.toMatchObject({ cause });
                 }
-                expect(() => transactions()).toThrow("active transaction test session");
+                expect(() => currentProbe()).toThrow("active transaction test session");
             });
             throw cause;
         });
@@ -445,7 +445,7 @@ describe("transactions() accessor and portable lifecycle", () => {
         release();
         await detached;
         expect(callback).not.toHaveBeenCalled();
-        expect(() => transactions()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("active transaction test session");
     });
 
     it("allocates hook provenance storage only when an afterCommit callback runs", async () => {
@@ -465,17 +465,17 @@ describe("transactions() accessor and portable lifecycle", () => {
                 expect(allocations).toBe(1);
                 const testing = require("../src") as typeof import("../src");
                 expect(allocations).toBe(1);
-                await testing.mockTransactions(async t => {
-                    const work = t.track(function work() {});
+                await testing.mockTransactions(async tx => {
+                    const work = tx.track(function work() {});
                     await core.transactional(work)();
                     testing.assertCommitted(work);
                 });
                 expect(allocations).toBe(2);
                 await testing.mockTransactions(() => {});
                 expect(allocations).toBe(2);
-                await testing.mockTransactions(async t => {
-                    const work = t.track(function work() {});
-                    const hook = t.track(function hook() {});
+                await testing.mockTransactions(async tx => {
+                    const work = tx.track(function work() {});
+                    const hook = tx.track(function hook() {});
                     await core.transactional(() => { work(); core.afterCommit(hook); })();
                     testing.assertAfterCommitOf(hook, work);
                 });
@@ -487,45 +487,45 @@ describe("transactions() accessor and portable lifecycle", () => {
     });
 
     it("rejects access outside a session, even without a registered datasource", () => {
-        expect(() => transactions()).toThrow("transactions() requires an active transaction test session");
-        expect(() => transactions(Symbol("missing"))).toThrow("transactions() requires an active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test session");
+        expect(() => currentProbe(Symbol("missing"))).toThrow("currentProbe() requires an active transaction test session");
     });
 
     it("returns the exact probe across awaits in mock and integration helpers", async () => {
-        await mockTransactions(async t => {
-            expect(transactions()).toBe(t);
-            expect(transactions(t.datasource)).toBe(t);
+        await mockTransactions(async tx => {
+            expect(currentProbe()).toBe(tx);
+            expect(currentProbe(tx.datasource)).toBe(tx);
             await Promise.resolve();
-            expect(transactions()).toBe(t);
+            expect(currentProbe()).toBe(tx);
         });
         useTransactionManager(new FakeTransactionManager());
-        await withTestTransaction(async t => {
-            expect(transactions()).toBe(t);
+        await withTestTransaction(async tx => {
+            expect(currentProbe()).toBe(tx);
             await transactional(async () => {
                 await Promise.resolve();
-                expect(transactions()).toBe(t);
+                expect(currentProbe()).toBe(tx);
             })();
         });
-        expect(() => transactions()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("active transaction test session");
     });
 
     it("keeps concurrent integration sessions and named mock sessions separate", async () => {
         useTransactionManager(new FakeTransactionManager());
-        const probes = await Promise.all(Array.from({ length: 8 }, async () => withTestTransaction(async t => {
+        const probes = await Promise.all(Array.from({ length: 8 }, async () => withTestTransaction(async tx => {
             await Promise.resolve();
-            expect(transactions()).toBe(t);
-            return t;
+            expect(currentProbe()).toBe(tx);
+            return tx;
         })));
         expect(new Set(probes).size).toBe(8);
         const datasource = Symbol("named");
         await mockTransactions(async outer => {
             await mockTransactions(async inner => {
-                expect(transactions()).toBe(inner);
-                expect(transactions(outer.datasource)).toBe(outer);
+                expect(currentProbe()).toBe(inner);
+                expect(currentProbe(outer.datasource)).toBe(outer);
                 await Promise.resolve();
-                expect(transactions(datasource)).toBe(inner);
+                expect(currentProbe(datasource)).toBe(inner);
             }, { datasource });
-            expect(transactions()).toBe(outer);
+            expect(currentProbe()).toBe(outer);
         });
     });
 
@@ -534,7 +534,7 @@ describe("transactions() accessor and portable lifecycle", () => {
         const gate = new Promise<void>(resolve => { release = resolve; });
         let dangling!: Promise<void>;
         await mockTransactions(() => {
-            dangling = gate.then(() => { expect(() => transactions()).toThrow("active transaction test session"); });
+            dangling = gate.then(() => { expect(() => currentProbe()).toThrow("active transaction test session"); });
         });
         release();
         await dangling;
@@ -546,9 +546,9 @@ describe("transactions() accessor and portable lifecycle", () => {
             const gate = new Promise<void>(resolve => { release = resolve; });
             let dangling!: Promise<void>;
             await mockTransactions(() => {
-                dangling = gate.then(() => { expect(() => transactions()).toThrow("active transaction test session"); });
+                dangling = gate.then(() => { expect(() => currentProbe()).toThrow("active transaction test session"); });
             }, { datasource: Symbol("inner") });
-            expect(transactions()).toBe(outer);
+            expect(currentProbe()).toBe(outer);
             release();
             await dangling;
         });
@@ -559,21 +559,21 @@ describe("transactions() accessor and portable lifecycle", () => {
         useTransactionManager(manager);
         const rollback = jest.spyOn(manager as any, "rollbackTransaction");
         const release = jest.spyOn(manager as any, "releaseTransaction");
-        let probe!: ReturnType<typeof transactions>;
+        let probe!: ReturnType<typeof currentProbe>;
         const begin = jest.spyOn(manager as any, "beginTransaction").mockImplementation(async () => {
-            probe = transactions();
+            probe = currentProbe();
             return { transaction: {} };
         });
-        await withTestTransaction(async t => {
+        await withTestTransaction(async tx => {
             await Promise.resolve();
-            expect(t).toBe(probe);
-            expect(transactions()).toBe(probe);
+            expect(tx).toBe(probe);
+            expect(currentProbe()).toBe(probe);
             expect(manager.getCurrentTransaction()).toBeUndefined();
         });
         expect(begin).toHaveBeenCalledTimes(1);
         expect(rollback).toHaveBeenCalledTimes(1);
         expect(release).toHaveBeenCalledTimes(1);
-        expect(() => transactions()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("active transaction test session");
         begin.mockRestore();
         await withTestTransaction(() => {});
     });
@@ -590,7 +590,7 @@ describe("transactions() accessor and portable lifecycle", () => {
         expect(callback).not.toHaveBeenCalled();
         expect(rollback).not.toHaveBeenCalled();
         expect(release).not.toHaveBeenCalled();
-        expect(() => transactions()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("active transaction test session");
     });
 
     it.each([undefined, new Error("application")])("retains application failure %p when physical release fails", async applicationError => {

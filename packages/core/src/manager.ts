@@ -6,7 +6,7 @@ import { DatasourceSetupError, IllegalTransactionStateException, NestedTransacti
     NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException,
     ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError } from "./error";
 import { DefaultLogger, Logger } from "./logger";
-import { assertTestSessionReady, currentTestSession, testAccess, testScope, testSession, TestBoundaryInfo, FixtureLease, runTestProvenance, testProvenance } from "./internal";
+import { assertTestSessionReady, currentTestSession, testAccess, testScope, testSession, TestBoundaryInfo, TestConnectionLease, runTestProvenance, testProvenance, currentTestManagedScope, runTestManagedScope, observeTestTransaction } from "./internal";
 
 const managers = new Map<string | symbol, PlatformTransactionManager<any>>();
 
@@ -54,8 +54,8 @@ export function transactional<This, Args extends unknown[], R>(
     fn: (this: This, ...args: Args) => R, config: Propagation | TransactionConfig = Propagation.REQUIRED,
 ): (this: This, ...args: Args) => Promise<Awaited<R>> {
     const snapshot = typeof config === "string" ? { propagation: config } : { ...config };
-    return async function(this: This, ...args: Args): Promise<Awaited<R>> {
-        return await runInTransaction(() => fn.apply(this, args), snapshot);
+    return function(this: This, ...args: Args): Promise<Awaited<R>> {
+        return observeTestTransaction(runInTransaction(() => fn.apply(this, args), snapshot)) as Promise<Awaited<R>>;
     };
 }
 
@@ -80,7 +80,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             release: (tx, failed) => this.releaseTransaction(tx, failed),
             outside: fn => this.inScope(null, fn),
             logError: (message, error) => this.logError(message, error),
-            fixtureConnection: (tx, lease) => this.createFixtureConnection(tx, lease),
+            testConnection: (tx, lease) => this.createTestConnection(tx, lease),
             createSavepoint: (tx, name) => this.createSavepoint(tx, name),
             rollbackToSavepoint: (tx, name) => this.rollbackToSavepoint(tx, name),
             releaseSavepoint: (tx, name) => this.releaseSavepoint(tx, name),
@@ -108,9 +108,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     /** Called once after completion; failed means COMMIT or ROLLBACK threw. */
     protected async releaseTransaction(tx: Tx, failed: boolean): Promise<void> {}
 
-    /** Internal optional capability implemented by driver-owned fixture adapters. */
-    protected createFixtureConnection(tx: Tx, lease: FixtureLease): unknown {
-        throw new Error("This transaction manager does not support fixture connections");
+    /** Internal optional capability implemented by driver-owned withTestConnection adapters. */
+    protected createTestConnection(tx: Tx, lease: TestConnectionLease): unknown {
+        throw new Error("This transaction manager does not support withTestConnection connections");
     }
 
     protected getRemainingTimeout(): number | undefined {
@@ -153,7 +153,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     private async checkTestConstraints(tx: Tx): Promise<void> {
         const session = testSession(this);
         if (session?.context) {
-            await this.checkTestTransactionConstraints(tx, `tranjs_sp_${++session.counter}`);
+            await this.checkTestTransactionConstraints(tx, `tranjs_${session.id}_sp_${++session.counter}`);
         }
     }
 
@@ -189,7 +189,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             // Even an injected rollback failure must not leave test writes behind.
             let injected: unknown;
             let hasInjected = false;
-            try { if (info) session!.fail("rollback", info); }
+            try { if (info) session!.failNext("rollback", info); }
             catch (error) { injected = error; hasInjected = true; }
             if (savepoint) await this.recoverTestSavepoint(state.context.transaction as Tx, savepoint);
             else await this.rollbackTransaction(state.context.transaction as Tx);
@@ -240,10 +240,10 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             }
             const started = Date.now();
             const info = session?.begin(options ?? {}, propagation, parent);
-            const savepoint = session?.context ? `tranjs_sp_${++session.counter}` : undefined;
+            const savepoint = session?.context ? `tranjs_${session.id}_sp_${++session.counter}` : undefined;
             let context: MetadataWrappedTransaction<Tx>;
             try {
-                if (info) session!.fail("begin", info);
+                if (info) session!.failNext("begin", info);
                 if (savepoint) {
                     context = session!.context!;
                     await this.createSavepoint(context.transaction, savepoint);
@@ -272,7 +272,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                         throw error;
                     }
                     try {
-                        if (info) session!.fail("commit", info);
+                        if (info) session!.failNext("commit", info);
                         if (savepoint) {
                             await this.checkTestConstraints(context.transaction as Tx);
                             await this.releaseSavepoint(context.transaction as Tx, savepoint);
@@ -320,7 +320,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                 try {
                     const tx = state.context.transaction as Tx;
                     const session = testSession(this);
-                    const name = `tranjs_sp_${session?.context ? ++session.counter : ++state.savepointCounter}`;
+                    const name = session?.context ? `tranjs_${session.id}_sp_${++session.counter}` : `tranjs_sp_${++state.savepointCounter}`;
                     await this.createSavepoint(tx, name);
                     let result: R;
                     try {
@@ -359,15 +359,36 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     ): Promise<R> {
         const current = currentTestSession();
         if (!current) return this.dispatchTransaction(propagation, callback, options);
-        if (testProvenance() === "fixture") throw new Error("Managed transaction entry is forbidden inside a fixture callback");
-        if (current.fixtureActive) throw new Error("Managed transaction entry overlaps an active fixture");
+        if (testProvenance() === "withTestConnection") throw new Error("Managed transaction entry is forbidden inside a withTestConnection callback");
+        if (current.testConnectionActive) throw new Error("Managed transaction entry overlaps an active withTestConnection");
         const session = testSession(this);
         if (session) assertTestSessionReady(session);
-        if (session && !session.admitting) throw new Error("Test session no longer admits managed work");
+        const parentScope = session && currentTestManagedScope(session);
+        if (session && !session.admitting && !parentScope) throw new Error("Test session no longer admits managed work");
         // A mock's registration may already be restored to another manager, but
         // work retained by that closed session must not enter a real transaction.
         if (current !== session && (current.closed || "broken" in current)) {
             assertTestSessionReady(current);
+        }
+        if (session && !parentScope) {
+            const scope = { active: true };
+            let resolve!: (value: R) => void;
+            let reject!: (error: unknown) => void;
+            const operation = new Promise<R>((yes, no) => { resolve = yes; reject = no; });
+            session.pendingTransactions.add(operation);
+            operation.then(() => session.pendingTransactions.delete(operation), () => session.pendingTransactions.delete(operation));
+            session.managedActive++;
+            const work = runTestManagedScope(session, scope, () => this.dispatchTransaction(propagation, callback, options));
+            work.then(value => {
+                scope.active = false;
+                session.managedActive--;
+                resolve(value);
+            }, error => {
+                scope.active = false;
+                session.managedActive--;
+                reject(error);
+            });
+            return operation;
         }
         if (session) session.managedActive++;
         try {

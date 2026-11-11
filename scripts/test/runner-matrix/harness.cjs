@@ -18,7 +18,7 @@ async function cleanup() {
     }
 }
 async function exercise(probe, id) {
-    assert.equal(testing.transactions(), probe);
+    assert.equal(testing.currentProbe(), probe);
     const save = probe.track(async function save() {
         await driver.ctx().query(`INSERT INTO ${table} VALUES ($1)`, [id]);
         return (await driver.ctx().query('SELECT pg_backend_pid() AS pid')).rows[0].pid;
@@ -27,7 +27,7 @@ async function exercise(probe, id) {
     assert.equal(probe.txOf(save).outcome, 'committed');
     assert.equal(await count(id), 0, 'logical commit became visible outside the test transaction');
     await new Promise(resolve => setTimeout(resolve, 5));
-    assert.equal(testing.transactions(), probe, 'session lost after an await');
+    assert.equal(testing.currentProbe(), probe, 'session lost after an await');
     const second = await core.transactional(async () => (await driver.ctx().query('SELECT pg_backend_pid() AS pid')).rows[0].pid)();
     assert.equal(first, second, 'test did not retain its physical connection');
     return first;

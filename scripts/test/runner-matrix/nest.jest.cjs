@@ -25,7 +25,7 @@ afterAll(async () => { try { await moduleRef.close(); } finally { await h.cleanu
 test('Nest DI joins portable scope across awaits', () => h.testing.withTestTransaction(async probe => {
     const repository = moduleRef.get(Repository);
     const original = repository.save;
-    h.assert.equal(h.testing.transactions(), probe);
+    h.assert.equal(h.testing.currentProbe(), probe);
     repository.save = probe.track(original);
     try {
         const service = moduleRef.get(Service);

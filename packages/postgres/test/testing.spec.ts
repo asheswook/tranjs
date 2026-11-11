@@ -30,11 +30,11 @@ describe("withTestTransaction / postgres.js pool (real database, v3 and v4)", ()
     const insert = async (id: number) => { await ctx(datasource).unsafe(`INSERT INTO ${table} VALUES (${id})`); };
     const ids = async () => (await ctx(datasource).unsafe(`SELECT id FROM ${table} ORDER BY id`)).map(row => Number(row.id));
     const outsideIds = async () => (await sql.unsafe(`SELECT id FROM ${table} ORDER BY id`)).map(row => Number(row.id));
-    const constraintInsert = async (id: number, fixture = deferredTable) => {
-        await ctx(datasource).unsafe(`INSERT INTO ${fixture} VALUES (${id})`);
+    const constraintInsert = async (id: number, tableName = deferredTable) => {
+        await ctx(datasource).unsafe(`INSERT INTO ${tableName} VALUES (${id})`);
     };
-    const constraintIds = async (fixture = deferredTable) =>
-        (await ctx(datasource).unsafe(`SELECT id FROM ${fixture} ORDER BY id`)).map(row => Number(row.id));
+    const constraintIds = async (tableName = deferredTable) =>
+        (await ctx(datasource).unsafe(`SELECT id FROM ${tableName} ORDER BY id`)).map(row => Number(row.id));
     const expectUniqueError = async (operation: Promise<unknown>) => {
         await expect(operation).rejects.toBeInstanceOf(postgres.PostgresError);
         await expect(operation).rejects.toMatchObject({ code: "23505" });
@@ -47,13 +47,13 @@ describe("withTestTransaction / postgres.js pool (real database, v3 and v4)", ()
         useTransactionManager(manager, datasource);
     });
     beforeEach(async () => {
-        for (const fixture of [table, deferredTable, immediateTable]) await sql.unsafe(`DELETE FROM ${fixture}`);
+        for (const tableName of [table, deferredTable, immediateTable]) await sql.unsafe(`DELETE FROM ${tableName}`);
     });
     afterEach(async () => {
-        // Check before fixture cleanup: a leaked commit must fail the test.
+        // Check before test cleanup: a leaked commit must fail the test.
         expect(await outsideIds()).toEqual([]);
-        for (const fixture of [deferredTable, immediateTable]) {
-            expect(Array.from(await sql.unsafe(`SELECT * FROM ${fixture}`))).toEqual([]);
+        for (const tableName of [deferredTable, immediateTable]) {
+            expect(Array.from(await sql.unsafe(`SELECT * FROM ${tableName}`))).toEqual([]);
         }
     });
     afterAll(async () => {
@@ -271,17 +271,17 @@ describe("withTestTransaction / postgres.js pool (real database, v3 and v4)", ()
         [Propagation.REQUIRES_NEW, false], [Propagation.NESTED, false],
         [Propagation.REQUIRES_NEW, true], [Propagation.NESTED, true],
     ] as const)("preserves immediate mode after %s (application override: %s)", async (propagation, explicit) => {
-        const fixture = explicit ? deferredTable : immediateTable;
+        const tableName = explicit ? deferredTable : immediateTable;
         await test(() => tx(async () => {
             if (explicit) await ctx(datasource).unsafe("SET CONSTRAINTS ALL IMMEDIATE");
-            await tx(() => constraintInsert(1, fixture), { propagation });
+            await tx(() => constraintInsert(1, tableName), { propagation });
             let duplicateInserted = false;
             await expectUniqueError(tx(async () => {
-                await constraintInsert(1, fixture);
+                await constraintInsert(1, tableName);
                 duplicateInserted = true;
             }, { propagation }));
             expect(duplicateInserted).toBe(false);
-            expect(await constraintIds(fixture)).toEqual([1]);
+            expect(await constraintIds(tableName)).toEqual([1]);
         }));
     });
 
@@ -350,7 +350,7 @@ describe("withTestTransaction / postgres.js pool (real database, v3 and v4)", ()
         const hooks: string[] = [];
         await test(async t => {
             const joined = t.track(async () => tx(() => insert(2)));
-            t.fail("commit", { containing: joined });
+            t.failNext("commit", { containing: joined });
             // A different owner completes first: containing must not mean "next commit".
             await tx(() => insert(90));
             await expect(tx(async () => {

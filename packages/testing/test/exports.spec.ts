@@ -15,17 +15,19 @@ describe("built package exports", () => {
         runNode(`
             const assert = require('node:assert/strict');
             const testing = require('@tranjs/testing');
-            for (const name of ['mockTransactions', 'withTestTransaction', 'transactions',
+            for (const name of ['mockTransactions', 'withTestTransaction', 'withTestConnection', 'currentProbe',
                 'assertSameTransaction', 'assertSeparateTransaction', 'assertOutsideTransaction',
                 'assertAfterCommitOf', 'assertCommitted', 'assertRolledBack']) {
                 assert.equal(typeof testing[name], 'function', name);
             }
             assert.equal(typeof testing.matchers.toHaveCommitted, 'function');
-            testing.mockTransactions(t => {
-                assert.equal(typeof t.track, 'function');
-                assert.equal(typeof t.txOf, 'function');
-                assert.equal(typeof t.fail, 'function');
-                assert.deepEqual(t.transactions, []);
+            testing.mockTransactions(tx => {
+                assert.equal(testing.currentProbe(), tx);
+                assert.equal(typeof tx.track, 'function');
+                assert.equal(typeof tx.txOf, 'function');
+                assert.equal(typeof tx.failNext, 'function');
+                assert.deepEqual(tx.records, []);
+                assert.equal(Object.isFrozen(tx.records), true);
             }).catch(error => { console.error(error); process.exitCode = 1; });
         `);
     });
@@ -35,14 +37,15 @@ describe("built package exports", () => {
             const assert = require('node:assert/strict');
             (async () => {
                 const testing = await import('@tranjs/testing');
-                for (const name of ['mockTransactions', 'withTestTransaction']) {
+                for (const name of ['mockTransactions', 'withTestTransaction', 'withTestConnection', 'currentProbe']) {
                     assert.equal(typeof testing[name], 'function', name);
                 }
-                await testing.mockTransactions(t => {
-                    assert.equal(typeof t.track, 'function');
-                    assert.equal(typeof t.txOf, 'function');
-                    assert.equal(typeof t.fail, 'function');
-                    assert.deepEqual(t.transactions, []);
+                await testing.mockTransactions(tx => {
+                    assert.equal(testing.currentProbe(), tx);
+                    assert.equal(typeof tx.track, 'function');
+                    assert.equal(typeof tx.txOf, 'function');
+                    assert.equal(typeof tx.failNext, 'function');
+                    assert.deepEqual(tx.records, []);
                 });
             })().catch(error => { console.error(error); process.exitCode = 1; });
         `);

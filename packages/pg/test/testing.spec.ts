@@ -32,11 +32,11 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
     const insert = async (id: number) => { await ctx(datasource).query(`INSERT INTO ${table} VALUES (${id})`); };
     const ids = async () => (await ctx(datasource).query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => Number(row.id));
     const outsideIds = async () => (await pool.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => Number(row.id));
-    const constraintInsert = async (id: number, fixture = deferredTable) => {
-        await ctx(datasource).query(`INSERT INTO ${fixture} VALUES (${id})`);
+    const constraintInsert = async (id: number, tableName = deferredTable) => {
+        await ctx(datasource).query(`INSERT INTO ${tableName} VALUES (${id})`);
     };
-    const constraintIds = async (fixture = deferredTable) =>
-        (await ctx(datasource).query(`SELECT id FROM ${fixture} ORDER BY id`)).rows.map(row => Number(row.id));
+    const constraintIds = async (tableName = deferredTable) =>
+        (await ctx(datasource).query(`SELECT id FROM ${tableName} ORDER BY id`)).rows.map(row => Number(row.id));
     const expectUniqueError = async (operation: Promise<unknown>) => {
         await expect(operation).rejects.toBeInstanceOf(DatabaseError);
         await expect(operation).rejects.toMatchObject({ code: "23505" });
@@ -49,13 +49,13 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
         useTransactionManager(manager, datasource);
     });
     beforeEach(async () => {
-        for (const fixture of [table, deferredTable, immediateTable]) await pool.query(`DELETE FROM ${fixture}`);
+        for (const tableName of [table, deferredTable, immediateTable]) await pool.query(`DELETE FROM ${tableName}`);
     });
     afterEach(async () => {
-        // Check before fixture cleanup: a leaked commit must fail the test.
+        // Check before test cleanup: a leaked commit must fail the test.
         expect(await outsideIds()).toEqual([]);
-        for (const fixture of [deferredTable, immediateTable]) {
-            expect((await pool.query(`SELECT * FROM ${fixture}`)).rows).toEqual([]);
+        for (const tableName of [deferredTable, immediateTable]) {
+            expect((await pool.query(`SELECT * FROM ${tableName}`)).rows).toEqual([]);
         }
         expect(pool.idleCount).toBe(pool.totalCount);
     });
@@ -274,17 +274,17 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
         [Propagation.REQUIRES_NEW, false], [Propagation.NESTED, false],
         [Propagation.REQUIRES_NEW, true], [Propagation.NESTED, true],
     ] as const)("preserves immediate mode after %s (application override: %s)", async (propagation, explicit) => {
-        const fixture = explicit ? deferredTable : immediateTable;
+        const tableName = explicit ? deferredTable : immediateTable;
         await test(() => tx(async () => {
             if (explicit) await ctx(datasource).query("SET CONSTRAINTS ALL IMMEDIATE");
-            await tx(() => constraintInsert(1, fixture), { propagation });
+            await tx(() => constraintInsert(1, tableName), { propagation });
             let duplicateInserted = false;
             await expectUniqueError(tx(async () => {
-                await constraintInsert(1, fixture);
+                await constraintInsert(1, tableName);
                 duplicateInserted = true;
             }, { propagation }));
             expect(duplicateInserted).toBe(false);
-            expect(await constraintIds(fixture)).toEqual([1]);
+            expect(await constraintIds(tableName)).toEqual([1]);
         }));
     });
 
@@ -353,7 +353,7 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
         const hooks: string[] = [];
         await test(async t => {
             const joined = t.track(async () => tx(() => insert(2)));
-            t.fail("commit", { containing: joined });
+            t.failNext("commit", { containing: joined });
             // A different owner completes first: containing must not mean "next commit".
             await tx(() => insert(90));
             await expect(tx(async () => {

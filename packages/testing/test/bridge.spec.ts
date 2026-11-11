@@ -14,13 +14,13 @@ describe("core testing bridge compatibility", () => {
         expect(begin).not.toHaveBeenCalled();
     });
 
-    it("checks direct fixture imports before they can open a transaction", () => {
+    it("checks direct withTestConnection imports before they can open a transaction", () => {
         const begin = jest.fn();
         jest.doMock("@tranjs/core/internal/testing-bridge", () => ({
             TESTING_BRIDGE_VERSION: 2, begin,
         }));
         jest.isolateModules(() => {
-            expect(() => require("../src/fixture")).toThrow("received protocol 2");
+            expect(() => require("../src/test-connection")).toThrow("received protocol 2");
         });
         expect(begin).not.toHaveBeenCalled();
     });

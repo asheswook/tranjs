@@ -70,7 +70,7 @@ async function runtimeChecks() {
     const importedTesting = await import("@tranjs/testing");
     // A dual build may have distinct functions; shared state is checked below.
     for (const entry of [testing, importedTesting]) {
-        for (const key of ["fixture", "withTestTransaction", "transactions"]) assert.equal(typeof entry[key], "function");
+        for (const key of ["withTestConnection", "withTestTransaction", "currentProbe"]) assert.equal(typeof entry[key], "function");
     }
 
     const { Pool } = require("pg");
@@ -91,29 +91,29 @@ async function runtimeChecks() {
         created = true;
         for (const [sessionApi, otherApi, appCore] of directions) {
             await sessionApi.withTestTransaction(async probe => {
-                same(otherApi.transactions(datasource), probe, "Import and require must share the live probe");
-                same(sessionApi.transactions(), probe);
+                same(otherApi.currentProbe(datasource), probe, "Import and require must share the live probe");
+                same(sessionApi.currentProbe(), probe);
                 assert.throws(() => drivers.pg.ctx(datasource), /context|transaction/i);
-                await otherApi.fixture(async connection => {
-                    await connection.query(`INSERT INTO ${table} VALUES ($1)`, [1]);
+                await otherApi.withTestConnection(async db => {
+                    await db.query(`INSERT INTO ${table} VALUES ($1)`, [1]);
                     assert.throws(() => drivers.pg.ctx(datasource), /context|transaction/i);
                 }, { datasource });
-                assert.equal(probe.transactions.length, 0, "Fixture must not record a logical transaction");
+                assert.equal(probe.records.length, 0, "withTestConnection must not record a logical transaction");
                 const save = probe.track(async function save(id) {
-                    const connection = drivers.pg.ctx(datasource);
+                    const db = drivers.pg.ctx(datasource);
                     assert(manager.getCurrentTransaction());
-                    await connection.query(`INSERT INTO ${table} VALUES ($1)`, [id]);
-                    return (await connection.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
+                    await db.query(`INSERT INTO ${table} VALUES ($1)`, [id]);
+                    return (await db.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
                 });
                 const application = callback => appCore.transactional(callback, { datasource })();
                 assert.deepEqual(await application(() => save(2)), [1, 2]);
                 assert.equal(probe.txOf(save).outcome, "committed");
-                assert.equal(probe.transactions.length, 1);
+                assert.equal(probe.records.length, 1);
                 const failing = probe.track(async () => {
                     await drivers.pg.ctx(datasource).query(`INSERT INTO ${table} VALUES (3)`);
                 });
                 const failure = new Error("packed injected commit failure");
-                probe.fail("commit", { containing: failing, error: failure });
+                probe.failNext("commit", { containing: failing, error: failure });
                 await assert.rejects(application(failing), error => error === failure);
                 assert.equal(probe.txOf(failing).outcome, "rolled-back");
                 await application(async () => {
@@ -123,7 +123,7 @@ async function runtimeChecks() {
                 assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "No physical commit during session");
             }, { datasource });
             assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "Session must physically roll back");
-            assert.throws(() => otherApi.transactions(datasource), /session/i);
+            assert.throws(() => otherApi.currentProbe(datasource), /session/i);
         }
     } finally {
         core.clearTransactionManager(datasource);
@@ -163,48 +163,48 @@ async function mismatchChecks() {
     console.log(JSON.stringify({ mismatch: 1, begins }));
 }
 
-const types = `import { fixture, type FixtureOptions } from "@tranjs/testing";
-import type { PgFixtureConnection } from "@tranjs/pg";
-import type { Mysql2FixtureConnection } from "@tranjs/mysql2";
-import type { PostgresFixtureConnection } from "@tranjs/postgres";
+const types = `import { withTestConnection, type TestOptions } from "@tranjs/testing";
+import type { TestConnection as PgTestConnection } from "@tranjs/pg";
+import type { TestConnection as Mysql2TestConnection } from "@tranjs/mysql2";
+import type { TestConnection as PostgresTestConnection } from "@tranjs/postgres";
 
-export const pgFixture = <R>(fn: (ctx: PgFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
-export const mysqlFixture = <R>(fn: (ctx: Mysql2FixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
-export const postgresFixture = <R>(fn: (ctx: PostgresFixtureConnection) => R, options?: FixtureOptions) => fixture(fn, options);
-export const pgResult = () => pgFixture(async connection => (await connection.query("SELECT $1::int AS id", [1])).rows);
-export const mysqlResult = () => mysqlFixture(async connection => {
-    await connection.query("SELECT ? AS id", [1]);
-    return connection.execute("SELECT ? AS id", [1]);
+export const pgTestConnection = <R>(fn: (db: PgTestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
+export const mysqlTestConnection = <R>(fn: (db: Mysql2TestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
+export const postgresTestConnection = <R>(fn: (db: PostgresTestConnection) => R, options?: TestOptions) => withTestConnection(fn, options);
+export const pgResult = () => pgTestConnection(async db => (await db.query("SELECT $1::int AS id", [1])).rows);
+export const mysqlResult = () => mysqlTestConnection(async db => {
+    await db.query("SELECT ? AS id", [1]);
+    return db.execute("SELECT ? AS id", [1]);
 });
-export const postgresResult = () => postgresFixture(async connection => {
-    await connection.unsafe("SELECT $1::int AS id", [1]);
-    return connection\`SELECT \${1}::int AS id\`;
+export const postgresResult = () => postgresTestConnection(async db => {
+    await db.unsafe("SELECT $1::int AS id", [1]);
+    return db\`SELECT \${1}::int AS id\`;
 });
 export const restrictedTypes = () => {
-    void pgFixture(connection => {
+    void pgTestConnection(db => {
         // @ts-expect-error Native lifecycle is not exposed.
-        connection.release();
-        // @ts-expect-error Config objects are not part of the fixture contract.
-        connection.query({ text: "SELECT 1" });
-        // @ts-expect-error Callback queries are not part of the fixture contract.
-        connection.query("SELECT 1", () => {});
-        return connection.query<{ id: number }>("SELECT 1 AS id");
+        db.release();
+        // @ts-expect-error Config objects are not part of the withTestConnection contract.
+        db.query({ text: "SELECT 1" });
+        // @ts-expect-error Callback queries are not part of the withTestConnection contract.
+        db.query("SELECT 1", () => {});
+        return db.query<{ id: number }>("SELECT 1 AS id");
     });
-    void mysqlFixture(connection => {
+    void mysqlTestConnection(db => {
         // @ts-expect-error Native internals are not exposed.
-        connection.connection;
+        db.connection;
         // @ts-expect-error Native lifecycle is not exposed.
-        connection.commit();
-        return connection.execute("SELECT ? AS id", [1]);
+        db.commit();
+        return db.execute("SELECT ? AS id", [1]);
     });
-    void postgresFixture(connection => {
+    void postgresTestConnection(db => {
         // @ts-expect-error Native connection helpers are not exposed.
-        connection.reserve();
+        db.reserve();
         // @ts-expect-error Query modifiers are not exposed on plain promises.
-        connection\`SELECT 1\`.values();
+        db\`SELECT 1\`.values();
         // @ts-expect-error Native unsafe options are not supported.
-        connection.unsafe("SELECT 1", [], { prepare: false });
-        return connection\`SELECT 1\`;
+        db.unsafe("SELECT 1", [], { prepare: false });
+        return db\`SELECT 1\`;
     });
 };
 `;
@@ -278,10 +278,10 @@ async function main() {
             fs.writeFileSync(bridgeFile, original);
         }
 
-        fs.writeFileSync(path.join(consumer, "fixture-types.ts"), types);
+        fs.writeFileSync(path.join(consumer, "withTestConnection-types.ts"), types);
         fs.writeFileSync(path.join(consumer, "tsconfig.json"), JSON.stringify({
             compilerOptions: { target: "ES2022", module: "Node16", moduleResolution: "Node16", strict: true, skipLibCheck: false, noEmit: true },
-            files: ["fixture-types.ts"],
+            files: ["withTestConnection-types.ts"],
         }));
         run(process.execPath, [path.join(root, "node_modules/typescript/bin/tsc"), "-p", path.join(consumer, "tsconfig.json")], consumer);
         console.log(`Packed consumer passed: packages=${packages.length} identities=${runtime.identities} mixed=${runtime.mixed} mismatches=${mismatches} types=1 core-cache=${runtime.coreCachedModules}`);

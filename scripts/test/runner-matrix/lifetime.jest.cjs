@@ -44,9 +44,9 @@ test('pre-registered afterEach does not inherit the helper callback context', ()
 }));
 test('user-bound afterEach callback retains closed A and rejects', () => h.testing.withTestTransaction(async a => {
     captured = AsyncLocalStorage.bind(async () => {
-        h.assert.throws(() => h.testing.transactions(), /active.*session/i);
+        h.assert.throws(() => h.testing.currentProbe(), /active.*session/i);
         await h.assert.rejects(h.core.transactional(() => h.assert.fail('bound closed callback ran'))(), /closed/i);
-        h.assert.equal(a.transactions.length, 0);
+        h.assert.equal(a.records.length, 0);
         console.log('LIFETIME_BOUND_COMPLETION:owner=closed-A:rejected=1');
     });
 }));

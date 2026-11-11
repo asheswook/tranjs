@@ -1,14 +1,14 @@
 import "./bridge";
 
 export {
-    mockTransactions, transactions, withTestTransaction,
+    mockTransactions, currentProbe, withTestTransaction,
 } from "./session";
 export type {
-    TestFailureSelector, TestTransactionInfo, TestTransactionOptions, TestTransactionProbe,
+    TestFailureSelector, TestTransactionInfo, TestTransactionProbe,
 } from "./session";
 export {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, matchers,
 } from "./matchers";
-export { fixture } from "./fixture";
-export type { FixtureOptions } from "./fixture";
+export { withTestConnection } from "./test-connection";
+export type { TestOptions } from "./options";

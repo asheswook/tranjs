@@ -13,7 +13,7 @@ function inspect(name: MatcherName, operand: unknown, label: string): Inspected 
         if (!(error instanceof TypeError)) throw error;
         throw new TypeError(`${name}: ${label}: ${error.message}`);
     }
-    if (!entry) throw new TypeError(`${name}: ${label} must be a function tracked by transactions().track or the test probe's track`);
+    if (!entry) throw new TypeError(`${name}: ${label} must be a function tracked by currentProbe().track or the test probe's track`);
     if (entry.calls.length === 0) {
         throw new TypeError(`${name}: ${label}: 0 calls recorded through the wrapper returned by track()`);
     }

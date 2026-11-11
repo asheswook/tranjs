@@ -35,7 +35,7 @@ describe("withTestTransaction / mysql2 pool (real database)", () => {
     });
     beforeEach(async () => { await pool.query(`DELETE FROM ${table}`); });
     afterEach(async () => {
-        // Check before fixture cleanup: a leaked commit must fail the test.
+        // Check before test cleanup: a leaked commit must fail the test.
         expect(await outsideIds()).toEqual([]);
         const native = (pool as unknown as { pool: { _freeConnections: { length: number }; _allConnections: { length: number } } }).pool;
         expect(native._freeConnections.length).toBe(native._allConnections.length);
@@ -259,7 +259,7 @@ describe("withTestTransaction / mysql2 pool (real database)", () => {
         const hooks: string[] = [];
         await test(async t => {
             const joined = t.track(async () => tx(() => insert(2)));
-            t.fail("commit", { containing: joined });
+            t.failNext("commit", { containing: joined });
             // A different owner completes first: containing must not mean "next commit".
             await tx(() => insert(90));
             await expect(tx(async () => {

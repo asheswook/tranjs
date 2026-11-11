@@ -1,10 +1,10 @@
 import {
-    afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError,
+    afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError, DEFAULT_DATASOURCE,
     Propagation, transactional, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
-import { fixture, mockTransactions, transactions, withTestTransaction } from "../src";
+import { withTestConnection, mockTransactions, currentProbe, TestOptions, withTestTransaction } from "../src";
 import { FakeTransactionManager } from "../src/fake";
-import { FixtureLease, testSession } from "../../core/src/internal";
+import { TestConnectionLease, testSession } from "../../core/src/internal";
 
 function deferred<T = void>() {
     let resolve!: (value: T | PromiseLike<T>) => void;
@@ -18,7 +18,7 @@ interface Connection {
 }
 
 /** An opt-in driver capability; the ordinary fake deliberately remains unsupported. */
-class FixtureManager extends FakeTransactionManager {
+class TestConnectionManager extends FakeTransactionManager {
     readonly query = jest.fn((operation: PromiseLike<unknown>) => operation);
     readonly createSavepoint = jest.fn(async (_tx?: object, _name?: string) => {});
     readonly rollbackToSavepoint = jest.fn(async (_tx?: object, _name?: string) => {});
@@ -26,18 +26,18 @@ class FixtureManager extends FakeTransactionManager {
     readonly rollbackTransaction = jest.fn(async () => {});
     readonly releaseTransaction = jest.fn(async (_tx: object, _failed: boolean) => {});
     readonly checkTestTransactionConstraints = jest.fn(async (_tx: object, _name: string) => {});
-    readonly createFixtureConnection = jest.fn((_tx: object, lease: FixtureLease): Connection => ({
+    readonly createTestConnection = jest.fn((_tx: object, lease: TestConnectionLease): Connection => ({
         query: <T>(operation: PromiseLike<T>) => lease.track(() => this.query(operation) as PromiseLike<T>),
     }));
     remainingTimeout() { return this.getRemainingTimeout(); }
 }
 
-describe("fixture", () => {
-    const other = Symbol("other fixture datasource");
-    let manager: FixtureManager;
+describe("withTestConnection", () => {
+    const other = Symbol("other withTestConnection datasource");
+    let manager: TestConnectionManager;
 
     beforeEach(() => {
-        manager = new FixtureManager();
+        manager = new TestConnectionManager();
         manager.setLogger({ error: jest.fn() } as any);
         useTransactionManager(manager);
     });
@@ -49,55 +49,114 @@ describe("fixture", () => {
     });
 
     it("uses a hidden-transaction savepoint without a logical owner, deadline, probe record or constraint check", async () => {
-        await withTestTransaction(async t => {
-            const mark = t.track(jest.fn());
-            t.fail("begin");
-            t.fail("commit");
-            t.fail("rollback");
+        await withTestTransaction(async tx => {
+            const mark = tx.track(jest.fn());
+            tx.failNext("begin");
+            tx.failNext("commit");
+            tx.failNext("rollback");
             const hooks = jest.fn();
-            expect(await fixture(async (connection: Connection) => {
+            expect(await withTestConnection(async (db: Connection) => {
                 mark();
                 expect(manager.getCurrentTransaction()).toBeUndefined();
                 expect(manager.remainingTimeout()).toBeUndefined();
                 expect(() => ctx()).toThrow("No transaction context");
-                expect(transactions()).toBe(t);
+                expect(currentProbe()).toBe(tx);
                 afterRollback(hooks);
-                const result = await connection.query(Promise.resolve({ id: 7 }));
+                const result = await db.query(Promise.resolve({ id: 7 }));
                 return result;
             })).toEqual({ id: 7 });
-            expect(t.txOf(mark)).toBeUndefined();
-            expect(t.transactions).toEqual([]);
+            expect(tx.txOf(mark)).toBeUndefined();
+            expect(tx.records).toEqual([]);
             expect(hooks).not.toHaveBeenCalled();
             expect(manager.checkTestTransactionConstraints).not.toHaveBeenCalled();
-            const tx = testSession(manager)!.context!.transaction;
-            expect(manager.createFixtureConnection).toHaveBeenCalledWith(tx, expect.any(Object));
-            expect(manager.createSavepoint).toHaveBeenCalledWith(tx, "tranjs_fixture_1");
-            expect(manager.releaseSavepoint).toHaveBeenCalledWith(tx, "tranjs_fixture_1");
+            const session = testSession(manager)!;
+            const physical = session.context!.transaction;
+            expect(manager.createTestConnection).toHaveBeenCalledWith(physical, expect.any(Object));
+            expect(manager.createSavepoint).toHaveBeenCalledWith(physical, `tranjs_${session.id}_connection_1`);
+            expect(manager.releaseSavepoint).toHaveBeenCalledWith(physical, `tranjs_${session.id}_connection_1`);
             expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
-            expect(await fixture(() => 42)).toBe(42);
-            expect(manager.createSavepoint).toHaveBeenLastCalledWith(tx, "tranjs_fixture_2");
+            expect(await withTestConnection(() => 42)).toBe(42);
+            expect(manager.createSavepoint).toHaveBeenLastCalledWith(physical, `tranjs_${session.id}_connection_2`);
         });
         expect(manager.rollbackTransaction).toHaveBeenCalledTimes(1);
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), false);
     });
 
-    it("selects a named datasource", async () => {
-        const named = new FixtureManager();
+    it("selects an explicit datasource or the live named session when omitted", async () => {
+        const named = new TestConnectionManager();
         useTransactionManager(named, other);
-        await withTestTransaction(async () => {
-            expect(await fixture((c: Connection) => c.query(Promise.resolve("named")), { datasource: other })).toBe("named");
-        }, { datasource: other });
-        expect(named.createFixtureConnection).toHaveBeenCalledTimes(1);
+        const options: TestOptions = { datasource: other };
+        await withTestTransaction(async tx => {
+            expect(await withTestConnection((db: Connection) => db.query(Promise.resolve("named")), options)).toBe("named");
+            expect(await withTestConnection(async (db: Connection) => {
+                expect(currentProbe()).toBe(tx);
+                expect(currentProbe(other)).toBe(tx);
+                expect(named.getCurrentTransaction()).toBeUndefined();
+                expect(manager.getCurrentTransaction()).toBeUndefined();
+                expect(() => ctx()).toThrow("No transaction context");
+                return db.query(Promise.resolve("inferred"));
+            })).toBe("inferred");
+        }, options);
+        expect(named.createTestConnection).toHaveBeenCalledTimes(2);
         expect(manager.createSavepoint).not.toHaveBeenCalled();
+    });
+
+    it("uses distinct managed and connection savepoint names across concurrent and later sessions", async () => {
+        const run = () => withTestTransaction(async () => {
+            const session = testSession(manager)!;
+            const physical = session.context!.transaction;
+            await transactional(async () => {
+                await transactional(() => {}, { propagation: Propagation.NESTED })();
+            })();
+            await withTestConnection((db: Connection) => db.query(Promise.resolve(1)));
+            return { id: session.id, physical };
+        });
+        const sessions = [...await Promise.all([run(), run()]), await run()];
+        expect(new Set(sessions.map(session => session.id)).size).toBe(3);
+        const created = manager.createSavepoint.mock.calls;
+        const names = created.map(([, name]) => name);
+        expect(names).toHaveLength(9);
+        expect(new Set(names).size).toBe(names.length);
+        for (const { id, physical } of sessions) {
+            const ownNames = created.filter(([transaction]) => transaction === physical).map(([, name]) => name);
+            expect(ownNames).toHaveLength(3);
+            expect(ownNames.filter(name => name!.startsWith(`tranjs_${id}_sp_`))).toHaveLength(2);
+            expect(ownNames.filter(name => name!.startsWith(`tranjs_${id}_connection_`))).toHaveLength(1);
+            for (const name of ownNames) {
+                expect(manager.releaseSavepoint).toHaveBeenCalledWith(physical, name);
+            }
+        }
+    });
+
+    it("rejects a different registered manager without borrowing the live session or creating ambient context", async () => {
+        const named = new TestConnectionManager();
+        useTransactionManager(named, other);
+        const denied = jest.fn();
+        await withTestTransaction(async () => {
+            await expect(withTestConnection(denied, { datasource: other })).rejects.toThrow("live withTestTransaction");
+            expect(manager.getCurrentTransaction()).toBeUndefined();
+            expect(named.getCurrentTransaction()).toBeUndefined();
+            expect(() => ctx()).toThrow("No transaction context");
+            await expect(withTestConnection((db: Connection) => db.query(Promise.resolve("default")))).resolves.toBe("default");
+        });
+        await withTestTransaction(async () => {
+            await expect(withTestConnection(denied, { datasource: DEFAULT_DATASOURCE })).rejects.toThrow("live withTestTransaction");
+            await expect(withTestConnection((db: Connection) => db.query(Promise.resolve("named")))).resolves.toBe("named");
+        }, { datasource: other });
+        expect(denied).not.toHaveBeenCalled();
+        expect(manager.createTestConnection).toHaveBeenCalledTimes(1);
+        expect(named.createTestConnection).toHaveBeenCalledTimes(1);
+        expect(manager.getCurrentTransaction()).toBeUndefined();
+        expect(named.getCurrentTransaction()).toBeUndefined();
     });
 
     it("rejects outside a session and for an unregistered datasource as promises", async () => {
         const callback = jest.fn();
-        await expect(fixture(callback)).rejects.toThrow("live withTestTransaction");
+        await expect(withTestConnection(callback)).rejects.toThrow("live withTestTransaction");
         await withTestTransaction(async () => {
-            await expect(fixture(callback, { datasource: other })).rejects.toBeInstanceOf(DatasourceSetupError);
-            useTransactionManager(new FixtureManager(), other);
-            await expect(fixture(callback, { datasource: other })).rejects.toThrow("live withTestTransaction");
+            await expect(withTestConnection(callback, { datasource: other })).rejects.toBeInstanceOf(DatasourceSetupError);
+            useTransactionManager(new TestConnectionManager(), other);
+            await expect(withTestConnection(callback, { datasource: other })).rejects.toThrow("live withTestTransaction");
         });
         expect(callback).not.toHaveBeenCalled();
         expect(manager.createSavepoint).not.toHaveBeenCalled();
@@ -106,24 +165,24 @@ describe("fixture", () => {
     it("rejects mock sessions before invoking the callback", async () => {
         const callback = jest.fn();
         await mockTransactions(async () => {
-            await expect(fixture(callback)).rejects.toThrow("unavailable in mockTransactions");
+            await expect(withTestConnection(callback)).rejects.toThrow("unavailable in mockTransactions");
         });
         expect(callback).not.toHaveBeenCalled();
     });
 
-    it("keeps the default fake unsupported and recovers its fixture savepoint", async () => {
+    it("keeps the default fake unsupported and recovers its withTestConnection savepoint", async () => {
         const fake = new FakeTransactionManager();
         useTransactionManager(fake);
         const rollback = jest.spyOn(fake as any, "rollbackToSavepoint");
         const release = jest.spyOn(fake as any, "releaseSavepoint");
         const callback = jest.fn();
         await withTestTransaction(async () => {
-            await expect(fixture(callback)).rejects.toThrow("does not support fixture connections");
+            await expect(withTestConnection(callback)).rejects.toThrow("does not support withTestConnection connections");
             await expect(transactional(() => 7)()).resolves.toBe(7);
         });
         expect(callback).not.toHaveBeenCalled();
         expect(rollback).toHaveBeenCalledTimes(1);
-        expect(release).toHaveBeenCalledWith(expect.any(Object), "tranjs_fixture_1");
+        expect(release).toHaveBeenCalledWith(expect.any(Object), expect.stringMatching(/^tranjs_.+_connection_1$/));
     });
 
     it("rejects retained work after the session closes", async () => {
@@ -132,7 +191,7 @@ describe("fixture", () => {
         let retained!: Promise<void>;
         await withTestTransaction(() => {
             retained = gate.promise.then(async () => {
-                await expect(fixture(callback)).rejects.toThrow("closed or broken");
+                await expect(withTestConnection(callback)).rejects.toThrow("closed or broken");
             });
         });
         gate.resolve();
@@ -146,40 +205,40 @@ describe("fixture", () => {
         await withTestTransaction(async () => {
             const session = testSession(manager)!;
             session.lifecycle = "initializing";
-            await expect(fixture(callback)).rejects.toThrow("initialization is still in progress");
+            await expect(withTestConnection(callback)).rejects.toThrow("initialization is still in progress");
             session.lifecycle = "ready";
             const context = session.context;
             session.context = undefined;
-            await expect(fixture(callback)).rejects.toThrow("initialization is still in progress");
+            await expect(withTestConnection(callback)).rejects.toThrow("initialization is still in progress");
             session.context = context;
             const error = new Error("begin failed");
             session.lifecycle = "failed";
             session.initializationError = error;
-            await expect(fixture(callback)).rejects.toMatchObject({ message: "Test transaction initialization failed", cause: error });
+            await expect(withTestConnection(callback)).rejects.toMatchObject({ message: "Test transaction initialization failed", cause: error });
             session.lifecycle = "ready";
             session.admitting = false;
-            await expect(fixture(callback)).rejects.toThrow("no longer admits fixture work");
+            await expect(withTestConnection(callback)).rejects.toThrow("no longer admits withTestConnection work");
             session.admitting = true;
         });
         expect(callback).not.toHaveBeenCalled();
         expect(manager.createSavepoint).not.toHaveBeenCalled();
     });
 
-    it("reserves fixture admission synchronously before awaiting savepoint creation", async () => {
+    it("reserves withTestConnection admission synchronously before awaiting savepoint creation", async () => {
         const savepoint = deferred();
         manager.createSavepoint.mockImplementationOnce(() => savepoint.promise);
         const callback = jest.fn(() => "first");
         const denied = jest.fn();
         await withTestTransaction(async () => {
-            const first = fixture(callback);
-            expect(testSession(manager)!.fixtureActive).toBe(true);
+            const first = withTestConnection(callback);
+            expect(testSession(manager)!.testConnectionActive).toBe(true);
             expect(callback).not.toHaveBeenCalled();
-            await expect(fixture(denied)).rejects.toThrow("overlaps an active");
-            await expect(transactional(denied)()).rejects.toThrow("overlaps an active fixture");
+            await expect(withTestConnection(denied)).rejects.toThrow("overlaps an active");
+            await expect(transactional(denied)()).rejects.toThrow("overlaps an active withTestConnection");
             savepoint.resolve();
             expect(await first).toBe("first");
-            expect(testSession(manager)!.fixtureActive).toBe(false);
-            expect(await fixture(() => "next")).toBe("next");
+            expect(testSession(manager)!.testConnectionActive).toBe(false);
+            expect(await withTestConnection(() => "next")).toBe("next");
         });
         expect(denied).not.toHaveBeenCalled();
     });
@@ -192,11 +251,11 @@ describe("fixture", () => {
             await withTestTransaction(async () => {
                 const work = transactional(async () => { entered.resolve(); await gate.promise; }, { propagation })();
                 // SUPPORTS/NOT_SUPPORTED have no owner savepoint, but still own the overlap gate.
-                await expect(fixture(callback)).rejects.toThrow("overlaps an active");
+                await expect(withTestConnection(callback)).rejects.toThrow("overlaps an active");
                 await entered.promise;
                 gate.resolve();
                 await work;
-                await fixture(() => "recovered");
+                await withTestConnection(() => "recovered");
             });
             expect(callback).not.toHaveBeenCalled();
         },
@@ -206,55 +265,55 @@ describe("fixture", () => {
         await withTestTransaction(async () => {
             const session = testSession(manager)!;
             session.managedActive = 1;
-            await expect(fixture(() => {})).rejects.toThrow("overlaps an active");
+            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
             session.managedActive = 0;
-            session.fixtureActive = true;
-            await expect(fixture(() => {})).rejects.toThrow("overlaps an active");
-            session.fixtureActive = false;
+            session.testConnectionActive = true;
+            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
+            session.testConnectionActive = false;
             session.root.open = true;
-            await expect(fixture(() => {})).rejects.toThrow("overlaps an active");
+            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
             session.root.open = false;
         });
         expect(manager.createSavepoint).not.toHaveBeenCalled();
     });
 
-    it.each(Object.values(Propagation))("centrally denies %s inside a fixture, including another datasource", async propagation => {
-        const secondary = new FixtureManager();
+    it.each(Object.values(Propagation))("centrally denies %s inside a withTestConnection, including another datasource", async propagation => {
+        const secondary = new TestConnectionManager();
         useTransactionManager(secondary, other);
         const denied = jest.fn();
         await withTestTransaction(async () => {
-            await fixture(async () => {
+            await withTestConnection(async () => {
                 await Promise.resolve();
                 for (const datasource of [undefined, other]) {
-                    await expect(transactional(denied, { propagation, datasource })()).rejects.toThrow("forbidden inside a fixture callback");
+                    await expect(transactional(denied, { propagation, datasource })()).rejects.toThrow("forbidden inside a withTestConnection callback");
                 }
-                await expect(secondary.executeTransaction(propagation, denied)).rejects.toThrow("forbidden inside a fixture callback");
-                await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                await expect(secondary.executeTransaction(propagation, denied)).rejects.toThrow("forbidden inside a withTestConnection callback");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
             });
         });
         expect(denied).not.toHaveBeenCalled();
         expect(secondary.createSavepoint).not.toHaveBeenCalled();
     });
 
-    it("retains fixture provenance in delayed continuations after the overlap gate closes", async () => {
+    it("retains withTestConnection provenance in delayed continuations after the overlap gate closes", async () => {
         const gate = deferred();
         const denied = jest.fn();
         let retained!: Promise<void>;
         await withTestTransaction(async () => {
-            await fixture(() => {
+            await withTestConnection(() => {
                 retained = gate.promise.then(async () => {
-                    await expect(transactional(denied, { propagation: Propagation.SUPPORTS })()).rejects.toThrow("forbidden inside a fixture callback");
-                    await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                    await expect(transactional(denied, { propagation: Propagation.SUPPORTS })()).rejects.toThrow("forbidden inside a withTestConnection callback");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
                 });
             });
-            expect(testSession(manager)!.fixtureActive).toBe(false);
+            expect(testSession(manager)!.testConnectionActive).toBe(false);
             gate.resolve();
             await retained;
         });
         expect(denied).not.toHaveBeenCalled();
     });
 
-    it("forbids fixture entry from managed callbacks, rollback/commit hooks and retained hook continuations", async () => {
+    it("forbids withTestConnection entry from managed callbacks, rollback/commit hooks and retained hook continuations", async () => {
         const denied = jest.fn();
         const resume = deferred();
         let rollbackCalls = 0;
@@ -262,14 +321,14 @@ describe("fixture", () => {
         let retained!: Promise<PromiseSettledResult<unknown>[]>;
         const rollbackHook = async () => {
             rollbackCalls++;
-            [rollbackResult] = await Promise.allSettled([fixture(denied)]);
-            retained = resume.promise.then(() => Promise.allSettled([fixture(denied)]));
+            [rollbackResult] = await Promise.allSettled([withTestConnection(denied)]);
+            retained = resume.promise.then(() => Promise.allSettled([withTestConnection(denied)]));
         };
         await withTestTransaction(async () => {
             await transactional(async () => {
-                await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
                 afterCommit(async () => {
-                    await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
                 });
             })();
             const error = new Error("owner rollback");
@@ -279,26 +338,26 @@ describe("fixture", () => {
             })()).rejects.toBe(error);
             expect(rollbackCalls).toBe(1);
             expect(rollbackResult).toMatchObject({
-                status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
             });
             expect(testSession(manager)!.root.open).toBe(false);
             expect(testSession(manager)!.managedActive).toBe(0);
-            await fixture(() => 1);
+            await withTestConnection(() => 1);
             resume.resolve();
             const [retainedResult] = await retained;
             expect(retainedResult).toMatchObject({
-                status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
             });
             await afterCommit(async () => {
                 await Promise.resolve();
-                await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
             });
-            await fixture(async () => {
+            await withTestConnection(async () => {
                 await afterCommit(async () => {
-                    await expect(fixture(denied)).rejects.toThrow("fixture is forbidden");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
                 });
             });
-            await fixture(() => 1);
+            await withTestConnection(() => 1);
         });
         expect(denied).not.toHaveBeenCalled();
         expect(rollbackCalls).toBe(1);
@@ -306,10 +365,10 @@ describe("fixture", () => {
 
     it.each([new Error("callback"), undefined, null, "callback failure"])("rolls back callback failure %p without poisoning the session", async error => {
         await withTestTransaction(async () => {
-            await expect(fixture(() => { throw error; })).rejects.toBe(error);
-            expect(manager.rollbackToSavepoint).toHaveBeenCalledWith(expect.any(Object), "tranjs_fixture_1");
+            await expect(withTestConnection(() => { throw error; })).rejects.toBe(error);
+            expect(manager.rollbackToSavepoint).toHaveBeenCalledWith(expect.any(Object), expect.stringMatching(/^tranjs_.+_connection_1$/));
             expect(manager.releaseSavepoint).toHaveBeenCalledTimes(1);
-            await expect(fixture(() => "recovered")).resolves.toBe("recovered");
+            await expect(withTestConnection(() => "recovered")).resolves.toBe("recovered");
         });
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), false);
     });
@@ -317,12 +376,12 @@ describe("fixture", () => {
     it("reports a caught query failure and deduplicates a query rejection also thrown by the callback", async () => {
         const error = new Error("query");
         await withTestTransaction(async () => {
-            await expect(fixture(async (c: Connection) => {
-                await expect(c.query(Promise.reject(error))).rejects.toBe(error);
+            await expect(withTestConnection(async (db: Connection) => {
+                await expect(db.query(Promise.reject(error))).rejects.toBe(error);
                 return "caught";
             })).rejects.toBe(error);
-            await expect(fixture((c: Connection) => c.query(Promise.reject(error)))).rejects.toBe(error);
-            await fixture(() => "recovered");
+            await expect(withTestConnection((db: Connection) => db.query(Promise.reject(error)))).rejects.toBe(error);
+            await withTestConnection(() => "recovered");
         });
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(2);
     });
@@ -331,11 +390,11 @@ describe("fixture", () => {
         const queryError = new Error("query");
         const callbackError = new Error("callback");
         await withTestTransaction(async () => {
-            await expect(fixture(async (c: Connection) => {
-                await c.query(Promise.reject(queryError)).catch(() => {});
+            await expect(withTestConnection(async (db: Connection) => {
+                await db.query(Promise.reject(queryError)).catch(() => {});
                 throw callbackError;
             })).rejects.toMatchObject({
-                message: "Fixture callback and query work failed",
+                message: "withTestConnection callback and query work failed",
                 errors: [callbackError, queryError],
             });
         });
@@ -345,8 +404,8 @@ describe("fixture", () => {
         const error = new Error("synchronous query failure");
         manager.query.mockImplementationOnce(() => { throw error; });
         await withTestTransaction(async () => {
-            await expect(fixture((c: Connection) => c.query(Promise.resolve(1)))).rejects.toBe(error);
-            await expect(fixture((c: Connection) => c.query(Promise.resolve(2)))).resolves.toBe(2);
+            await expect(withTestConnection((db: Connection) => db.query(Promise.resolve(1)))).rejects.toBe(error);
+            await expect(withTestConnection((db: Connection) => db.query(Promise.resolve(2)))).resolves.toBe(2);
         });
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
     });
@@ -357,9 +416,9 @@ describe("fixture", () => {
         const queryError = new Error("late query");
         let connection!: Connection;
         await withTestTransaction(async () => {
-            const work = fixture((c: Connection) => {
-                connection = c;
-                void c.query(query.promise);
+            const work = withTestConnection((db: Connection) => {
+                connection = db;
+                void db.query(query.promise);
                 returned.resolve();
                 return "callback done";
             });
@@ -377,7 +436,7 @@ describe("fixture", () => {
             else query.resolve(7);
             await assertion;
             expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
-            await fixture(() => "recovered");
+            await withTestConnection(() => "recovered");
         });
         expect(manager.query).toHaveBeenCalledTimes(1);
     });
@@ -388,9 +447,9 @@ describe("fixture", () => {
         const returned = deferred();
         const queryError = new Error("query");
         await withTestTransaction(async () => {
-            const work = fixture((c: Connection) => {
-                void c.query(first.promise);
-                void c.query(second.promise);
+            const work = withTestConnection((db: Connection) => {
+                void db.query(first.promise);
+                void db.query(second.promise);
                 returned.resolve();
                 throw undefined;
             });
@@ -408,12 +467,12 @@ describe("fixture", () => {
     it.each([false, true])("rejects returning the facade directly (async: %s) and revokes it", async asynchronous => {
         let retained!: Connection;
         await withTestTransaction(async () => {
-            await expect(fixture((connection: Connection) => {
-                retained = connection;
-                return asynchronous ? Promise.resolve(connection) : connection;
+            await expect(withTestConnection((db: Connection) => {
+                retained = db;
+                return asynchronous ? Promise.resolve(db) : db;
             })).rejects.toThrow("returned its connection facade");
             expect(() => retained.query(Promise.resolve(1))).toThrow("lease is revoked");
-            await fixture(() => "recovered");
+            await withTestConnection(() => "recovered");
         });
         expect(manager.query).not.toHaveBeenCalled();
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
@@ -422,8 +481,8 @@ describe("fixture", () => {
     it("does not deep-scan returned data, invoke getters or permit a nested facade to outlive the lease", async () => {
         const getter = jest.fn(() => { throw new Error("must not inspect data"); });
         await withTestTransaction(async () => {
-            const result = await fixture((connection: Connection) => {
-                const data = { nested: [connection], value: 7 };
+            const result = await withTestConnection((db: Connection) => {
+                const data = { nested: [db], value: 7 };
                 Object.defineProperty(data, "untouched", { get: getter });
                 return data;
             });
@@ -439,8 +498,8 @@ describe("fixture", () => {
         manager.createSavepoint.mockRejectedValueOnce(error);
         const callback = jest.fn();
         await expect(withTestTransaction(async () => {
-            await expect(fixture(callback)).rejects.toBe(error);
-            await expect(fixture(callback)).rejects.toThrow("closed or broken");
+            await expect(withTestConnection(callback)).rejects.toBe(error);
+            await expect(withTestConnection(callback)).rejects.toThrow("closed or broken");
             await expect(transactional(callback)()).rejects.toThrow("closed or broken");
         })).rejects.toBe(error);
         expect(callback).not.toHaveBeenCalled();
@@ -453,26 +512,26 @@ describe("fixture", () => {
         const error = new Error("release");
         manager.releaseSavepoint.mockRejectedValueOnce(error);
         await withTestTransaction(async () => {
-            await expect(fixture(() => 7)).rejects.toBe(error);
+            await expect(withTestConnection(() => 7)).rejects.toBe(error);
             expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
             expect(manager.releaseSavepoint).toHaveBeenCalledTimes(2);
-            await expect(fixture(() => "recovered")).resolves.toBe("recovered");
+            await expect(withTestConnection(() => "recovered")).resolves.toBe("recovered");
         });
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), false);
     });
 
-    it.each(["rollback", "release"])("poisons on fixture recovery %s failure and preserves the application error", async operation => {
+    it.each(["rollback", "release"])("poisons on withTestConnection recovery %s failure and preserves the application error", async operation => {
         const applicationError = new Error("callback");
         const recoveryError = new Error(operation);
         if (operation === "rollback") manager.rollbackToSavepoint.mockRejectedValueOnce(recoveryError);
         else manager.releaseSavepoint.mockRejectedValueOnce(recoveryError);
         let broken!: unknown;
         const work = withTestTransaction(async () => {
-            try { await fixture(() => { throw applicationError; }); }
+            try { await withTestConnection(() => { throw applicationError; }); }
             catch (error) { broken = error; }
             expect(broken).toBeInstanceOf(TransactionSystemError);
             expect(broken).toMatchObject({ cause: recoveryError, applicationError });
-            await expect(fixture(() => 1)).rejects.toThrow("closed or broken");
+            await expect(withTestConnection(() => 1)).rejects.toThrow("closed or broken");
         });
         const result = await work.catch(error => error);
         expect(result).toBe(broken);
@@ -483,20 +542,20 @@ describe("fixture", () => {
         const first = new Error("first release");
         const recovery = new Error("recovery release");
         manager.releaseSavepoint.mockRejectedValueOnce(first).mockRejectedValueOnce(recovery);
-        await expect(withTestTransaction(() => fixture(() => 7))).rejects.toMatchObject({
+        await expect(withTestTransaction(() => withTestConnection(() => 7))).rejects.toMatchObject({
             cause: recovery, applicationError: first,
         });
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(1);
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), true);
     });
 
-    it.each([new Error("callback"), undefined])("retains a poisoned fixture's application failure %p alongside a later body error", async applicationError => {
+    it.each([new Error("callback"), undefined])("retains a poisoned withTestConnection's application failure %p alongside a later body error", async applicationError => {
         const recoveryError = new Error("savepoint rollback");
         const bodyError = new Error("body after caught failure");
         manager.rollbackToSavepoint.mockRejectedValueOnce(recoveryError);
         let broken!: unknown;
         await expect(withTestTransaction(async () => {
-            try { await fixture(() => { throw applicationError; }); }
+            try { await withTestConnection(() => { throw applicationError; }); }
             catch (error) { broken = error; }
             throw bodyError;
         })).rejects.toMatchObject({
@@ -507,11 +566,11 @@ describe("fixture", () => {
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), true);
     });
 
-    it("drains a forgotten successful fixture before physical rollback and rejects the body", async () => {
+    it("drains a forgotten successful withTestConnection before physical rollback and rejects the body", async () => {
         const entered = deferred();
         const gate = deferred();
         const work = withTestTransaction(() => {
-            void fixture(async () => {
+            void withTestConnection(async () => {
                 entered.resolve();
                 await gate.promise;
                 expect(testSession(manager)!.admitting).toBe(false);
@@ -521,8 +580,8 @@ describe("fixture", () => {
         await entered.promise;
         expect(manager.rollbackTransaction).not.toHaveBeenCalled();
         const assertion = expect(work).rejects.toMatchObject({
-            message: "Pending fixture work drained before test rollback",
-            errors: [expect.objectContaining({ message: expect.stringContaining("pending fixture work") })],
+            message: "Pending withTestConnection work drained before test rollback",
+            errors: [expect.objectContaining({ message: expect.stringContaining("pending withTestConnection work") })],
         });
         gate.resolve();
         await assertion;
@@ -530,17 +589,17 @@ describe("fixture", () => {
         expect(manager.rollbackTransaction).toHaveBeenCalledTimes(1);
     });
 
-    it("aggregates pending fixture, body, fixture callback, physical rollback and release errors", async () => {
+    it("aggregates pending withTestConnection, body, withTestConnection callback, physical rollback and release errors", async () => {
         const entered = deferred();
         const gate = deferred();
         const bodyError = new Error("body");
-        const fixtureError = new Error("fixture");
+        const connectionError = new Error("withTestConnection");
         const rollbackError = new Error("physical rollback");
         const releaseError = new Error("physical release");
         manager.rollbackTransaction.mockRejectedValueOnce(rollbackError);
         manager.releaseTransaction.mockRejectedValueOnce(releaseError);
         const work = withTestTransaction(() => {
-            void fixture(async () => { entered.resolve(); await gate.promise; throw fixtureError; });
+            void withTestConnection(async () => { entered.resolve(); await gate.promise; throw connectionError; });
             throw bodyError;
         });
         await entered.promise;
@@ -550,8 +609,8 @@ describe("fixture", () => {
             applicationError: {
                 cause: rollbackError,
                 applicationError: {
-                    message: "Pending fixture work drained before test rollback",
-                    errors: [expect.any(Error), bodyError, fixtureError],
+                    message: "Pending withTestConnection work drained before test rollback",
+                    errors: [expect.any(Error), bodyError, connectionError],
                 },
             },
         });

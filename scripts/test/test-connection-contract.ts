@@ -3,18 +3,18 @@ import {
     afterCommit, afterRollback, clearTransactionManager, Propagation, transactional,
     Transactional, TransactionTimeoutError, useTransactionManager,
 } from "@tranjs/core";
-import { fixture, mockTransactions, withTestTransaction } from "@tranjs/testing";
+import { withTestConnection, mockTransactions, withTestTransaction } from "@tranjs/testing";
 
 // Shared by all real-driver suites, including the isolated postgres-v3 runner
 // (which copies scripts/test). Deliberately use any for hostile API invocations.
-export interface FixtureDriver {
+export interface TestConnectionDriver {
     kind: "pg" | "mysql2" | "postgres";
     manager: any;
     otherManager: any;
     ambient: (datasource: symbol) => any;
     outside: (text: string) => Promise<any>;
     rows: (result: any) => any[];
-    query: (connection: any, text: string, values?: any[]) => Promise<any>;
+    query: (db: any, text: string, values?: any[]) => Promise<any>;
     close: () => Promise<void>;
     nativeError: (error: unknown) => void;
 }
@@ -25,7 +25,7 @@ function deferred() {
     return { promise, resolve };
 }
 
-// Follow error wrappers, not arbitrary returned fixture data. Identity matters:
+// Follow error wrappers, not arbitrary returned withTestConnection data. Identity matters:
 // native SQL and injected cleanup failures must not be replaced by messages.
 function errors(error: unknown, seen = new Set<unknown>()): unknown[] {
     if (seen.has(error)) return [];
@@ -45,29 +45,31 @@ async function rejected(operation: Promise<unknown>): Promise<unknown> {
     throw new Error("Expected operation to reject");
 }
 
-export function fixtureContract(label: string, create: () => FixtureDriver) {
-    describe(`fixture / ${label} (real database)`, () => {
+export function testConnectionContract(label: string, create: (options: { maxConnections: number }) => TestConnectionDriver) {
+    describe(`withTestConnection / ${label} (real database)`, () => {
         const datasource = Symbol(label);
         const other = Symbol(`${label}-other`);
-        const named = `fixture-${label}`;
-        const table = `tranjs_fixture_${label.replace(/[^a-z0-9]/gi, "_")}`;
-        const failure = new Error("fixture callback failure");
-        let driver: FixtureDriver;
+        const named = `withTestConnection-${label}`;
+        const table = `tranjs_connection_${label.replace(/[^a-z0-9]/gi, "_")}`;
+        const failure = new Error("withTestConnection callback failure");
+        let driver: TestConnectionDriver;
         let dispatches: jest.Mock;
-        const fix = <R>(fn: (connection: any) => R) => fixture(fn, { datasource });
+        const fix = <R>(fn: (db: any) => R) => withTestConnection(fn, { datasource });
         const test = <R>(fn: Parameters<typeof withTestTransaction<R>>[0]) =>
             withTestTransaction(fn, { datasource });
         const tx = <R>(fn: () => R, config: any = {}) => transactional(fn, { datasource, ...config })();
-        const query = (connection: any, text: string, values?: any[]) => driver.query(connection, text, values);
-        const insert = (connection: any, id: number) => query(connection, `INSERT INTO ${table} VALUES (${id})`);
-        const ids = async (connection: any) => driver.rows(await query(connection, `SELECT id FROM ${table} ORDER BY id`))
+        const query = (db: any, text: string, values?: any[]) => driver.query(db, text, values);
+        const insert = (db: any, id: number) => query(db, `INSERT INTO ${table} VALUES (${id})`);
+        const ids = async (db: any) => driver.rows(await query(db, `SELECT id FROM ${table} ORDER BY id`))
             .map(row => Number(row.id));
         const ambient = () => driver.ambient(datasource);
-        const slow = (connection: any) => query(connection, driver.kind === "mysql2"
+        const slow = (db: any) => query(db, driver.kind === "mysql2"
             ? "SELECT SLEEP(0.08) AS n" : "SELECT pg_sleep(0.08) AS n");
 
         beforeAll(async () => {
-            driver = create();
+            // Reuse the same one-connection pool across cases: leaked work cannot
+            // hide behind a different checkout in the following test/session.
+            driver = create({ maxConnections: 1 });
             await driver.outside(`CREATE TABLE IF NOT EXISTS ${table} (id integer PRIMARY KEY)${driver.kind === "mysql2" ? " ENGINE=InnoDB" : ""}`);
             useTransactionManager(driver.manager, datasource);
             useTransactionManager(driver.manager, named);
@@ -98,31 +100,31 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
         });
         afterAll(async () => {
             for (const key of [datasource, named, other]) clearTransactionManager(key);
-            await driver.outside(`DROP TABLE IF EXISTS ${table}`);
-            await driver.close();
+            try { await driver.outside(`DROP TABLE IF EXISTS ${table}`); }
+            finally { await driver.close(); }
         });
 
-        it("keeps ambient ctx unchanged, records no fixture owner, and preserves service rollback", async () => {
+        it("keeps ambient ctx unchanged, records no withTestConnection owner, and preserves service rollback", async () => {
             const plain = () => ambient();
             const awaitedService = async () => { await Promise.resolve(); return ambient(); };
             await test(async probe => {
                 expect(ambient).toThrow("Transaction context not initialized");
-                await fix(async connection => {
+                await fix(async db => {
                     expect(driver.manager.getCurrentTransaction()).toBeUndefined();
                     expect(plain).toThrow("Transaction context not initialized");
                     await expect(awaitedService()).rejects.toThrow("Transaction context not initialized");
-                    await insert(connection, 1);
-                    await insert(connection, 2);
+                    await insert(db, 1);
+                    await insert(db, 2);
                 });
-                expect(probe.transactions).toEqual([]);
+                expect(probe.records).toEqual([]);
                 const service = probe.track(async () => {
                     await insert(ambient(), 3);
                     throw failure;
                 });
                 await expect(tx(service)).rejects.toBe(failure);
                 expect(await fix(ids)).toEqual([1, 2]);
-                expect(probe.transactions).toHaveLength(1);
-                expect(probe.transactions[0].outcome).toBe("rolled-back");
+                expect(probe.records).toHaveLength(1);
+                expect(probe.records[0].outcome).toBe("rolled-back");
                 expect(ambient).toThrow("Transaction context not initialized");
                 await expect(awaitedService()).rejects.toThrow("Transaction context not initialized");
             });
@@ -139,9 +141,9 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
             });
             await test(async () => {
                 let settled = false;
-                const operation = fix(async connection => {
-                    await insert(connection, 1);
-                    return query(connection, "SELECT 7 AS n");
+                const operation = fix(async db => {
+                    await insert(db, 1);
+                    return query(db, "SELECT 7 AS n");
                 }).then(value => { settled = true; return value; });
                 try {
                     await releaseEntered.promise;
@@ -156,21 +158,31 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
 
         it("supports explicit symbol and named datasources and directly returned native results", async () => {
             await test(async () => {
-                const result = await fixture((connection: any) => query(connection, "SELECT 7 AS n"), { datasource: named });
+                const result = await withTestConnection((db: any) => query(db, "SELECT 7 AS n"), { datasource: named });
                 expect(Number(driver.rows(result)[0].n)).toBe(7);
                 if (driver.kind === "mysql2") {
-                    const [rows, fields] = await fix(connection => connection.execute("SELECT ? AS n", [8]));
+                    const [rows, fields] = await fix(db => db.execute("SELECT ? AS n", [8]));
                     expect(Number(rows[0].n)).toBe(8);
                     expect(fields[0].name).toBe("n");
                 } else if (driver.kind === "postgres") {
-                    const rows = await fix(connection => connection`SELECT ${8}::integer AS n`);
+                    const rows = await fix(db => db`SELECT ${8}::integer AS n`);
                     expect(Number(rows[0].n)).toBe(8);
                 }
             });
         });
 
+        it("defaults withTestConnection to the live named session datasource", async () => {
+            await withTestTransaction(async () => {
+                await withTestConnection(async db => {
+                    await insert(db, 1);
+                    expect(await ids(db)).toEqual([1]);
+                });
+                expect(await withTestConnection(ids)).toEqual([1]);
+            }, { datasource: named });
+        });
+
         it("rejects config objects, including inherited callbacks and accessors, before native entry", async () => {
-            await test(() => fix(async connection => {
+            await test(() => fix(async db => {
                 const callback = jest.fn();
                 const getter = jest.fn(() => callback);
                 const field = driver.kind === "mysql2" ? "sql" : "text";
@@ -184,39 +196,39 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 for (const method of methods) {
                     for (const config of [{ [field]: "SELECT 1" }, inherited, accessor, inheritedText, accessorText]) {
                         const before = dispatches.mock.calls.length;
-                        await expect(Promise.resolve().then(() => connection[method](config))).rejects.toThrow();
+                        await expect(Promise.resolve().then(() => db[method](config))).rejects.toThrow();
                         expect(dispatches).toHaveBeenCalledTimes(before);
                     }
                     for (const args of [["SELECT 1", callback], ["SELECT 1", [], callback], ["SELECT 1", { callback }]]) {
                         const before = dispatches.mock.calls.length;
-                        await expect(Promise.resolve().then(() => connection[method](...args))).rejects.toThrow();
+                        await expect(Promise.resolve().then(() => db[method](...args))).rejects.toThrow();
                         expect(dispatches).toHaveBeenCalledTimes(before);
                     }
                 }
                 expect(callback).not.toHaveBeenCalled();
                 expect(getter).not.toHaveBeenCalled();
                 expect(textGetter).not.toHaveBeenCalled();
-                expect(Number(driver.rows(await query(connection, "SELECT 9 AS n"))[0].n)).toBe(9);
+                expect(Number(driver.rows(await query(db, "SELECT 9 AS n"))[0].n)).toBe(9);
             }));
         });
 
         it("exposes no native internals, callbacks, lifecycle or streaming APIs", async () => {
-            await test(() => fix(async connection => {
+            await test(() => fix(async db => {
                 const before = dispatches.mock.calls.length;
                 const hidden = driver.kind === "postgres"
                     ? ["reserve", "begin", "end", "release", "file", "batch", "notify", "listen", "subscribe", "json", "array", "typed", "types", "options"]
                     : driver.kind === "mysql2"
                         ? ["connection", "pool", "prepare", "queryStream", "beginTransaction", "commit", "rollback", "release", "destroy", "on"]
                         : ["connection", "_queryable", "release", "end", "on", "copyFrom", "copyTo"];
-                for (const key of hidden) expect(connection[key]).toBeUndefined();
+                for (const key of hidden) expect(db[key]).toBeUndefined();
                 if (driver.kind === "pg") {
                     const submit = jest.fn();
-                    await expect(Promise.resolve().then(() => connection.query({ submit }))).rejects.toThrow();
+                    await expect(Promise.resolve().then(() => db.query({ submit }))).rejects.toThrow();
                     expect(submit).not.toHaveBeenCalled();
                 }
                 if (driver.kind === "postgres") {
-                    await expect(Promise.resolve().then(() => connection("identifier"))).rejects.toThrow();
-                    await expect(Promise.resolve().then(() => connection.unsafe("SELECT 1", [], { simple: true }))).rejects.toThrow();
+                    await expect(Promise.resolve().then(() => db("identifier"))).rejects.toThrow();
+                    await expect(Promise.resolve().then(() => db.unsafe("SELECT 1", [], { simple: true }))).rejects.toThrow();
                 }
                 expect(dispatches).toHaveBeenCalledTimes(before);
             }));
@@ -224,8 +236,8 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
 
         it("returns eager plain postgres promises without native query modifiers", async () => {
             if (driver.kind !== "postgres") return;
-            await test(() => fix(async connection => {
-                for (const operation of [connection`SELECT ${7}::integer AS n`, connection.unsafe("SELECT 8 AS n")]) {
+            await test(() => fix(async db => {
+                for (const operation of [db`SELECT ${7}::integer AS n`, db.unsafe("SELECT 8 AS n")]) {
                     expect(operation).toBeInstanceOf(Promise);
                     for (const key of ["execute", "values", "raw", "describe", "cursor", "forEach", "stream", "readable", "writable", "simple", "cancel", "handle"]) {
                         expect(operation[key]).toBeUndefined();
@@ -242,28 +254,28 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
             let data: any;
             const assertRevoked = async () => {
                 const before = dispatches.mock.calls.length;
-                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow(/fixture|revok|closed|complete/i);
+                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
                 for (const method of extracted) {
-                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow(/fixture|revok|closed|complete/i);
+                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
                 }
-                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow(/fixture|revok|closed|complete/i);
+                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
                 expect(dispatches).toHaveBeenCalledTimes(before);
             };
             await test(async () => {
-                data = await fix(connection => {
-                    escaped = connection;
+                data = await fix(db => {
+                    escaped = db;
                     extracted = (driver.kind === "postgres" ? ["unsafe"] : driver.kind === "mysql2" ? ["query", "execute"] : ["query"])
-                        .map(method => connection[method]);
-                    if (driver.kind === "postgres") callTag = () => connection`SELECT 1`;
+                        .map(method => db[method]);
+                    if (driver.kind === "postgres") callTag = () => db`SELECT 1`;
                     // No deep scan: getters, maps and closures may retain revoked
                     // handles without making otherwise ordinary returned data fail.
-                    return { get handle() { return connection; }, map: new Map([["handle", connection]]), read: () => connection };
+                    return { get handle() { return db; }, map: new Map([["handle", db]]), read: () => db };
                 });
                 expect(data.read()).toBe(escaped);
                 expect(data.handle).toBe(escaped);
                 expect(data.map.get("handle")).toBe(escaped);
                 await assertRevoked();
-                await fix(connection => query(connection, "SELECT 1"));
+                await fix(db => query(db, "SELECT 1"));
             });
             await assertRevoked();
         });
@@ -275,7 +287,7 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 for (const propagation of propagations) {
                     for (const selected of [datasource, other]) {
                         const callback = jest.fn();
-                        await expect(tx(callback, { propagation, datasource: selected })).rejects.toThrow(/fixture/i);
+                        await expect(tx(callback, { propagation, datasource: selected })).rejects.toThrow(/withTestConnection/i);
                         expect(callback).not.toHaveBeenCalled();
                     }
                 }
@@ -284,20 +296,20 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                     @Transactional({ datasource: other, propagation: Propagation.SUPPORTS })
                     async run() { body(); }
                 }
-                await expect(new Service().run()).rejects.toThrow(/fixture/i);
+                await expect(new Service().run()).rejects.toThrow(/withTestConnection/i);
                 expect(body).not.toHaveBeenCalled();
             }));
         });
 
-        it("forbids recursive fixture, managed callbacks and every hook provenance", async () => {
+        it("forbids recursive withTestConnection, managed callbacks and every hook provenance", async () => {
             await test(async () => {
                 const body = jest.fn();
                 await fix(async () => {
-                    await expect(fix(body)).rejects.toThrow(/fixture|recurs/i);
-                    await expect(fixture(body, { datasource: other })).rejects.toThrow(/fixture|session/i);
+                    await expect(fix(body)).rejects.toThrow(/withTestConnection|recurs/i);
+                    await expect(withTestConnection(body, { datasource: other })).rejects.toThrow(/withTestConnection|session/i);
                 });
                 for (const propagation of [Propagation.REQUIRED, Propagation.SUPPORTS, Propagation.NOT_SUPPORTED, Propagation.NEVER]) {
-                    await tx(async () => { await expect(fix(body)).rejects.toThrow(/fixture|callback|transaction|scope/i); }, { propagation });
+                    await tx(async () => { await expect(fix(body)).rejects.toThrow(/withTestConnection|callback|transaction|scope/i); }, { propagation });
                 }
                 let hookCalls = 0;
                 const hookResults: PromiseSettledResult<unknown>[] = [];
@@ -318,46 +330,46 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 })).rejects.toBe(failure);
                 expect(hookCalls).toBe(2);
                 expect(driver.manager.getCurrentTransaction()).toBeUndefined();
-                await fix(() => 1); // A fresh fixture proves the owner overlap gate has closed.
+                await fix(() => 1); // A fresh withTestConnection proves the owner overlap gate has closed.
                 resume.resolve();
                 const [retainedResult] = await retained;
                 expect(retainedResult).toMatchObject({
-                    status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                    status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
                 });
                 await afterCommit(hook, datasource); // immediate ownerless branch
                 expect(hookCalls).toBe(3);
                 expect(hookResults).toHaveLength(3);
                 for (const result of hookResults) {
                     expect(result).toMatchObject({
-                        status: "rejected", reason: { message: "fixture is forbidden inside a fixture, managed callback or hook" },
+                        status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
                     });
                 }
                 expect(body).not.toHaveBeenCalled();
             });
         });
 
-        it("acquires the fixture gate synchronously before its first await", async () => {
+        it("acquires the withTestConnection gate synchronously before its first await", async () => {
             await test(async () => {
                 const finish = deferred();
-                const first = fix(async connection => { await finish.promise; await query(connection, "SELECT 1"); });
+                const first = fix(async db => { await finish.promise; await query(db, "SELECT 1"); });
                 const ownerBody = jest.fn();
-                const fixtureBody = jest.fn();
+                const connectionBody = jest.fn();
                 try {
-                    await expect(tx(ownerBody)).rejects.toThrow(/overlap|fixture|await each/i);
-                    await expect(fix(fixtureBody)).rejects.toThrow(/overlap|fixture|await each/i);
+                    await expect(tx(ownerBody)).rejects.toThrow(/overlap|withTestConnection|await each/i);
+                    await expect(fix(connectionBody)).rejects.toThrow(/overlap|withTestConnection|await each/i);
                     expect(ownerBody).not.toHaveBeenCalled();
-                    expect(fixtureBody).not.toHaveBeenCalled();
+                    expect(connectionBody).not.toHaveBeenCalled();
                 } finally { finish.resolve(); await first; }
             });
         });
 
-        it("rejects owner-to-fixture overlap and fixture-to-owner overlap with real SQL in flight", async () => {
+        it("rejects owner-to-withTestConnection overlap and withTestConnection-to-owner overlap with real SQL in flight", async () => {
             await test(async () => {
                 for (const ownerFirst of [false, true]) {
                     const started = deferred();
                     const finish = deferred();
-                    const active = async (connection: any) => {
-                        const pending = slow(connection);
+                    const active = async (db: any) => {
+                        const pending = slow(db);
                         started.resolve();
                         await pending;
                         await finish.promise;
@@ -366,11 +378,11 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                     const body = jest.fn();
                     try {
                         await started.promise;
-                        await expect(ownerFirst ? fix(body) : tx(body)).rejects.toThrow(/overlap|fixture|await each/i);
+                        await expect(ownerFirst ? fix(body) : tx(body)).rejects.toThrow(/overlap|withTestConnection|await each/i);
                         expect(body).not.toHaveBeenCalled();
                     } finally { finish.resolve(); await first; }
                 }
-                await fix(connection => query(connection, "SELECT 1"));
+                await fix(db => query(db, "SELECT 1"));
             });
         });
 
@@ -383,22 +395,22 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                     expect(settled).toBe(true);
                     await rollback(...args);
                 });
-                await expect(fix(connection => {
-                    pending = slow(connection).finally(() => { settled = true; });
+                await expect(fix(db => {
+                    pending = slow(db).finally(() => { settled = true; });
                     return { pending }; // eager operation, not a deep-result policy
                 })).rejects.toThrow(/pending|unawaited|await|query/i);
                 expect(settled).toBe(true);
                 await pending;
-                await fix(connection => insert(connection, 1));
+                await fix(db => insert(db, 1));
             });
         });
 
         it("retains independent callback and unawaited native query errors", async () => {
             await test(async () => {
-                await fix(connection => insert(connection, 1));
+                await fix(db => insert(db, 1));
                 let native: unknown;
-                const error = await rejected(fix(connection => {
-                    void insert(connection, 1).catch(error => { native = error; });
+                const error = await rejected(fix(db => {
+                    void insert(db, 1).catch(error => { native = error; });
                     throw failure;
                 }));
                 driver.nativeError(native);
@@ -408,12 +420,12 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
             });
         });
 
-        it("preserves the original native duplicate error and recovers before the next fixture", async () => {
+        it("preserves the original native duplicate error and recovers before the next withTestConnection", async () => {
             await test(async () => {
-                await fix(connection => insert(connection, 1));
+                await fix(db => insert(db, 1));
                 let native: unknown;
-                const error = await rejected(fix(async connection => {
-                    try { await insert(connection, 1); } catch (error) { native = error; throw error; }
+                const error = await rejected(fix(async db => {
+                    try { await insert(db, 1); } catch (error) { native = error; throw error; }
                 }));
                 driver.nativeError(error);
                 expect(error).toBe(native);
@@ -429,21 +441,21 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
         it.each(["rollbackToSavepoint", "releaseSavepoint"])("poisons the session on recovery %s failure AFTER real SQL", async method => {
             const recovery = new Error(`injected ${method} failure after SQL`);
             let native: unknown;
-            let fixtureError: unknown;
+            let connectionError: unknown;
             const exitError = await rejected(test(async () => {
-                await fix(connection => insert(connection, 1));
+                await fix(db => insert(db, 1));
                 const original = driver.manager[method].bind(driver.manager);
                 let injected = false;
                 jest.spyOn(driver.manager, method).mockImplementation(async (...args: any[]) => {
                     await original(...args);
                     if (!injected) { injected = true; throw recovery; }
                 });
-                fixtureError = await rejected(fix(async connection => {
-                    try { await insert(connection, 1); } catch (error) { native = error; throw error; }
+                connectionError = await rejected(fix(async db => {
+                    try { await insert(db, 1); } catch (error) { native = error; throw error; }
                 }));
                 driver.nativeError(native);
-                expect(errors(fixtureError)).toContain(native);
-                expect(errors(fixtureError)).toContain(recovery);
+                expect(errors(connectionError)).toContain(native);
+                expect(errors(connectionError)).toContain(recovery);
                 const body = jest.fn();
                 await expect(fix(body)).rejects.toThrow();
                 expect(body).not.toHaveBeenCalled();
@@ -453,7 +465,7 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
             expect(errors(exitError)).toContain(recovery);
         });
 
-        it("fences pending fixture exit, drains before rollback and retains body, fixture and cleanup failures", async () => {
+        it("fences pending withTestConnection exit, drains before rollback and retains body, withTestConnection and cleanup failures", async () => {
             const started = deferred();
             const finish = deferred();
             const bodyError = new Error("test body failed");
@@ -470,13 +482,13 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 });
             }
             const operation = test(async () => {
-                pending = fix(async connection => {
+                pending = fix(async db => {
                     started.resolve();
                     await finish.promise;
                     const body = jest.fn();
-                    await expect(fix(body)).rejects.toThrow(/closed|closing|admi|fixture|session/i);
+                    await expect(fix(body)).rejects.toThrow(/closed|closing|admi|withTestConnection|session/i);
                     expect(body).not.toHaveBeenCalled();
-                    await insert(connection, 1); // admitted work may finish after exit starts
+                    await insert(db, 1); // admitted work may finish after exit starts
                     completed = true;
                     throw failure;
                 });
@@ -490,10 +502,10 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
             await expect(pending).rejects.toBe(failure);
             expect(completed).toBe(true);
             for (const expected of [bodyError, failure, rollbackError, releaseError]) expect(errors(error)).toContain(expected);
-            expect(errors(error).some(e => e instanceof Error && /pending|unawaited|await.*fixture|fixture.*await/i.test(e.message))).toBe(true);
+            expect(errors(error).some(e => e instanceof Error && /pending|unawaited|await.*withTestConnection|withTestConnection.*await/i.test(e.message))).toBe(true);
         });
 
-        it("fails a successful but unawaited fixture at session exit after draining it", async () => {
+        it("fails a successful but unawaited withTestConnection at session exit after draining it", async () => {
             const started = deferred();
             const finish = deferred();
             let completed = false;
@@ -504,19 +516,93 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 await rollback(...args);
             });
             const operation = test(async () => {
-                pending = fix(async connection => {
+                pending = fix(async db => {
                     started.resolve();
                     await finish.promise;
-                    await insert(connection, 1);
+                    await insert(db, 1);
                     completed = true;
                 });
                 void pending.catch(() => {});
                 await started.promise;
             });
             setImmediate(finish.resolve);
-            await expect(operation).rejects.toThrow(/pending|unawaited|await.*fixture|fixture.*await/i);
+            await expect(operation).rejects.toThrow(/pending|unawaited|await.*withTestConnection|withTestConnection.*await/i);
             await pending;
             expect(completed).toBe(true);
+        });
+
+        it.each([false, true])("drains a forgotten transaction before outer rollback (body failure: %s)", async bodyFails => {
+            const started = deferred();
+            const finish = deferred();
+            const callbackReturned = deferred();
+            const bodyError = new Error("test body failure with pending transaction");
+            const transactionError = new Error("pending transaction failure");
+            let completed = false;
+            let ownerReleased = false;
+            let exitSettled = false;
+            let pending!: Promise<unknown>;
+            const release = driver.manager.releaseSavepoint.bind(driver.manager);
+            jest.spyOn(driver.manager, "releaseSavepoint").mockImplementation(async (...args: any[]) => {
+                await release(...args);
+                ownerReleased = true;
+            });
+            const rollback = driver.manager.rollbackTransaction.bind(driver.manager);
+            const rollbackSpy = jest.spyOn(driver.manager, "rollbackTransaction").mockImplementation(async (...args: any[]) => {
+                const atRollback = { completed, ownerReleased };
+                await rollback(...args);
+                expect(atRollback).toEqual({ completed: true, ownerReleased: true });
+            });
+            const operation = test(async () => {
+                pending = tx(async () => {
+                    await insert(ambient(), 1);
+                    started.resolve();
+                    await finish.promise;
+                    await insert(ambient(), 2);
+                    completed = true;
+                    if (bodyFails) throw transactionError;
+                    return 42;
+                });
+                void pending.catch(() => {});
+                await started.promise;
+                callbackReturned.resolve();
+                if (bodyFails) throw bodyError;
+                // Intentionally do not await pending.
+            });
+            void operation.then(() => { exitSettled = true; }, () => { exitSettled = true; });
+            try {
+                await callbackReturned.promise;
+                // Let callback settlement/session exit run while the owner is
+                // explicitly gated, rather than relying on a slow SQL timer.
+                await new Promise<void>(resolve => setImmediate(resolve));
+                expect(completed).toBe(false);
+                expect(exitSettled).toBe(false);
+                expect(rollbackSpy).not.toHaveBeenCalled();
+            } finally {
+                finish.resolve();
+                await Promise.allSettled([operation, pending]);
+            }
+            const error = await rejected(operation);
+            expect(error).toBeInstanceOf(AggregateError);
+            expect(errors(error).some(e => e instanceof Error &&
+                e.message === "withTestTransaction callback returned while 1 transaction was still running")).toBe(true);
+            if (bodyFails) {
+                await expect(pending).rejects.toBe(transactionError);
+                expect(errors(error)).toContain(bodyError);
+                expect(errors(error)).toContain(transactionError);
+            } else {
+                await expect(pending).resolves.toBe(42);
+            }
+            expect(rollbackSpy).toHaveBeenCalledTimes(1);
+            expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+            // The next session uses the same max-one pool and must not inherit
+            // either the pending owner or any writes from the failed session.
+            jest.restoreAllMocks();
+            await test(async () => {
+                expect(await fix(ids)).toEqual([]);
+                await tx(() => insert(ambient(), 3));
+                expect(await fix(ids)).toEqual([3]);
+            });
+            expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
         });
 
         it("rejects outside, mock and bound closed sessions before callback execution", async () => {
@@ -536,12 +622,12 @@ export function fixtureContract(label: string, create: () => FixtureDriver) {
                 await expect(tx(async () => {
                     await new Promise(resolve => setTimeout(resolve, 35));
                 }, { timeout: 10 })).rejects.toBeInstanceOf(TransactionTimeoutError);
-                await fix(async connection => {
+                await fix(async db => {
                     expect(driver.manager.getCurrentTransaction()).toBeUndefined();
                     expect(driver.manager.checkDeadline()).toBeUndefined();
-                    await slow(connection);
+                    await slow(db);
                 });
-                expect(probe.transactions).toHaveLength(1);
+                expect(probe.records).toHaveLength(1);
             });
         });
     });

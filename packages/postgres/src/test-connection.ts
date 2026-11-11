@@ -1,9 +1,9 @@
 import type postgres from "postgres" with { "resolution-mode": "import" };
-import type { FixtureLease } from "@tranjs/core/internal/testing-bridge";
+import type { TestConnectionLease } from "@tranjs/core/internal/testing-bridge";
 import type { ReservedTransactionSql } from "./context";
 
 /** Eager queries only; native query modifiers and connection helpers are not exposed. */
-export interface PostgresFixtureConnection {
+export interface TestConnection {
     <T extends readonly (object | undefined)[] = postgres.Row[]>(
         template: TemplateStringsArray,
         ...parameters: readonly postgres.ParameterOrFragment<never>[]
@@ -13,7 +13,7 @@ export interface PostgresFixtureConnection {
     ): Promise<postgres.RowList<T>>;
 }
 
-export function createPostgresFixtureConnection(tx: ReservedTransactionSql, lease: FixtureLease): PostgresFixtureConnection {
+export function createPostgresTestConnection(tx: ReservedTransactionSql, lease: TestConnectionLease): TestConnection {
     const tagged = <T extends readonly (object | undefined)[] = postgres.Row[]>(
         template: TemplateStringsArray,
         ...parameters: readonly postgres.ParameterOrFragment<never>[]
@@ -23,7 +23,7 @@ export function createPostgresFixtureConnection(tx: ReservedTransactionSql, leas
             template.length !== parameters.length + 1 || template.raw.length !== template.length ||
             !template.every(part => typeof part === "string") ||
             !template.raw.every(part => typeof part === "string")) {
-            throw new TypeError("Fixture connection requires a tagged SQL template");
+            throw new TypeError("withTestConnection connection requires a tagged SQL template");
         }
         // Calling then immediately consumes the native lazy query. Only a plain
         // Promise escapes, never a PendingQuery with modifiers or connection access.
@@ -37,7 +37,7 @@ export function createPostgresFixtureConnection(tx: ReservedTransactionSql, leas
         lease.assert();
         if (args.length < 1 || args.length > 2 || typeof args[0] !== "string" ||
             (args[1] !== undefined && !Array.isArray(args[1]))) {
-            throw new TypeError("Fixture unsafe requires SQL text and an optional parameter array");
+            throw new TypeError("withTestConnection unsafe requires SQL text and an optional parameter array");
         }
         return lease.track(() => new Promise<postgres.RowList<T>>((resolve, reject) => {
             tx.unsafe<T>(args[0], args[1]).then(resolve, reject);
