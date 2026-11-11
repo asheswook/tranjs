@@ -37,4 +37,6 @@ test("create saves a user in a transaction", () => withTestTransaction(async tx 
 
 Register matchers for the suite with `setupFilesAfterEnv: ["@tranjs/testing/jest"]` in Jest or `setupFiles: ["@tranjs/testing/vitest"]` in Vitest.
 
+Queries through a finished test scope throw `TransactionClosedError`, including through cached connections and methods. The helper does not detect missing `await`s; use `@typescript-eslint/no-floating-promises`.
+
 See the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup, examples, and limits.

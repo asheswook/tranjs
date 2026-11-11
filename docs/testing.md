@@ -208,7 +208,9 @@ export const seedAda = () => withTestConnection(
 );
 ```
 
-Call services outside `withTestConnection`, and use `db` only inside its callback: the connection and its methods stop working when the callback finishes. Each call uses its own savepoint, a database checkpoint that lets a failed statement roll back without breaking the rest of the test. Await every query. If a query is still running when the callback returns, the helper waits for it to finish, then fails the call.
+Call services outside `withTestConnection`, and use `db` only inside its callback. Each call uses its own savepoint, a database checkpoint that lets a failed statement roll back without breaking the rest of the test. The connection and its methods have their own lifetime: when the callback finishes, later queries throw `TransactionClosedError`, even through a cached method. The enclosing test ending also closes access.
+
+Await every query. If a native query is still pending when the `withTestConnection` callback finishes, the helper fails the call. Savepoint cleanup queues behind that query in the driver's native queue. This check applies to pending native queries, not to all unfinished work in the callback.
 
 ## Checking boundaries
 
@@ -338,19 +340,25 @@ Choose either `containing` or `where`, not both. With no selector, the next matc
 | Deferred PostgreSQL constraints | Checked according to their modes, including at COMMIT | Checked when a service or `NESTED` savepoint finishes, with the prior modes restored |
 | Caught PostgreSQL statement error | An aborted COMMIT rejects with `TransactionAbortedError` in pg and postgres.js | Savepoint completion rejects with the same class and retains the native error as `cause` |
 | Injected commit/rollback failures | Real failures can leave the result uncertain | Savepoint recovery rolls back the affected writes; it does not reproduce an uncertain COMMIT |
-| A transaction still running when the callback returns | The caller must await it | The helper waits for it to finish, then fails the test for the forgotten `await` |
+| SQL attempted after its transaction or test scope ends | Throws `TransactionClosedError` | Also throws, including through cached connections and methods |
 | Parallel transactions | Can use independent connections | Separate tests can run in parallel; transaction branches inside one callback must run sequentially |
 
 Await all work, including timers, inside the callback. Put rollback-sensitive setup and checks there too. Runner hooks run outside it. Run `withTestConnection` calls and service calls one at a time. Use separate top-level callbacks instead of nested `withTestTransaction` calls.
 
-`withTestTransaction` waits for unfinished work before failing. After one second, it warns once that it is still waiting. If the work never finishes, the helper keeps waiting and your runner's own timeout still applies.
+### Connection lifetimes
+
+When the `withTestTransaction` callback finishes, it closes the test's root connection access and every transaction handle opened in that test. Later SQL throws the core-exported `TransactionClosedError` with message `"Transaction already finished"` before reaching the driver. This applies both to `ctx()` lookups in detached work that inherited the test context and to cached connections or bound methods.
+
+A transaction that owns a test savepoint has its own connection handle, which closes when that transaction ends. Joined calls and `NESTED` scopes share their parent's handle, so a cached handle remains usable after an inner call returns while its owner is still active. In tests, `REQUIRES_NEW` gets a distinct handle on the same physical connection; that handle closes when the child transaction ends.
+
+`withTestTransaction` does not wait for unawaited transactions or `withTestConnection` callbacks before starting cleanup. A native query dispatched before the callback ended can finish; rollback queues behind it in the driver's native queue. The helper does not detect missing `await`s. Use `@typescript-eslint/no-floating-promises` to catch unawaited calls.
 
 ### What is not rolled back
 
 - SQL on raw connections, other datasources, or independent work started with `NOT_SUPPORTED`.
 - Explicit transaction-control SQL and DDL that commits implicitly, such as MySQL schema changes. Apply migrations separately.
 - Sequence increments, emails, HTTP calls, files, caches and mock state. Mock external effects or clean them up separately.
-- Detached work that runs after the callback, including unawaited timers or runner callbacks. The helper cannot catch a missing `await` for work that starts after it has finished.
+- External effects from detached work after the callback, including unawaited timers or runner callbacks. The helper does not stop that work; it rejects late SQL through the test's closed connection handles.
 
 ## Tests that need real commits
 
@@ -404,7 +412,7 @@ All three helpers accept `TestOptions`: `{ datasource?: string | symbol }`. `wit
 
 ### Errors
 
-If your callback returns while a transaction is still running, `withTestTransaction` waits for it to finish and fails with an `AggregateError`. Check its `errors` array for errors from your code. An unawaited call that rejects before the callback returns still produces an unhandled rejection.
+Late SQL through a closed transaction or test connection throws `TransactionClosedError` before dispatch. This does not detect a missing `await`; an unawaited call can still produce an unhandled rejection. The separate pending-native-query check in `withTestConnection` is described under [Seeding and reading data](#seeding-and-reading-data).
 
 If cleanup also fails, `TransactionSystemError.cause` holds the cleanup error and `.applicationError` keeps the earlier error. See the [error reference](api.md#errors).
 

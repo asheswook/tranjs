@@ -206,6 +206,7 @@ All classes are exported by `@tranjs/core` except where a driver package is name
 | `TransactionSystemError` | Physical rollback fails | Message: `"Transaction rollback failed after application error"`. `cause` is the rollback error; `applicationError` is the original exception, timeout, or rollback-only decision. The original error is also logged. |
 | `UnexpectedRollbackError` | An owner or `NESTED` callback returns while rollback-only | See [rollback rules](#rollback-rules) for savepoint reset behaviour. |
 | `TransactionTimeoutError` | A transaction deadline expires or its injected query timer fires | Marks rollback-only; physical rollback can replace it with `TransactionSystemError`. |
+| `TransactionClosedError` | SQL is attempted through a transaction or test connection whose lifetime has ended | Message: `"Transaction already finished"`. Covers `ctx()` lookups in an inherited closed context and cached connections or bound methods; the query never reaches the driver. |
 | `InvalidIsolationLevelError` | A new physical transaction receives an invalid isolation level | Extends `TypeError`; validation happens before begin. |
 | `ConcurrentNestedTransactionError` | A sibling `NESTED` scope is still open in the same parent scope | Run siblings sequentially. |
 | `NestedTransactionNotSupportedError` | A manager without savepoint support receives `NESTED` inside a transaction | Extends `UnsupportedTransactionPropagationException`. |

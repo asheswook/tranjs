@@ -94,6 +94,12 @@ class Service {
 
 The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, then starts with `START TRANSACTION` or `START TRANSACTION READ ONLY`. Savepoints and named datasources are supported. See [transaction options and deadlines](api.md#isolation-readonly-and-timeout); connection-per-transaction isolation has the [policy below](#mysql).
 
+## Connection lifetime
+
+TranJS rejects queries through a finished transaction with the core-exported `TransactionClosedError` (`"Transaction already finished"`) before dispatch. The check covers `ctx()` lookups in an inherited closed context, cached connections and bound methods. A cached `ctx()` connection cannot send queries to a released connection.
+
+Joined calls and `NESTED` scopes share the physical transaction's handle. Returning from an inner scope leaves that handle usable while the transaction is active; physical transaction completion closes it for all callers. Production `REQUIRES_NEW` uses its own connection and handle. For savepoint-backed test handles, see [connection lifetimes in tests](testing.md#connection-lifetimes).
+
 ## Supported runtimes
 
 | Runtime | Setup |

@@ -146,7 +146,7 @@ test("create saves a user in a transaction", () => withTestTransaction(async tx 
 }));
 ```
 
-See the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup and examples.
+Late queries through a finished transaction or test connection throw `TransactionClosedError`; use `@typescript-eslint/no-floating-promises` to catch missing `await`s. See the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup and examples.
 
 ## Supported platforms
 
