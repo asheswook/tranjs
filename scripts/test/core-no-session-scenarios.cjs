@@ -1,6 +1,19 @@
 // Executed in a fresh Node process for each built core: never imports /testing.
 const core = require(process.argv[2]);
 const { AsyncResource } = require('node:async_hooks');
+const { existsSync } = require('node:fs');
+const { dirname, join } = require('node:path');
+const contextEntry = join(dirname(process.argv[2]), 'internal/context.js');
+// Model the driver lookup with the internal helper, or the published driver's default lookup.
+const resolveContextManager = existsSync(contextEntry) ? require(contextEntry).resolveContextManager : core.getTransactionManager;
+
+function driverContext(datasource) {
+    const manager = resolveContextManager(datasource);
+    manager.assertCurrentTransactionOpen?.();
+    const transaction = manager.getCurrentTransaction();
+    if (!transaction) throw new Error('Transaction context not initialized');
+    return transaction;
+}
 
 function errorInfo(error) {
     if (!(error instanceof Error)) return { thrown: error === undefined ? '<undefined>' : error };
@@ -296,6 +309,21 @@ async function main() {
                 if (error.message !== 'named body failed') throw error;
             }
             return 'named hooks complete';
+        } finally { core.useTransactionManager(undefined, datasource); }
+    });
+    await add('ctx/implicit-named-datasource', async ({ run, mark, manager }) => {
+        const datasource = 'analytics';
+        core.useTransactionManager(manager, datasource);
+        core.useTransactionManager(new manager.constructor());
+        try {
+            return await run(() => {
+                let implicit;
+                try { implicit = { returned: driverContext().id }; }
+                catch (error) { implicit = { error: errorInfo(error) }; }
+                const explicit = driverContext(datasource).id;
+                mark('named-body');
+                return { implicit, explicit };
+            }, { datasource });
         } finally { core.useTransactionManager(undefined, datasource); }
     });
     await add('detached/new-transaction-after-commit', async ({ run, mark, manager }) => {

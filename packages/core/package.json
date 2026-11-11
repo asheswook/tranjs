@@ -23,10 +23,12 @@
   "exports": {
     ".": "./dist/index.js",
     "./dist/asyncLocal": "./dist/asyncLocal.js",
+    "./internal/context": "./dist/internal/context.js",
     "./internal/testing-bridge": "./dist/internal/testing-bridge.js"
   },
   "typesVersions": {
     "*": {
+      "internal/context": ["dist/internal/context.d.ts"],
       "internal/testing-bridge": ["dist/internal/testing-bridge.d.ts"]
     }
   },

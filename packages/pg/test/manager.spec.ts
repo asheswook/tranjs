@@ -3,6 +3,7 @@ import QueryStream = require("pg-query-stream");
 import { EventEmitter } from "node:events";
 import {
     IsolationLevel,
+    DEFAULT_DATASOURCE,
     InvalidIsolationLevelError,
     getTransactionManager,
     PlatformTransactionManager,
@@ -466,7 +467,8 @@ describe("PostgreSQL driver (real database)", () => {
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
             expect(() => ctx(second)).toThrow("Transaction context not initialized");
             await transactional(async () => {
-                expect(ctx()).toBe(outer);
+                expect(ctx(DEFAULT_DATASOURCE)).toBe(outer);
+                expect(ctx()).toBe(ctx(second));
                 expect(ctx(second)).not.toBe(outer);
                 await ctx(second).query(`INSERT INTO ${table} VALUES (2)`);
             }, { datasource: second })();

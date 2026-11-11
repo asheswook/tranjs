@@ -1,6 +1,6 @@
 import type postgres from "postgres" with { "resolution-mode": "import" };
+import { resolveContextManager } from "@tranjs/core/internal/context";
 import {
-    getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
     Logger,
@@ -51,7 +51,7 @@ const HIDDEN_MEMBERS = new Set<PropertyKey>(
 export function ctx<T extends Record<string, unknown> = {}>(datasource?: string | symbol): TransactionSql<T>;
 export function ctx(datasource?: string | symbol): TransactionSql;
 export function ctx(datasource?: string | symbol): TransactionSql {
-    const manager = getTransactionManager(datasource);
+    const manager = resolveContextManager(datasource);
     if (!(manager instanceof PostgresTransactionManager) && !(manager instanceof PostgresConnectionPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }

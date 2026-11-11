@@ -25,8 +25,8 @@ try {
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.equal(expected.length, 90, 'Keep all 87 unchanged probes and all three intended differences');
-    for (const name of ['hooks/implicit-named-datasource', 'detached/new-transaction-after-commit', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
+    assert.equal(expected.length, 91, 'Keep all 87 unchanged probes and all four intended differences');
+    for (const name of ['ctx/implicit-named-datasource', 'hooks/implicit-named-datasource', 'detached/new-transaction-after-commit', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
         'async-logger/hook-failure', 'async-logger/rollback-failure',
@@ -71,6 +71,16 @@ try {
         ],
         loggerCalls: [], loggerRejections: [], errorIdentity: [], outside: null,
     });
+    const namedContextResult = fixed => ({
+        name: 'ctx/implicit-named-datasource',
+        result: { returned: {
+            implicit: fixed ? { returned: 1 } : { error: { name: 'Error', message: 'Transaction context not initialized' } },
+            explicit: 1,
+        } },
+        outcomes: ['committed'],
+        events: [['begin', {}, null], ['named-body', 1], ['commit', 1, 1], ['release', 1, false, null]],
+        loggerCalls: [], loggerRejections: [], errorIdentity: [], outside: null,
+    });
     let unchanged = 0;
     for (let index = 0; index < expected.length; index++) {
         const name = expected[index].name;
@@ -81,6 +91,9 @@ try {
         } else if (name === 'hooks/implicit-named-datasource') {
             assert.deepEqual(expected[index], namedHooksResult(false), 'Published implicit named-hook behavior changed');
             assert.deepEqual(actual[index], namedHooksResult(true), 'Implicit hooks must wait for their named transaction');
+        } else if (name === 'ctx/implicit-named-datasource') {
+            assert.deepEqual(expected[index], namedContextResult(false), 'Published implicit named ctx behavior changed');
+            assert.deepEqual(actual[index], namedContextResult(true), 'Implicit ctx must select the named transaction');
         } else {
             assert.deepEqual(actual[index], expected[index], `No-session production behavior changed: ${name}`);
             unchanged++;

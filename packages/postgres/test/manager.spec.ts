@@ -1,6 +1,7 @@
 import postgres from "postgres";
 import {
     afterCommit,
+    DEFAULT_DATASOURCE,
     afterRollback,
     getTransactionManager,
     InvalidIsolationLevelError,
@@ -584,7 +585,8 @@ describe("postgres.js pool manager (real database)", () => {
             await outer.unsafe(`INSERT INTO ${table} VALUES (1)`);
             expect(() => ctx(second)).toThrow("Transaction context not initialized");
             await transactional(async () => {
-                expect(ctx()).toBe(outer);
+                expect(ctx(DEFAULT_DATASOURCE)).toBe(outer);
+                expect(ctx()).toBe(ctx(second));
                 expect(ctx(second)).not.toBe(outer);
                 await ctx(second).unsafe(`INSERT INTO ${table} VALUES (2)`);
             }, { datasource: second })();
@@ -600,16 +602,19 @@ describe("postgres.js pool manager (real database)", () => {
         expect(new PostgresTransactionManager(sql)).toBeInstanceOf(PlatformTransactionManager);
     });
 
-    it("documents the per-request registration hazard", async () => {
+    it("keeps implicit ctx on its owner while explicit default observes re-registration", async () => {
         let started!: () => void;
         const firstStarted = new Promise<void>(resolve => { started = resolve; });
         let resume!: () => void;
         const secondFinished = new Promise<void>(resolve => { resume = resolve; });
         const first = transactional(async () => {
-            await ctx()`SELECT 1`;
+            const original = ctx();
+            await original`SELECT 1`;
             started();
             await secondFinished;
+            expect(ctx()).toBe(original);
             await ctx()`SELECT 2`;
+            await ctx(DEFAULT_DATASOURCE)`SELECT 4`;
         })();
         await firstStarted;
         usePostgresTransactionManager(sql);

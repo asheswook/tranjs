@@ -48,6 +48,17 @@ export function getTransactionManager(name: string | symbol = DEFAULT_DATASOURCE
     return manager;
 }
 
+/** Internal driver lookup. A retained closed scope cannot select an outer connection. */
+export function resolveContextManager(datasource?: string | symbol): PlatformTransactionManager<any> {
+    if (datasource !== undefined) return getTransactionManager(datasource);
+    for (const [manager, state] of Array.from(AsyncLocal.Frame?.txs ?? []).reverse()) {
+        if (!state) continue;
+        manager.assertCurrentTransactionOpen();
+        return manager;
+    }
+    return getTransactionManager();
+}
+
 export function runInTransaction<T>(fn: () => Promise<T> | T, config: TransactionConfig = {}): Promise<T> {
     const { propagation = Propagation.REQUIRED, datasource, ...options } = config;
     // Resolve inside an async call so setup errors are Promise rejections, too.

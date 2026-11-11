@@ -1,7 +1,7 @@
 import * as mysql2 from "mysql2/promise";
+import { resolveContextManager } from "@tranjs/core/internal/context";
 import { createConnection } from "mysql2";
 import {
-    getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
     Logger,
@@ -40,7 +40,7 @@ export function useMySQLConnectionPerTransaction(
 
 /** Get this datasource's active MySQL transaction. */
 export const ctx = (datasource?: string | symbol): PoolConnection => {
-    const manager = getTransactionManager(datasource);
+    const manager = resolveContextManager(datasource);
     if (!(manager instanceof MySQLTransactionManager) && !(manager instanceof MySQLConnectionPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }

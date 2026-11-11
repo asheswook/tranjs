@@ -1,6 +1,6 @@
 import * as pg from "pg";
+import { resolveContextManager } from "@tranjs/core/internal/context";
 import {
-    getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
     Logger,
@@ -33,7 +33,7 @@ export function usePostgreSQLClientPerTransaction(
 
 /** Get this datasource's active PostgreSQL transaction. */
 export const ctx = (datasource?: string | symbol): PoolClient => {
-    const manager = getTransactionManager(datasource);
+    const manager = resolveContextManager(datasource);
     if (!(manager instanceof PostgreSQLTransactionManager) && !(manager instanceof PostgreSQLClientPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }

@@ -1,10 +1,15 @@
 import { getTransactionManager, transactional, TransactionConfig, Propagation } from "@tranjs/core";
+import { resolveContextManager } from "@tranjs/core/internal/context";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
 type Expect<T extends true> = T;
 
 export function assertCustomContextOpen(): void {
     getTransactionManager().assertCurrentTransactionOpen();
+}
+
+export function resolvedContextManager(): ReturnType<typeof getTransactionManager> {
+    return resolveContextManager();
 }
 
 const identity = transactional(async <T>(value: T): Promise<T> => value);

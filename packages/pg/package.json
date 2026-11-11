@@ -1,6 +1,6 @@
 {
   "name": "@tranjs/pg",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "TranJS driver for pg. (PostgreSQL)",
   "license": "LGPL-2.1-only",
   "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/pg" },
@@ -14,7 +14,7 @@
     "test": "jest --runInBand"
   },
   "dependencies": {
-    "@tranjs/core": "^1.2.0",
+    "@tranjs/core": "^1.2.1",
     "@types/pg": "^8.11.11",
     "pg": "*"
   },

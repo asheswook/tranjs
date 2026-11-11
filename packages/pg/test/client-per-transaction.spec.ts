@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import {
     afterCommit,
+    DEFAULT_DATASOURCE,
     getTransactionManager,
     InvalidIsolationLevelError,
     IsolationLevel,
@@ -403,7 +404,7 @@ describe("PostgreSQL client per transaction (real database)", () => {
         },
     );
 
-    it("documents the hazard: per-call pool manager re-registration breaks concurrent request contexts", async () => {
+    it("keeps implicit ctx on its owner while explicit default observes re-registration", async () => {
         // This deliberately reproduces unsupported registration inside a request handler.
         let started!: () => void;
         const firstStarted = new Promise<void>(resolve => { started = resolve; });
@@ -411,10 +412,13 @@ describe("PostgreSQL client per transaction (real database)", () => {
         const secondFinished = new Promise<void>(resolve => { resume = resolve; });
         usePostgreSQLTransactionManager(pool);
         const first = transactional(async () => {
-            await ctx().query("SELECT 1");
+            const original = ctx();
+            await original.query("SELECT 1");
             started();
             await secondFinished;
-            await ctx().query("SELECT 2"); // Looks up the replacement manager, not this request's manager.
+            expect(ctx()).toBe(original);
+            await ctx().query("SELECT 2");
+            await ctx(DEFAULT_DATASOURCE).query("SELECT 4");
         })();
         await firstStarted;
         usePostgreSQLTransactionManager(pool);
