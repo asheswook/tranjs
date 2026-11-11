@@ -1,7 +1,7 @@
 import { AsyncResource } from "node:async_hooks";
 import {
     afterCommit, afterRollback, clearTransactionManager, Propagation, transactional,
-    Transactional, TransactionTimeoutError, useTransactionManager,
+    Transactional, TransactionClosedError, TransactionTimeoutError, useTransactionManager,
 } from "@tranjs/core";
 import { withTestConnection, mockTransactions, withTestTransaction } from "@tranjs/testing";
 
@@ -65,6 +65,34 @@ export function testConnectionContract(label: string, create: (options: { maxCon
         const ambient = () => driver.ambient(datasource);
         const slow = (db: any) => query(db, driver.kind === "mysql2"
             ? "SELECT SLEEP(0.08) AS n" : "SELECT pg_sleep(0.08) AS n");
+        // Capture methods while their owner is live, including explicitly bound
+        // methods and the callable postgres tag. Late property lookup alone must
+        // not be the only thing protecting an escaped connection.
+        const lateOperations = (db: any): (() => unknown)[] => {
+            const methods = driver.kind === "postgres" ? ["unsafe"]
+                : driver.kind === "mysql2" ? ["query", "execute"] : ["query"];
+            const operations: (() => unknown)[] = [];
+            for (const method of methods) {
+                const bound = db[method].bind(db);
+                operations.push(() => db[method](`INSERT INTO ${table} VALUES (901)`));
+                operations.push(() => bound(`INSERT INTO ${table} VALUES (902)`));
+            }
+            if (driver.kind === "postgres") {
+                const bound = Function.prototype.bind.call(db, undefined);
+                operations.push(() => db`SELECT ${903}::integer AS n`);
+                operations.push(() => bound`SELECT ${904}::integer AS n`);
+            }
+            return operations;
+        };
+        const assertClosed = async (operations: (() => unknown)[]) => {
+            const before = dispatches.mock.calls.length;
+            for (const operation of operations) {
+                const error = await rejected(Promise.resolve().then(operation));
+                expect(error).toBeInstanceOf(TransactionClosedError);
+                expect(error).toHaveProperty("message", "Transaction already finished");
+                expect(dispatches).toHaveBeenCalledTimes(before);
+            }
+        };
 
         beforeAll(async () => {
             // Reuse the same one-connection pool across cases: leaked work cannot
@@ -81,8 +109,25 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             // Observe real native query entry, not the restricted facade. This also
             // covers fresh physical connections in per-transaction manager modes.
             const begin = driver.manager.beginTransaction.bind(driver.manager);
+            const observed = new WeakMap<object, any>();
+            const nativeTransactions = new WeakMap<object, any>();
+            if (driver.kind === "postgres") {
+                const release = driver.manager.releaseTransaction.bind(driver.manager);
+                jest.spyOn(driver.manager, "releaseTransaction").mockImplementation((transaction: any, ...args: any[]) =>
+                    // Per-transaction managers key physical pool disposal by the
+                    // original reserved function, not our callable observation proxy.
+                    release(nativeTransactions.get(transaction) ?? transaction, ...args));
+            }
             jest.spyOn(driver.manager, "beginTransaction").mockImplementation(async (...args: any[]) => {
                 const context = await begin(...args);
+                const transaction = context.transaction;
+                // A max-one pool can return the very same client more than once
+                // in one case. Re-spying its spy would recursively call itself.
+                const existing = observed.get(transaction);
+                if (existing) {
+                    context.transaction = existing;
+                    return context;
+                }
                 for (const method of driver.kind === "postgres" ? ["unsafe"] : driver.kind === "mysql2" ? ["query", "execute"] : ["query"]) {
                     const native = context.transaction[method].bind(context.transaction);
                     jest.spyOn(context.transaction, method).mockImplementation((...params: any[]) => {
@@ -90,6 +135,20 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                         return native(...params);
                     });
                 }
+                if (driver.kind === "postgres") {
+                    // unsafe spies cannot see the native callable/tag entry.
+                    // Keep the real reserved SQL function and observe that entry
+                    // too, before the managed facade gets a chance to wrap it.
+                    context.transaction = new Proxy(context.transaction, {
+                        apply(target, receiver, params) {
+                            dispatches("tag", ...params);
+                            return Reflect.apply(target, receiver, params);
+                        },
+                    });
+                    nativeTransactions.set(context.transaction, transaction);
+                }
+                observed.set(transaction, context.transaction);
+                observed.set(context.transaction, context.transaction);
                 return context;
             });
         });
@@ -252,13 +311,14 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             let extracted: any[];
             let callTag: (() => unknown) | undefined;
             let data: any;
-            const assertRevoked = async () => {
+            const assertRevoked = async (finished = false) => {
+                const expected = finished ? TransactionClosedError : "The connection was used after its withTestConnection callback finished";
                 const before = dispatches.mock.calls.length;
-                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow("The connection was used after its withTestConnection callback finished");
+                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow(expected);
                 for (const method of extracted) {
-                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow("The connection was used after its withTestConnection callback finished");
+                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow(expected);
                 }
-                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow("The connection was used after its withTestConnection callback finished");
+                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow(expected);
                 expect(dispatches).toHaveBeenCalledTimes(before);
             };
             await test(async () => {
@@ -277,7 +337,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                 await assertRevoked();
                 await fix(db => query(db, "SELECT 1"));
             });
-            await assertRevoked();
+            await assertRevoked(true);
         });
 
         it("blocks all seven propagations on every datasource before callback execution", async () => {
@@ -467,144 +527,272 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             expect(errors(exitError)).toContain(recovery);
         });
 
-        it("fences pending withTestConnection exit, drains before rollback and retains body, withTestConnection and cleanup failures", async () => {
+        it.each([false, true])("does not wait for a gated withTestConnection callback at root exit (body failure: %s)", async bodyFails => {
             const started = deferred();
             const finish = deferred();
-            const bodyError = new Error("test body failed");
-            const rollbackError = new Error("outer rollback failed after SQL");
-            const releaseError = new Error("outer release failed after cleanup");
-            let completed = false;
+            const bodyError = new Error("test body failed with a pending connection callback");
+            let resumed = false;
             let pending!: Promise<unknown>;
-            for (const [method, error] of [["rollbackTransaction", rollbackError], ["releaseTransaction", releaseError]] as const) {
-                const original = driver.manager[method].bind(driver.manager);
-                jest.spyOn(driver.manager, method).mockImplementation(async (...args: any[]) => {
-                    expect(completed).toBe(true);
-                    await original(...args);
-                    throw error;
-                });
-            }
-            const operation = test(async () => {
-                pending = fix(async db => {
-                    started.resolve();
-                    await finish.promise;
-                    const body = jest.fn();
-                    await expect(fix(body)).rejects.toThrow("withTestConnection was called after the withTestTransaction callback finished");
-                    expect(body).not.toHaveBeenCalled();
-                    await insert(db, 1); // admitted work may finish after exit starts
-                    completed = true;
-                    throw failure;
-                });
-                void pending.catch(() => {});
-                await started.promise;
-                throw bodyError;
-            });
-            // Resume only after the body has settled and session exit has begun.
-            setImmediate(finish.resolve);
-            const error = await rejected(operation);
-            await expect(pending).rejects.toBe(failure);
-            expect(completed).toBe(true);
-            for (const expected of [bodyError, failure, rollbackError, releaseError]) expect(errors(error)).toContain(expected);
-            expect(errors(error).some(e => e instanceof Error && e.message === "withTestTransaction callback returned while withTestConnection was still running")).toBe(true);
-        });
-
-        it("fails a successful but unawaited withTestConnection at session exit after draining it", async () => {
-            const started = deferred();
-            const finish = deferred();
-            let completed = false;
-            let pending!: Promise<unknown>;
-            const rollback = driver.manager.rollbackTransaction.bind(driver.manager);
-            jest.spyOn(driver.manager, "rollbackTransaction").mockImplementation(async (...args: any[]) => {
-                expect(completed).toBe(true);
-                await rollback(...args);
-            });
-            const operation = test(async () => {
-                pending = fix(async db => {
-                    started.resolve();
-                    await finish.promise;
-                    await insert(db, 1);
-                    completed = true;
-                });
-                void pending.catch(() => {});
-                await started.promise;
-            });
-            setImmediate(finish.resolve);
-            await expect(operation).rejects.toThrow("withTestTransaction callback returned while withTestConnection was still running");
-            await pending;
-            expect(completed).toBe(true);
-        });
-
-        it.each([false, true])("drains a forgotten transaction before outer rollback (body failure: %s)", async bodyFails => {
-            const started = deferred();
-            const finish = deferred();
-            const callbackReturned = deferred();
-            const bodyError = new Error("test body failure with pending transaction");
-            const transactionError = new Error("pending transaction failure");
-            let completed = false;
-            let ownerReleased = false;
-            let exitSettled = false;
-            let pending!: Promise<unknown>;
-            const release = driver.manager.releaseSavepoint.bind(driver.manager);
-            jest.spyOn(driver.manager, "releaseSavepoint").mockImplementation(async (...args: any[]) => {
-                await release(...args);
-                ownerReleased = true;
-            });
             const rollback = driver.manager.rollbackTransaction.bind(driver.manager);
             const rollbackSpy = jest.spyOn(driver.manager, "rollbackTransaction").mockImplementation(async (...args: any[]) => {
-                const atRollback = { completed, ownerReleased };
-                await rollback(...args);
-                expect(atRollback).toEqual({ completed: true, ownerReleased: true });
+                try { expect(resumed).toBe(false); }
+                finally { await rollback(...args); }
             });
             const operation = test(async () => {
-                pending = tx(async () => {
-                    await insert(ambient(), 1);
+                pending = fix(async db => {
+                    await insert(db, 1);
                     started.resolve();
                     await finish.promise;
-                    await insert(ambient(), 2);
-                    completed = true;
-                    if (bodyFails) throw transactionError;
-                    return 42;
+                    resumed = true;
+                    return insert(db, 2);
                 });
-                void pending.catch(() => {});
+                // This test deliberately ignores a caller until after root exit.
+                // Observe its expected rejection immediately, not in the runtime.
+                void pending.catch(() => { started.resolve(); });
                 await started.promise;
-                callbackReturned.resolve();
                 if (bodyFails) throw bodyError;
-                // Intentionally do not await pending.
             });
-            void operation.then(() => { exitSettled = true; }, () => { exitSettled = true; });
             try {
-                await callbackReturned.promise;
-                // Let callback settlement/session exit run while the owner is
-                // explicitly gated, rather than relying on a slow SQL timer.
-                await new Promise<void>(resolve => setImmediate(resolve));
-                expect(completed).toBe(false);
-                expect(exitSettled).toBe(false);
-                expect(rollbackSpy).not.toHaveBeenCalled();
+                if (bodyFails) expect(errors(await rejected(operation))).toContain(bodyError);
+                else await operation;
+                expect(resumed).toBe(false);
+                expect(rollbackSpy).toHaveBeenCalledTimes(1);
+                rollbackSpy.mockRestore();
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+                const before = dispatches.mock.calls.length;
+                finish.resolve();
+                await expect(pending).rejects.toThrow();
+                expect(dispatches).toHaveBeenCalledTimes(before);
+                await test(async () => {
+                    expect(await fix(ids)).toEqual([]);
+                    await fix(db => insert(db, 3));
+                });
             } finally {
                 finish.resolve();
                 await Promise.allSettled([operation, pending]);
             }
-            const error = await rejected(operation);
-            expect(error).toBeInstanceOf(AggregateError);
-            expect(errors(error).some(e => e instanceof Error &&
-                e.message === "withTestTransaction callback returned while 1 transaction was still running")).toBe(true);
-            if (bodyFails) {
-                await expect(pending).rejects.toBe(transactionError);
-                expect(errors(error)).toContain(bodyError);
-                expect(errors(error)).toContain(transactionError);
-            } else {
-                await expect(pending).resolves.toBe(42);
-            }
-            expect(rollbackSpy).toHaveBeenCalledTimes(1);
-            expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
-            // The next session uses the same max-one pool and must not inherit
-            // either the pending owner or any writes from the failed session.
-            jest.restoreAllMocks();
-            await test(async () => {
-                expect(await fix(ids)).toEqual([]);
-                await tx(() => insert(ambient(), 3));
-                expect(await fix(ids)).toEqual([3]);
+        });
+
+        it.each([false, true])("closes a forgotten managed caller before the next max-one-pool test (body failure: %s)", async bodyFails => {
+            const started = deferred();
+            const finish = deferred();
+            const bodyError = new Error("test body failed with a forgotten managed caller");
+            let pending!: Promise<unknown>;
+            let cached: any;
+            let late!: (() => unknown)[];
+            let detached!: () => Promise<unknown>;
+            let resumed = false;
+            const operation = test(async () => {
+                pending = tx(async () => {
+                    cached = ambient();
+                    late = lateOperations(cached);
+                    detached = () => insert(cached, 5);
+                    await insert(cached, 1);
+                    started.resolve();
+                    await finish.promise;
+                    resumed = true;
+                    // Both the inherited async context and pre-captured methods
+                    // must reject, even while a new session owns the same pool.
+                    await assertClosed([() => insert(ambient(), 2), ...late]);
+                    return insert(cached, 3);
+                });
+                void pending.catch(() => { started.resolve(); });
+                await started.promise;
+                if (bodyFails) throw bodyError;
             });
-            expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+            try {
+                if (bodyFails) expect(errors(await rejected(operation))).toContain(bodyError);
+                else await operation;
+                expect(resumed).toBe(false);
+                expect(ambient).toThrow("Transaction context not initialized");
+                await assertClosed([detached]);
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+                await test(async () => {
+                    expect(await fix(ids)).toEqual([]);
+                    const before = dispatches.mock.calls.length;
+                    finish.resolve();
+                    await expect(pending).rejects.toBeInstanceOf(TransactionClosedError);
+                    expect(dispatches).toHaveBeenCalledTimes(before);
+                    await tx(() => insert(ambient(), 4));
+                    expect(await fix(ids)).toEqual([4]);
+                });
+            } finally {
+                finish.resolve();
+                await Promise.allSettled([operation, pending]);
+            }
+        });
+
+        it.each(["commit", "rollback"])("revokes production ctx and bound methods after %s, including detached helpers", async outcome => {
+            let cached: any;
+            let late!: (() => unknown)[];
+            let lookup!: () => any;
+            let detached!: () => Promise<unknown>;
+            const operation = tx(async () => {
+                cached = ambient();
+                late = lateOperations(cached);
+                lookup = AsyncResource.bind(ambient);
+                // A plain closure does not restore any transaction async context.
+                detached = () => insert(cached, 5);
+                await query(cached, "SELECT 1 AS n");
+                if (outcome === "rollback") throw failure;
+            });
+            if (outcome === "rollback") await expect(operation).rejects.toBe(failure);
+            else await operation;
+            expect(ambient).toThrow("Transaction context not initialized");
+            await assertClosed([lookup, () => insert(lookup(), 6), detached, ...late]);
+            // Real COMMIT/ROLLBACK returned the physical checkout cleanly.
+            await tx(async () => {
+                expect(ambient()).not.toBe(cached);
+                expect(driver.rows(await query(ambient(), "SELECT 7 AS n"))).toHaveLength(1);
+            });
+        });
+
+        it("queues physical rollback behind an already-dispatched slow insert without waiting for its caller", async () => {
+            const started = deferred();
+            const finish = deferred();
+            let pending!: Promise<unknown>;
+            let nativeInsert!: Promise<unknown>;
+            let cached: any;
+            let lookup!: () => any;
+            let nativeSettled = false;
+            let resumed = false;
+            const rollback = driver.manager.rollbackTransaction.bind(driver.manager);
+            const rollbackSpy = jest.spyOn(driver.manager, "rollbackTransaction").mockImplementation(async (...args: any[]) => {
+                try {
+                    // Rollback is invoked now, not after a registry drains queries
+                    // or callers. The native connection serializes the SQL.
+                    expect(nativeSettled).toBe(false);
+                    expect(resumed).toBe(false);
+                    expect(dispatches.mock.calls.some(call => /^INSERT INTO /i.test(String(call[1])) && /sleep/i.test(String(call[1])))).toBe(true);
+                    // The gate closes before entering physical ROLLBACK, not
+                    // merely after rollback/release has completed.
+                    await assertClosed([lookup, () => insert(cached, 7)]);
+                } finally { await rollback(...args); }
+            });
+            const operation = test(async () => {
+                pending = tx(async () => {
+                    cached = ambient();
+                    lookup = AsyncResource.bind(ambient);
+                    const sql = driver.kind === "mysql2"
+                        ? `INSERT INTO ${table} (id) SELECT 1 + SLEEP(0.08)`
+                        : `INSERT INTO ${table} (id) SELECT 1 FROM pg_sleep(0.08)`;
+                    // Calling then starts lazy postgres queries before callback
+                    // exit, as well as observing the eager pg/mysql promises.
+                    nativeInsert = query(cached, sql).then(result => {
+                        nativeSettled = true;
+                        return result;
+                    });
+                    void nativeInsert.catch(() => {});
+                    started.resolve();
+                    await nativeInsert;
+                    await finish.promise;
+                    resumed = true;
+                    return insert(cached, 2);
+                });
+                void pending.catch(() => { started.resolve(); });
+                await started.promise;
+            });
+            try {
+                await operation;
+                await nativeInsert;
+                expect(nativeSettled).toBe(true);
+                expect(resumed).toBe(false);
+                expect(rollbackSpy).toHaveBeenCalledTimes(1);
+                expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
+                const before = dispatches.mock.calls.length;
+                finish.resolve();
+                await expect(pending).rejects.toBeInstanceOf(TransactionClosedError);
+                expect(dispatches).toHaveBeenCalledTimes(before);
+                rollbackSpy.mockRestore();
+                await test(() => fix(async db => { expect(await ids(db)).toEqual([]); }));
+            } finally {
+                finish.resolve();
+                await Promise.allSettled([operation, pending, nativeInsert]);
+            }
+        });
+
+        it("shares joined and NESTED handles until owner completion but closes each REQUIRES_NEW scope independently", async () => {
+            let parent: any;
+            let parentLate!: (() => unknown)[];
+            await test(async () => {
+                await tx(async () => {
+                    parent = ambient();
+                    parentLate = lateOperations(parent);
+                    expect(ambient()).toBe(parent);
+                    for (const propagation of [Propagation.REQUIRED, Propagation.NESTED]) {
+                        let joined: any;
+                        await tx(async () => {
+                            joined = ambient();
+                            expect(joined).toBe(parent);
+                            await query(joined, "SELECT 1 AS n");
+                        }, { propagation });
+                        expect(ambient()).toBe(parent);
+                        await query(joined, "SELECT 2 AS n");
+                    }
+                    for (const fails of [false, true]) {
+                        let child: any;
+                        let childLate!: (() => unknown)[];
+                        const operation = tx(async () => {
+                            child = ambient();
+                            expect(child).not.toBe(parent);
+                            childLate = lateOperations(child);
+                            await query(child, "SELECT 3 AS n");
+                            if (fails) throw failure;
+                        }, { propagation: Propagation.REQUIRES_NEW });
+                        if (fails) await expect(operation).rejects.toBe(failure);
+                        else await operation;
+                        await assertClosed(childLate);
+                        expect(ambient()).toBe(parent);
+                        await query(parent, "SELECT 4 AS n");
+                    }
+                });
+                await assertClosed(parentLate);
+                await tx(async () => {
+                    expect(ambient()).not.toBe(parent);
+                    await query(ambient(), "SELECT 5 AS n");
+                });
+            });
+            await assertClosed(parentLate);
+            const savepoints = dispatches.mock.calls.map(call => String(call[1])).filter(sql => /^SAVEPOINT /i.test(sql));
+            expect(savepoints.length).toBeGreaterThan(0);
+            expect(new Set(savepoints).size).toBe(savepoints.length);
+        });
+
+        it("closes every still-active parent and REQUIRES_NEW handle at root exit", async () => {
+            const started = deferred();
+            const finish = deferred();
+            let pending!: Promise<unknown>;
+            const late: (() => unknown)[] = [];
+            const operation = test(async () => {
+                pending = tx(async () => {
+                    const parent = ambient();
+                    late.push(...lateOperations(parent), AsyncResource.bind(ambient));
+                    await tx(async () => {
+                        const child = ambient();
+                        expect(child).not.toBe(parent);
+                        late.push(...lateOperations(child), AsyncResource.bind(ambient));
+                        started.resolve();
+                        await finish.promise;
+                        return insert(child, 1);
+                    }, { propagation: Propagation.REQUIRES_NEW });
+                });
+                void pending.catch(() => { started.resolve(); });
+                await started.promise;
+            });
+            try {
+                await operation;
+                await assertClosed(late);
+                const before = dispatches.mock.calls.length;
+                finish.resolve();
+                await expect(pending).rejects.toBeInstanceOf(TransactionClosedError);
+                // Late owner cleanup must not send RELEASE/ROLLBACK TO SAVEPOINT
+                // after physical root rollback has removed those savepoints.
+                expect(dispatches).toHaveBeenCalledTimes(before);
+                await test(() => fix(async db => { expect(await ids(db)).toEqual([]); }));
+            } finally {
+                finish.resolve();
+                await Promise.allSettled([operation, pending]);
+            }
         });
 
         it("rejects outside, mock and bound closed sessions before callback execution", async () => {
@@ -615,7 +803,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             }, { datasource });
             let closed!: () => Promise<unknown>;
             await test(async () => { closed = AsyncResource.bind(() => fix(body)); });
-            await expect(closed()).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(closed()).rejects.toBeInstanceOf(TransactionClosedError);
             expect(body).not.toHaveBeenCalled();
         });
 

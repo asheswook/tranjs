@@ -30,7 +30,7 @@ describe("built package exports", () => {
         const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     `;
 
-    it("reports unawaited rejections that settle before the integration callback finishes", () => {
+    it("preserves native unhandled rejection behavior in production, mock and integration modes", () => {
         runNode(managerScript + `
             const unhandled = [];
             process.on('unhandledRejection', error => { unhandled.push(error); });
@@ -64,53 +64,28 @@ describe("built package exports", () => {
         `);
     });
 
-    it("reports a rejected call still pending at exit without a second unhandled rejection", () => {
+    it("rolls back and releases without waiting for forgotten never-settling work", () => {
         runNode(managerScript + `
-            const unhandled = [];
-            process.on('unhandledRejection', error => { unhandled.push(error); });
+            const timeout = setTimeout(() => {
+                console.error('withTestTransaction waited for forgotten work');
+                process.exit(1);
+            }, 1000);
             (async () => {
-                let finish;
-                const gate = new Promise(resolve => { finish = resolve; });
-                const failure = new Error('late failure');
-                const operation = testing.withTestTransaction(() => {
-                    void core.transactional(async () => { await gate; throw failure; })();
+                let entered;
+                const started = new Promise(resolve => { entered = resolve; });
+                const result = await testing.withTestTransaction(async () => {
+                    void core.transactional(() => {
+                        entered();
+                        return new Promise(() => {});
+                    })();
+                    await started;
+                    return 42;
                 });
-                const checked = assert.rejects(operation, error => {
-                    assert(error instanceof AggregateError);
-                    assert.equal(error.message, 'withTestTransaction callback returned while 1 transaction was still running');
-                    assert(error.errors.includes(failure));
-                    return true;
-                });
-                await pause(20);
-                assert.equal(rollbacks, 0);
-                finish();
-                await checked;
-                await pause(20);
-                assert.deepEqual(unhandled, []);
+                assert.equal(result, 42);
                 assert.equal(rollbacks, 1);
                 assert.equal(releases, 1);
-            })().catch(error => { console.error(error); process.exitCode = 1; });
-        `);
-    });
-
-    it("warns while forgotten work never settles without releasing its connection", () => {
-        runNode(managerScript + `
-            const warnings = [];
-            console.warn = message => { warnings.push(message); };
-            let finished = false;
-            testing.withTestTransaction(() => {
-                void core.transactional(() => new Promise(() => {}))();
-            }).then(() => { finished = true; }, () => { finished = true; });
-            setTimeout(() => {
-                try {
-                    assert.equal(finished, false);
-                    assert.deepEqual(warnings, [
-                        'withTestTransaction is still waiting for unfinished work after its callback returned (1 second)',
-                    ]);
-                    assert.equal(rollbacks, 0);
-                    assert.equal(releases, 0);
-                } catch (error) { console.error(error); process.exitCode = 1; }
-            }, 1200);
+            })().catch(error => { console.error(error); process.exitCode = 1; })
+                .finally(() => { clearTimeout(timeout); });
         `);
     });
 

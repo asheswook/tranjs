@@ -61,7 +61,7 @@ async function detachedInsideB() {
     await testing.withTestTransaction(async a => {
         task = gate.promise.then(async () => {
             assert.throws(() => testing.currentProbe(), { message: "currentProbe() requires an active transaction test callback" });
-            await assert.rejects(core.transactional(() => { bodies++; })(), { message: "The test transaction has finished or could not be restored" });
+            await assert.rejects(core.transactional(() => { bodies++; })(), core.TransactionClosedError);
             assert.equal(a.records.length, 0);
         });
     });
@@ -99,7 +99,7 @@ async function mockDetached({ afterAll = false } = {}) {
                     await assert.rejects(core.transactional(async () => {
                         bodies++;
                         await driver.ctx(datasource).query('SELECT 1');
-                    }, { datasource, propagation })(), { message: "The test transaction has finished or could not be restored" });
+                    }, { datasource, propagation })(), core.TransactionClosedError);
                 }
                 assert.equal(a.records.length, 0);
             });
@@ -164,7 +164,7 @@ async function scheduleAfterAll(clock) {
         await helper(async a => {
             setTimeout(() => { item.timerTask = write(item.id, observed)(); }, 1);
             item.promiseTask = gate.promise.then(async () => {
-                await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), { message: "The test transaction has finished or could not be restored" });
+                await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), core.TransactionClosedError);
                 assert.equal(a.records.length, 0);
             });
         });

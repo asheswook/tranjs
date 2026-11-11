@@ -8,6 +8,7 @@ import {
     PlatformTransactionManager,
     Propagation,
     transactional,
+    TransactionClosedError,
     TransactionContextMixingError,
     TransactionTimeoutError,
     UnexpectedRollbackError,
@@ -60,6 +61,34 @@ describe("postgres.js pool manager (real database)", () => {
     function raw() {
         return getTransactionManager().getCurrentTransaction() as postgres.ReservedSql;
     }
+
+    it("validates batch part gates before unwrapping or native dispatch", () => {
+        class GateManager extends PostgresTransactionManager {
+            close(connection: any) { this.getConnectionGate(connection).closed = true; }
+        }
+        const manager = new GateManager(sql);
+        const nativeQuery = () => ({ then: jest.fn(), cancel: jest.fn() });
+        const part = nativeQuery();
+        const untracked = nativeQuery();
+        const otherPart = nativeQuery();
+        const batch = jest.fn((_parts: any[]) => nativeQuery());
+        const connection: any = Object.assign(jest.fn(), { unsafe: jest.fn(() => part), batch });
+        const other: any = Object.assign(jest.fn(), { unsafe: jest.fn(() => otherPart) });
+        const db: any = manager.wrapConnection(connection);
+        const otherDb: any = manager.wrapConnection(other);
+        const wrappedPart = db.unsafe("SELECT 1");
+        const foreignPart = otherDb.unsafe("SELECT 2");
+
+        db.batch([wrappedPart, untracked]);
+        expect(batch).toHaveBeenCalledTimes(1);
+        expect(batch.mock.calls[0][0]).toEqual([part, untracked]);
+        expect(batch.mock.calls[0][0][0]).toBe(part);
+        expect(batch.mock.calls[0][0][1]).toBe(untracked);
+        expect(() => db.batch([foreignPart])).toThrow("Cannot batch queries from another transaction");
+        manager.close(other);
+        expect(() => db.batch([foreignPart])).toThrow(TransactionClosedError);
+        expect(batch).toHaveBeenCalledTimes(1);
+    });
 
     it("commits tagged and unsafe queries and releases the raw reserved connection once", async () => {
         const end = jest.spyOn(sql, "end");

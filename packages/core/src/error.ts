@@ -80,3 +80,9 @@ export class TransactionContextMixingError extends Error {
         this.name = 'TransactionContextMixingError';
     }
 }
+export class TransactionClosedError extends Error {
+    constructor() {
+        super("Transaction already finished");
+        this.name = "TransactionClosedError";
+    }
+}

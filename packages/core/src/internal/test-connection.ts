@@ -1,6 +1,6 @@
 import { getTransactionManager } from "../manager";
 import { TransactionSystemError } from "../error";
-import { assertTestSessionReady, currentTestSession, TestConnectionLease, runTestProvenance, testAccess, testProvenance, testScope, testSession } from "../internal";
+import { assertConnectionOpen, assertTestSessionReady, currentTestSession, TestConnectionLease, runTestProvenance, testAccess, testProvenance, testScope, testSession } from "../internal";
 
 /** Internal executor: admission and the shared overlap gate precede the first await. */
 export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: string | symbol): Promise<Awaited<R>> {
@@ -18,12 +18,16 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
         if (session.root.open || session.managedActive || session.testConnectionActive) throw new Error("withTestConnection overlaps another connection callback or transaction");
         const access = testAccess.get(manager)!;
         const tx = session.context!.transaction;
+        const gate = access.gate(tx);
         const name = `tranjs_${session.id}_connection_${++session.counter}`;
         let open = true;
         const pending = new Set<Promise<unknown>>();
         const errors: unknown[] = [];
         const lease: TestConnectionLease = {
-            assert() { if (!open) throw new Error("The connection was used after its withTestConnection callback finished"); },
+            assert() {
+                assertConnectionOpen(gate);
+                if (!open) throw new Error("The connection was used after its withTestConnection callback finished");
+            },
             track<T>(operation: () => PromiseLike<T>): Promise<T> {
                 lease.assert();
                 const promise = Promise.resolve(operation());
@@ -33,12 +37,6 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
             },
         };
         session.testConnectionActive = true;
-        let resolve!: (value: Awaited<R>) => void;
-        let reject!: (error: unknown) => void;
-        const operation = new Promise<Awaited<R>>((yes, no) => { resolve = yes; reject = no; });
-        session.pendingConnections.add(operation);
-        // Install rejection handling immediately, including intentionally forgotten calls.
-        operation.then(() => session.pendingConnections.delete(operation), () => session.pendingConnections.delete(operation));
         const work = testScope(manager, async () => {
             let savepoint = false;
             let value: Awaited<R> | undefined;
@@ -46,6 +44,7 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
             try {
                 await access.createSavepoint(tx, name);
                 savepoint = true;
+                assertConnectionOpen(gate);
                 value = await runTestProvenance("withTestConnection", async () => {
                     const db = access.testConnection(tx, lease) as C;
                     const returned = fn(db);
@@ -61,6 +60,7 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
             const failures = [...new Set([...(failure ? [failure.error] : []), ...errors])];
             if (floating) failures.push(new Error("withTestConnection callback completed with pending query work"));
             if (failures.length) failure = { error: failures.length === 1 ? failures[0] : new AggregateError(failures, "withTestConnection callback and query work failed") };
+            assertConnectionOpen(gate);
             if (!savepoint) {
                 session.broken = failure!.error;
                 throw failure!.error;
@@ -78,7 +78,6 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
             }
             throw failure.error;
         });
-        work.then(value => { session.testConnectionActive = false; resolve(value as Awaited<R>); }, error => { session.testConnectionActive = false; reject(error); });
-        return operation;
+        return work.finally(() => { session.testConnectionActive = false; }) as Promise<Awaited<R>>;
     } catch (error) { return Promise.reject(error); }
 }

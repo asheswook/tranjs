@@ -1,5 +1,6 @@
 // Executed in a fresh Node process for each built core: never imports /testing.
 const core = require(process.argv[2]);
+const { AsyncResource } = require('node:async_hooks');
 
 function errorInfo(error) {
     if (!(error instanceof Error)) return { thrown: error === undefined ? '<undefined>' : error };
@@ -52,6 +53,19 @@ async function scenario(name, callback, faults = {}) {
             }])));
         }
         current() { return this.getCurrentTransaction()?.id ?? null; }
+        connection() {
+            const tx = this.getCurrentTransaction();
+            // Model the public driver wrapper: capture this checkout's gate, not
+            // a later lookup of the same raw connection. Published 1.1.0 has no
+            // gate API and historically permits queries after release.
+            const gate = this.getConnectionGate?.(tx);
+            return { query: () => {
+                if (gate) this.assertConnectionOpen(gate);
+                events.push(['query', tx.id, outcomes[tx.id - 1]]);
+                this.queryCount = (this.queryCount ?? 0) + 1;
+                return this.queryCount;
+            } };
+        }
         async beginTransaction(options) {
             events.push(['begin', options ?? {}, this.current()]);
             fail('begin');
@@ -259,6 +273,35 @@ async function main() {
     }
     await add('propagation/invalid', ({ run }) => run(() => 42, { propagation: 'INVALID' }));
     await add('datasource/missing', ({ run }) => run(() => 42, { datasource: 'missing' }));
+    for (const completion of ['commit', 'rollback']) {
+        await add(`closed-connection/retained-after-${completion}`, async ({ run, manager }) => {
+            const capture = callback => {
+                try { return { returned: callback() }; }
+                catch (error) { return { error: errorInfo(error) }; }
+            };
+            let retainedContext;
+            let connection;
+            let transaction;
+            try {
+                transaction = { returned: await run(() => {
+                    connection = manager.connection();
+                    retainedContext = AsyncResource.bind(() => {
+                        manager.assertCurrentTransactionOpen?.();
+                        return manager.getCurrentTransaction()?.id ?? null;
+                    });
+                    const result = connection.query();
+                    if (completion === 'rollback') throw new Error('application failed');
+                    return result;
+                }) };
+            } catch (error) { transaction = { error: errorInfo(error) }; }
+            return {
+                transaction,
+                retainedContext: capture(retainedContext),
+                cachedConnection: capture(() => connection.query()),
+                queryCount: manager.queryCount,
+            };
+        });
+    }
     process.stdout.write(JSON.stringify(results));
 }
 

@@ -180,7 +180,6 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
         kind, lifecycle: kind === "mock" ? "ready" : "initializing",
         counter: 0, closed: false, root: { open: false },
         admitting: true, testConnectionActive: false, managedActive: 0,
-        pendingConnections: new Set(), pendingTransactions: new Set(), callerPromises: new Set(),
         begin(options, propagation, parent) {
             const info: TestTransactionRecord = Object.freeze({
                 id: records.length + 1,
@@ -269,6 +268,7 @@ export async function withTestTransaction<T>(fn: (tx: TestTransactionProbe) => T
     return runTestSession(manager, session, async () => {
         try {
             session.context = await access.outside(() => access.begin());
+            session.connectionGate = access.gate(session.context.transaction);
             session.lifecycle = "ready";
         } catch (error) {
             session.lifecycle = "failed";
@@ -284,31 +284,7 @@ export async function withTestTransaction<T>(fn: (tx: TestTransactionProbe) => T
             throw error;
         } finally {
             session.admitting = false;
-            const callers = [...session.callerPromises];
-            const runningTransactions = Math.max(session.pendingTransactions.size,
-                callers.filter(entry => entry.topLevel).length, callers.length ? 1 : 0);
-            const runningConnections = session.pendingConnections.size;
-            if (runningTransactions || runningConnections) {
-                const message = runningTransactions
-                    ? `withTestTransaction callback returned while ${runningTransactions} transaction${runningTransactions === 1 ? " was" : "s were"} still running`
-                    : "withTestTransaction callback returned while withTestConnection was still running";
-                const waiting = setTimeout(() => {
-                    console.warn("withTestTransaction is still waiting for unfinished work after its callback returned (1 second)");
-                }, 1000);
-                waiting.unref();
-                let settled: PromiseSettledResult<unknown>[];
-                try {
-                    // allSettled handles only the caller promises still pending at exit.
-                    settled = await Promise.allSettled([
-                        ...session.pendingTransactions, ...callers.map(entry => entry.promise), ...session.pendingConnections,
-                    ]);
-                } finally { clearTimeout(waiting); }
-                const errors = [...(runningTransactions ? [new Error(message)] : []),
-                    ...(runningConnections ? [new Error("withTestTransaction callback returned while withTestConnection was still running")] : []),
-                    ...(failure ? [failure.error] : []),
-                    ...new Set(settled.flatMap(result => result.status === "rejected" ? [result.reason] : []))];
-                failure = { error: new AggregateError(errors, message) };
-            }
+            access.close(session.context!.transaction);
             session.closed = true;
             // A caught owner failure cannot make an unrecoverable session pass.
             // Keep the full application/recovery pair, including thrown undefined.

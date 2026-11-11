@@ -25,7 +25,7 @@ try {
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.ok(expected.length >= 85, 'Keep the broad production scenario matrix and extra failure probes');
+    assert.equal(expected.length, 88, 'Keep all 86 existing production probes and both closed-connection probes');
     for (const name of ['non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
@@ -34,10 +34,40 @@ try {
         assert.ok(expected.some(result => result.name === name), `Missing production probe: ${name}`);
     }
     assert.deepEqual(actual.map(result => result.name), expected.map(result => result.name));
+    const closedConnectionNames = ['closed-connection/retained-after-commit', 'closed-connection/retained-after-rollback'];
+    const closedError = { error: { name: 'TransactionClosedError', message: 'Transaction already finished' } };
+    const closedConnectionResult = (completion, guarded) => ({
+        name: `closed-connection/retained-after-${completion}`,
+        result: { returned: {
+            transaction: completion === 'commit' ? { returned: 1 } : { error: { name: 'Error', message: 'application failed' } },
+            retainedContext: guarded ? closedError : { returned: null },
+            cachedConnection: guarded ? closedError : { returned: 2 },
+            queryCount: guarded ? 1 : 2,
+        } },
+        outcomes: [completion === 'commit' ? 'committed' : 'rolled-back'],
+        events: [
+            ['begin', {}, null],
+            ['query', 1, 'active'],
+            [completion, 1, 1],
+            ['release', 1, false, null],
+            ...(guarded ? [] : [['query', 1, completion === 'commit' ? 'committed' : 'rolled-back']]),
+        ],
+        loggerCalls: [], loggerRejections: [], errorIdentity: [], outside: null,
+    });
+    let unchanged = 0;
     for (let index = 0; index < expected.length; index++) {
-        assert.deepEqual(actual[index], expected[index], `No-session production behavior changed: ${expected[index].name}`);
+        const name = expected[index].name;
+        if (closedConnectionNames.includes(name)) {
+            const completion = name.endsWith('commit') ? 'commit' : 'rollback';
+            assert.deepEqual(expected[index], closedConnectionResult(completion, false), `Published retained-connection behavior changed: ${name}`);
+            assert.deepEqual(actual[index], closedConnectionResult(completion, true), `Closed connection must reject without querying: ${name}`);
+        } else {
+            assert.deepEqual(actual[index], expected[index], `No-session production behavior changed: ${name}`);
+            unchanged++;
+        }
         assert.equal(actual[index].outside, null, `Leaked transaction: ${actual[index].name}`);
     }
+    assert.equal(unchanged, 86, 'All existing production scenarios must remain exactly identical');
     process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, passed: true }) + '\n');
 } finally {
     rmSync(temporary, { recursive: true, force: true });

@@ -4,9 +4,9 @@ import { AsyncLocal, TransactionSynchronization, TxState } from "./asyncLocal";
 import { DEFAULT_DATASOURCE, IsolationLevel, TransactionConfig, TransactionOptions } from "./config";
 import { DatasourceSetupError, IllegalTransactionStateException, NestedTransactionNotSupportedError,
     NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException,
-    ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError } from "./error";
+    ConcurrentNestedTransactionError, InvalidIsolationLevelError, UnexpectedRollbackError, TransactionSystemError, TransactionClosedError } from "./error";
 import { DefaultLogger, Logger } from "./logger";
-import { assertTestSessionReady, currentTestSession, testAccess, testScope, testSession, TestBoundaryInfo, TestConnectionLease, runTestProvenance, testProvenance, currentTestManagedScope, runTestManagedScope, observeTestTransaction } from "./internal";
+import { assertTestSessionReady, currentTestSession, testAccess, testScope, testSession, TestBoundaryInfo, TestConnectionLease, runTestProvenance, testProvenance, TransactionGate, assertConnectionOpen } from "./internal";
 
 const managers = new Map<string | symbol, PlatformTransactionManager<any>>();
 
@@ -15,6 +15,11 @@ export let GlobalTransactionManager: PlatformTransactionManager<TransactionConte
 
 /** @deprecated Use the type-safe ctx() exported by your driver instead. */
 export function ctx<Tx extends TransactionContext>(): Tx {
+    const retained = Array.from(AsyncLocal.Frame?.txs.values() ?? []).reverse().find(state => state !== null);
+    if (retained) {
+        if (!retained.active) throw new TransactionClosedError();
+        if (retained.gate) assertConnectionOpen(retained.gate);
+    }
     const context = AsyncLocal.Context;
     if (!context) throw new NoTransactionContextError();
     return context.transaction as Tx;
@@ -55,7 +60,7 @@ export function transactional<This, Args extends unknown[], R>(
 ): (this: This, ...args: Args) => Promise<Awaited<R>> {
     const snapshot = typeof config === "string" ? { propagation: config } : { ...config };
     return function(this: This, ...args: Args): Promise<Awaited<R>> {
-        return observeTestTransaction(runInTransaction(() => fn.apply(this, args), snapshot)) as Promise<Awaited<R>>;
+        return runInTransaction(() => fn.apply(this, args), snapshot) as Promise<Awaited<R>>;
     };
 }
 
@@ -73,9 +78,38 @@ export function afterRollback(fn: TransactionSynchronization, datasource: string
 }
 
 export abstract class PlatformTransactionManager<Tx extends TransactionContext> {
+    private readonly connectionGates = new WeakMap<object, TransactionGate>();
+
+    private newConnectionGate(tx: Tx): TransactionGate {
+        const gate: TransactionGate = { closed: false };
+        if ((typeof tx === "object" && tx !== null) || typeof tx === "function") this.connectionGates.set(tx as object, gate);
+        return gate;
+    }
+
+    /** A wrapper captures this object so a later checkout cannot reopen it. */
+    protected getConnectionGate(tx: Tx): TransactionGate {
+        const state = AsyncLocal.Frame?.txs.get(this);
+        if (state?.context.transaction === tx && state.gate) return state.gate;
+        const session = testSession(this);
+        if (session?.context?.transaction === tx && session.connectionGate) return session.connectionGate;
+        return this.connectionGates.get(tx as object) ?? this.newConnectionGate(tx);
+    }
+
+    protected assertConnectionOpen(gate: TransactionGate): void { assertConnectionOpen(gate); }
+
+    protected assertTransactionConnectionOpen(tx: Tx): void {
+        this.assertConnectionOpen(this.getConnectionGate(tx));
+    }
+
     protected constructor(private logger: Logger = new DefaultLogger()) {
         testAccess.set(this, {
-            begin: options => this.beginTransaction(options),
+            begin: async options => {
+                const context = await this.beginTransaction(options);
+                this.newConnectionGate(context.transaction as Tx);
+                return context;
+            },
+            gate: tx => this.getConnectionGate(tx),
+            close: tx => { (testSession(this)?.connectionGate ?? this.getConnectionGate(tx)).closed = true; },
             rollback: tx => this.rollbackTransaction(tx),
             release: (tx, failed) => this.releaseTransaction(tx, failed),
             outside: fn => this.inScope(null, fn),
@@ -94,6 +128,14 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     getCurrentTransaction(): Tx | undefined {
         const state = this.currentState();
         return state?.context.transaction as Tx | undefined;
+    }
+
+    /** Driver ctx() lookups check the retained scope before returning a handle. */
+    assertCurrentTransactionOpen(): void {
+        const state = AsyncLocal.Frame?.txs.get(this);
+        if (!state) return;
+        if (!state.active) throw new TransactionClosedError();
+        if (state.gate) this.assertConnectionOpen(state.gate);
     }
 
     private currentState(): TxState | undefined {
@@ -185,13 +227,19 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     private async rollback(state: TxState, failure: { error: unknown }, info?: TestBoundaryInfo, savepoint?: string): Promise<void> {
         const session = testSession(this);
+        if (savepoint && session?.connectionGate?.closed) {
+            if (state.gate) state.gate.closed = true;
+            state.active = false;
+            throw new TransactionClosedError();
+        }
+        if (state.gate) state.gate.closed = true;
         try {
             // Even an injected rollback failure must not leave test writes behind.
             let injected: unknown;
             let hasInjected = false;
             try { if (info) session!.failNext("rollback", info); }
             catch (error) { injected = error; hasInjected = true; }
-            if (savepoint) await this.recoverTestSavepoint(state.context.transaction as Tx, savepoint);
+            if (savepoint) await this.inScope(null, () => this.recoverTestSavepoint(state.context.transaction as Tx, savepoint));
             else await this.rollbackTransaction(state.context.transaction as Tx);
             if (hasInjected) throw injected;
         }
@@ -219,6 +267,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             await this.rollbackToSavepoint(tx, name);
             await this.releaseSavepoint(tx, name);
         } catch (error) {
+            if (testSession(this)?.closed) throw new TransactionClosedError();
             testSession(this)!.broken = error;
             throw error;
         }
@@ -251,6 +300,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             }
             const state: TxState = {
                 context, active: true, rollbackOnly: false, savepointCounter: 0, afterCommit: [], afterRollback: [],
+                gate: savepoint ? { closed: false, parent: session!.connectionGate } : this.newConnectionGate(context.transaction as Tx),
                 timeout: options?.timeout,
                 deadline: options?.timeout === undefined ? undefined : started + options.timeout,
             };
@@ -260,7 +310,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                 try {
                     let result: R;
                     try {
+                        this.assertConnectionOpen(state.gate!);
                         result = await callback(context.transaction as Tx);
+                        this.assertConnectionOpen(state.gate!);
                         this.getRemainingTimeout();
                         if (state.rollbackOnly) throw new UnexpectedRollbackError();
                     } catch (error) {
@@ -269,10 +321,13 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                         throw error;
                     }
                     try {
+                        state.gate!.closed = true;
                         if (info) session!.failNext("commit", info);
                         if (savepoint) {
-                            await this.checkTestConstraints(context.transaction as Tx);
-                            await this.releaseSavepoint(context.transaction as Tx, savepoint);
+                            await this.inScope(null, async () => {
+                                await this.checkTestConstraints(context.transaction as Tx);
+                                await this.releaseSavepoint(context.transaction as Tx, savepoint);
+                            });
                         }
                         else await this.commitTransaction(context.transaction as Tx);
                     }
@@ -301,6 +356,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     });
                     return result;
                 } finally {
+                    state.gate!.closed = true;
                     state.active = false;
                     if (!savepoint) await this.releaseTransaction(context.transaction as Tx, failed);
                 }
@@ -322,10 +378,12 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     let result: R;
                     try {
                         result = await callback(tx);
+                        if (state.gate) this.assertConnectionOpen(state.gate);
                         if (state.rollbackOnly) throw new UnexpectedRollbackError();
                         if (session?.context) await this.checkTestConstraints(tx);
                     }
                     catch (error) {
+                        if (state.gate) this.assertConnectionOpen(state.gate);
                         try {
                             await this.rollbackToSavepoint(tx, name);
                             // Spring resets the entire connection flag, including pre-existing rollback-only.
@@ -342,6 +400,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                         }
                         throw error;
                     }
+                    if (state.gate) this.assertConnectionOpen(state.gate);
                     await this.releaseSavepoint(tx, name);
                     return result;
                 } finally { parent.nestedOpen = false; }
@@ -354,38 +413,22 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         callback: (tx: Tx) => R | Promise<R>,
         options?: TransactionOptions,
     ): Promise<R> {
+        const retained = AsyncLocal.Frame?.txs.get(this);
+        if (retained) {
+            if (!retained.active) throw new TransactionClosedError();
+            if (retained.gate) this.assertConnectionOpen(retained.gate);
+        }
         const current = currentTestSession();
         if (!current) return this.dispatchTransaction(propagation, callback, options);
         if (testProvenance() === "withTestConnection") throw new Error("A transaction cannot start inside a withTestConnection callback");
         if (current.testConnectionActive) throw new Error("A transaction overlaps an active withTestConnection callback");
         const session = testSession(this);
         if (session) assertTestSessionReady(session);
-        const parentScope = session && currentTestManagedScope(session);
-        if (session && !session.admitting && !parentScope) throw new Error("A transaction was called after the withTestTransaction callback finished");
+        if (session && !session.admitting) throw new TransactionClosedError();
         // A mock's registration may already be restored to another manager, but
         // work retained by that closed session must not enter a real transaction.
         if (current !== session && (current.closed || "broken" in current)) {
             assertTestSessionReady(current);
-        }
-        if (session && !parentScope) {
-            const scope = { active: true };
-            let resolve!: (value: R) => void;
-            let reject!: (error: unknown) => void;
-            const operation = new Promise<R>((yes, no) => { resolve = yes; reject = no; });
-            session.pendingTransactions.add(operation);
-            operation.then(() => session.pendingTransactions.delete(operation), () => session.pendingTransactions.delete(operation));
-            session.managedActive++;
-            const work = runTestManagedScope(session, scope, () => this.dispatchTransaction(propagation, callback, options));
-            work.then(value => {
-                scope.active = false;
-                session.managedActive--;
-                resolve(value);
-            }, error => {
-                scope.active = false;
-                session.managedActive--;
-                reject(error);
-            });
-            return operation;
         }
         if (session) session.managedActive++;
         try {

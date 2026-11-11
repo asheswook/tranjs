@@ -1,6 +1,7 @@
 import { MetadataWrappedTransaction, TransactionContext } from "./context";
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { PlatformTransactionManager } from "./manager";
+import type { TransactionGate } from "./internal";
 
 export type TransactionSynchronization = () => void | Promise<void>;
 
@@ -8,6 +9,7 @@ export type TransactionSynchronization = () => void | Promise<void>;
 export interface TxState {
     context: MetadataWrappedTransaction<TransactionContext>;
     active: boolean;
+    gate?: TransactionGate;
     rollbackOnly: boolean;
     deadline?: number;
     timeout?: number;

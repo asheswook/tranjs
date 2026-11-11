@@ -87,13 +87,13 @@ describe("withTestTransaction / mysql2 pool (real database)", () => {
                     await insert(2);
                 });
                 await expect(tx(async () => {
-                    expect(ctx(datasource)).toBe(connection);
+                    expect(ctx(datasource)).not.toBe(connection);
                     await insert(3);
                     throw failure;
                 }, { propagation: Propagation.REQUIRES_NEW })).rejects.toBe(failure);
                 expect(await ids()).toEqual([1, 2]);
                 await tx(async () => {
-                    expect(ctx(datasource)).toBe(connection);
+                    expect(ctx(datasource)).not.toBe(connection);
                     expect(await ids()).toEqual([1, 2]);
                     await insert(4);
                 }, { propagation: Propagation.REQUIRES_NEW });

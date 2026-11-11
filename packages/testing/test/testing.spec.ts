@@ -1,7 +1,7 @@
 import {
     afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, transactional,
-    Transactional, TransactionSystemError, useTransactionManager,
+    Transactional, TransactionClosedError, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
 import { mockTransactions, TestTransactionRecord, TestTransactionProbe, withTestTransaction } from "../src";
 import { FakeTransactionManager } from "../src/fake";
@@ -11,6 +11,14 @@ function deferred() {
     let resolve!: () => void;
     const promise = new Promise<void>(done => { resolve = done; });
     return { promise, resolve };
+}
+
+class ConnectionGateManager extends FakeTransactionManager {
+    captureConnection() {
+        const transaction = this.getCurrentTransaction()!;
+        const gate = this.getConnectionGate(transaction);
+        return { gate, query: () => this.assertConnectionOpen(gate) };
+    }
 }
 
 describe("mockTransactions", () => {
@@ -274,7 +282,7 @@ describe("mockTransactions", () => {
             retained = gate.then(async () => {
                 expect(getTransactionManager()).toBe(original);
                 for (const propagation of Object.values(Propagation)) {
-                    await expect(transactional(callback, { propagation })()).rejects.toThrow("The test transaction has finished or could not be restored");
+                    await expect(transactional(callback, { propagation })()).rejects.toThrow(TransactionClosedError);
                 }
             });
         });
@@ -535,141 +543,79 @@ describe("withTestTransaction", () => {
     });
 
     it.each([Propagation.REQUIRED, Propagation.SUPPORTS, Propagation.NOT_SUPPORTED])(
-        "drains an unawaited top-level %s operation before physical cleanup", async propagation => {
+        "does not wait for a forgotten never-settling %s callback before physical cleanup", async propagation => {
             const entered = deferred();
-            const gate = deferred();
             const rollback = jest.spyOn(manager as any, "rollbackTransaction");
             const release = jest.spyOn(manager as any, "releaseTransaction");
             let session!: NonNullable<ReturnType<typeof testSession>>;
-            let operation!: Promise<void>;
-            const work = withTestTransaction(() => {
+            await expect(withTestTransaction(async () => {
                 session = testSession(manager)!;
-                operation = transactional(async () => {
+                void transactional(() => {
                     entered.resolve();
-                    await gate.promise;
-                    expect(session.admitting).toBe(false);
-                    expect(session.closed).toBe(false);
-                    expect(rollback).not.toHaveBeenCalled();
-                    expect(release).not.toHaveBeenCalled();
+                    return new Promise<void>(() => {});
                 }, { propagation })();
-                return "body completed";
-            });
-            const assertion = expect(work).rejects.toMatchObject({
-                errors: expect.arrayContaining([expect.objectContaining({
-                    message: expect.stringMatching(/callback returned while 1 transaction was still running/),
-                })]),
-            });
-            try {
                 await entered.promise;
-                expect(session.pendingTransactions.size).toBe(1);
-                expect(rollback).not.toHaveBeenCalled();
-                expect(release).not.toHaveBeenCalled();
-            } finally { gate.resolve(); }
-            await assertion;
-            await expect(operation).resolves.toBeUndefined();
-            expect(session.pendingTransactions.size).toBe(0);
+                return "body completed";
+            })).resolves.toBe("body completed");
+            expect(session.closed).toBe(true);
+            expect(session.connectionGate!.closed).toBe(true);
             expect(rollback).toHaveBeenCalledTimes(1);
             expect(release).toHaveBeenCalledWith(expect.any(Object), false);
-            expect(manager.getCurrentTransaction()).toBeUndefined();
         },
     );
 
-    it.each([new Error("body"), undefined])(
-        "retains body failure %p and pending operation failure through physical cleanup failures", async bodyError => {
-            const entered = deferred();
-            const gate = deferred();
-            const recovering = deferred();
-            const recovery = deferred();
-            const operationError = new Error("managed operation");
-            const rollbackError = new Error("physical rollback");
-            const releaseError = new Error("physical release");
-            const rollbackSavepoint = jest.spyOn(manager as any, "rollbackToSavepoint").mockImplementationOnce(async () => {
-                recovering.resolve();
-                await recovery.promise;
-            });
-            const rollback = jest.spyOn(manager as any, "rollbackTransaction").mockRejectedValueOnce(rollbackError);
-            const release = jest.spyOn(manager as any, "releaseTransaction").mockRejectedValueOnce(releaseError);
-            manager.setLogger({ error: jest.fn() } as any);
-            const work = withTestTransaction(() => {
-                void transactional(async () => {
-                    entered.resolve();
-                    await gate.promise;
-                    expect(rollback).not.toHaveBeenCalled();
-                    expect(release).not.toHaveBeenCalled();
-                    throw operationError;
-                })();
-                throw bodyError;
-            });
-            const assertion = expect(work).rejects.toMatchObject({
-                cause: releaseError,
-                applicationError: {
-                    cause: rollbackError,
-                    applicationError: {
-                        errors: expect.arrayContaining([
-                            bodyError, operationError,
-                            expect.objectContaining({ message: expect.stringMatching(/callback returned while 1 transaction was still running/) }),
-                        ]),
-                    },
-                },
-            });
-            try {
-                await entered.promise;
-                expect(rollbackSavepoint).not.toHaveBeenCalled();
-                expect(rollback).not.toHaveBeenCalled();
-                expect(release).not.toHaveBeenCalled();
-            } finally { gate.resolve(); }
-            try {
-                await recovering.promise;
-                expect(rollback).not.toHaveBeenCalled();
-                expect(release).not.toHaveBeenCalled();
-            } finally { recovery.resolve(); }
-            await assertion;
-            expect(rollbackSavepoint).toHaveBeenCalledTimes(1);
-            expect(rollback).toHaveBeenCalledTimes(1);
-            expect(release).toHaveBeenCalledWith(expect.any(Object), true);
-            expect(manager.getCurrentTransaction()).toBeUndefined();
-        },
-    );
-
-    it("keeps already admitted joined and nested calls inside one top-level pending operation after body exit", async () => {
+    it("closes cached handles before root rollback and skips late managed cleanup SQL", async () => {
+        const gated = new ConnectionGateManager();
+        useTransactionManager(gated);
         const entered = deferred();
-        const gate = deferred();
-        const rollback = jest.spyOn(manager as any, "rollbackTransaction");
-        let session!: NonNullable<ReturnType<typeof testSession>>;
-        let probe!: TestTransactionProbe;
-        const joined = jest.fn();
-        const nested = jest.fn();
-        const work = withTestTransaction(tx => {
-            probe = tx;
-            session = testSession(manager)!;
-            void transactional(async () => {
-                entered.resolve();
-                await gate.promise;
-                expect(session.admitting).toBe(false);
-                for (const propagation of [Propagation.REQUIRED, Propagation.NESTED]) {
-                    await transactional(async () => {
-                        expect(session.pendingTransactions.size).toBe(1);
-                        expect(session.closed).toBe(false);
-                        expect(rollback).not.toHaveBeenCalled();
-                        (propagation === Propagation.REQUIRED ? joined : nested)();
-                    }, { propagation })();
-                    expect(session.pendingTransactions.size).toBe(1);
-                }
-            })();
+        const resume = deferred();
+        let connection!: ReturnType<ConnectionGateManager["captureConnection"]>;
+        let operation!: Promise<void>;
+        const rollbackSavepoint = jest.spyOn(gated as any, "rollbackToSavepoint");
+        const releaseSavepoint = jest.spyOn(gated as any, "releaseSavepoint");
+        const rollback = jest.spyOn(gated as any, "rollbackTransaction").mockImplementation(async () => {
+            expect(() => connection.query()).toThrow(TransactionClosedError);
+            expect(() => connection.query()).toThrow("Transaction already finished");
         });
-        const failure = work.catch(error => error);
-        try {
+        await expect(withTestTransaction(async () => {
+            operation = transactional(async () => {
+                connection = gated.captureConnection();
+                connection.query();
+                entered.resolve();
+                await resume.promise;
+            })();
             await entered.promise;
-            expect(session.pendingTransactions.size).toBe(1);
-        } finally { gate.resolve(); }
-        const error = await failure;
-        expect(error).toBeInstanceOf(AggregateError);
-        expect(error.errors).toEqual([expect.objectContaining({ message: expect.stringMatching(/callback returned while 1 transaction was still running/) })]);
-        expect(joined).toHaveBeenCalledTimes(1);
-        expect(nested).toHaveBeenCalledTimes(1);
-        expect(probe.records.map(info => info.outcome)).toEqual(["committed"]);
-        expect(session.pendingTransactions.size).toBe(0);
+            return "body completed";
+        })).resolves.toBe("body completed");
         expect(rollback).toHaveBeenCalledTimes(1);
+        expect(() => connection.query()).toThrow(TransactionClosedError);
+        const assertion = expect(operation).rejects.toThrow(TransactionClosedError);
+        resume.resolve();
+        await assertion;
+        expect(rollbackSavepoint).not.toHaveBeenCalled();
+        expect(releaseSavepoint).not.toHaveBeenCalled();
+    });
+
+    it("shares joined and NESTED gates but closes a REQUIRES_NEW child without closing its parent", async () => {
+        const gated = new ConnectionGateManager();
+        useTransactionManager(gated);
+        let parent!: ReturnType<ConnectionGateManager["captureConnection"]>;
+        await withTestTransaction(async () => {
+            await transactional(async () => {
+                parent = gated.captureConnection();
+                for (const propagation of [Propagation.REQUIRED, Propagation.NESTED]) {
+                    const joined = await transactional(() => gated.captureConnection(), { propagation })();
+                    expect(joined.gate).toBe(parent.gate);
+                    expect(() => joined.query()).not.toThrow();
+                }
+                const child = await transactional(() => gated.captureConnection(), { propagation: Propagation.REQUIRES_NEW })();
+                expect(child.gate).not.toBe(parent.gate);
+                expect(() => child.query()).toThrow(TransactionClosedError);
+                expect(() => parent.query()).not.toThrow();
+            })();
+            expect(() => parent.query()).toThrow(TransactionClosedError);
+            await expect(transactional(() => gated.captureConnection().query())()).resolves.toBeUndefined();
+        });
     });
 
     it.each([new Error("application"), undefined])(
@@ -725,9 +671,9 @@ describe("withTestTransaction", () => {
                 const nested = transactional(() => {}, { propagation: Propagation.NESTED })();
                 await expect(nested).rejects.toBeInstanceOf(TransactionSystemError);
                 await expect(nested).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
-                await expect(transactional(callback)()).rejects.toThrow("The test transaction has finished or could not be restored");
+                await expect(transactional(callback)()).rejects.toThrow("The test transaction could not be restored");
                 await expect(transactional(callback, { propagation: Propagation.REQUIRES_NEW })())
-                    .rejects.toThrow("The test transaction has finished or could not be restored");
+                    .rejects.toThrow("The test transaction could not be restored");
                 expect(callback).not.toHaveBeenCalled();
             })()).rejects.toThrow("rollback-only");
         })).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
@@ -940,7 +886,7 @@ describe("withTestTransaction", () => {
             tx.failNext("commit", { containing: work, error: commitError });
             tx.failNext("rollback", { containing: work, error: new Error("injected") });
             await expect(transactional(work)()).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
-            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
     });
@@ -964,7 +910,7 @@ describe("withTestTransaction", () => {
             await expect(result).rejects.toMatchObject({ cause: recoveryError, applicationError });
             expect(tx.txOf(work)!.outcome).toBe("rolled-back");
             expect(poisoned.getCurrentTransaction()).toBeUndefined();
-            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
             expect(tx.records).toHaveLength(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
@@ -1007,7 +953,7 @@ describe("withTestTransaction", () => {
             expect(tx.txOf(work)!.outcome).toBe("rolled-back");
             expect(rolledBack).toHaveBeenCalledTimes(1);
             expect(committed).not.toHaveBeenCalled();
-            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
         expect(rollback).toHaveBeenCalledTimes(1);

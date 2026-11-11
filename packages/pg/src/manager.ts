@@ -37,13 +37,14 @@ export const ctx = (datasource?: string | symbol): PoolClient => {
     if (!(manager instanceof PostgreSQLTransactionManager) && !(manager instanceof PostgreSQLClientPerTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
+    manager.assertCurrentTransactionOpen();
     const transaction = manager.getCurrentTransaction();
     if (!transaction) throw new Error("Transaction context not initialized");
     return manager.wrapConnection(transaction);
 };
 
 abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClient> {
-    private readonly wrappers = new WeakMap<PoolClient, PoolClient>();
+    private readonly wrappers = new WeakMap<object, PoolClient>();
 
     protected createTestConnection(tx: PoolClient, lease: TestConnectionLease): TestConnection {
         return createPgTestConnection(tx, lease);
@@ -59,13 +60,21 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
     public wrapConnection(connection: PoolClient): PoolClient {
-        let wrapper = this.wrappers.get(connection);
+        const gate = this.getConnectionGate(connection);
+        const assertOpen = () => this.assertConnectionOpen(gate);
+        assertOpen();
+        let wrapper = this.wrappers.get(gate);
         if (wrapper) return wrapper;
         wrapper = new Proxy(connection, {
             get: (target, property) => {
                 const value = Reflect.get(target, property, target);
-                if (property !== "query") return typeof value === "function" ? value.bind(target) : value;
+                if (property !== "query") return typeof value === "function" ? (...args: any[]) => {
+                    assertOpen();
+                    const result = value.apply(target, args);
+                    return result === target ? wrapper : result;
+                } : value;
                 return (...args: any[]) => {
+                    assertOpen();
                     const remaining = this.checkDeadline();
                     // Submittables own their event/cursor lifecycle: do not inject pg's read timer
                     // or intercept their callbacks/results. The owner checks the deadline at commit.
@@ -95,7 +104,7 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
                 };
             },
         });
-        this.wrappers.set(connection, wrapper);
+        this.wrappers.set(gate, wrapper);
         return wrapper;
     }
 
@@ -112,6 +121,7 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
 
     protected async checkTestTransactionConstraints(tx: PoolClient, name: string): Promise<void> {
         await this.createSavepoint(tx, name);
+        this.assertTransactionConnectionOpen(tx);
         await tx.query("SET CONSTRAINTS ALL IMMEDIATE");
         // Restore the exact constraint modes, including application overrides.
         await this.rollbackToSavepoint(tx, name);
@@ -119,14 +129,17 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
     }
 
     protected async createSavepoint(tx: PoolClient, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`SAVEPOINT ${name}`);
     }
 
     protected async rollbackToSavepoint(tx: PoolClient, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`ROLLBACK TO SAVEPOINT ${name}`);
     }
 
     protected async releaseSavepoint(tx: PoolClient, name: string): Promise<void> {
+        this.assertTransactionConnectionOpen(tx);
         await tx.query(`RELEASE SAVEPOINT ${name}`);
     }
 }

@@ -7,6 +7,7 @@ import {
     Propagation,
     transactional,
     TransactionContextMixingError,
+    TransactionClosedError,
     TransactionTimeoutError,
     UnexpectedRollbackError,
     useTransactionManager,
@@ -25,6 +26,156 @@ class OtherDriverManager extends PlatformTransactionManager<object> {
     protected async commitTransaction() {}
     protected async rollbackTransaction() {}
 }
+
+class GateTestManager extends MySQLTransactionManager {
+    closeGate(connection: NativeConnection) {
+        this.getConnectionGate(connection).closed = true;
+    }
+}
+
+describe("MySQL connection dispatch gates", () => {
+    it("guards native callbacks, prepared statements and nested promise connections", async () => {
+        const manager = new GateTestManager({} as any);
+        const rows = [{ value: 42 }];
+        const command = { command: "queued" };
+        const prepareError = new Error("invalid statement");
+        const receivers: object[] = [];
+        const dispatch = jest.fn(function (this: object, ...args: any[]) {
+            expect(receivers).toContain(this);
+            const callback = args[args.length - 1];
+            if (typeof callback === "function") {
+                callback(null, rows);
+                return command;
+            }
+            return Promise.resolve([rows, []]);
+        });
+        const statement: any = { id: 7, execute: dispatch };
+        const prepared: any = { statement, execute: dispatch };
+        const native: any = { query: dispatch, execute: dispatch };
+        const promiseConnection: any = { connection: native, query: dispatch, execute: dispatch };
+        const prepare = jest.fn(function (this: object, sql: string, callback?: (...args: any[]) => void) {
+            expect(receivers).toContain(this);
+            if (callback) {
+                if (sql === "invalid") callback(prepareError, undefined);
+                else callback(null, statement);
+                return command;
+            }
+            return Promise.resolve(prepared);
+        });
+        const promise = jest.fn(function (this: object) {
+            expect(receivers).toContain(this);
+            return promiseConnection;
+        });
+        const self = jest.fn(function (this: object) { return this; });
+        Object.assign(native, { connection: native, prepare, promise, on: self, threadId: 12 });
+        Object.assign(promiseConnection, { prepare, promise, on: self });
+        const connection: any = { connection: native, prepare, promise, on: self, threadId: 12 };
+        receivers.push(connection, native, statement, prepared, promiseConnection);
+
+        const wrapped: any = manager.wrapConnection(connection);
+        expect(manager.wrapConnection(connection)).toBe(wrapped);
+        expect(wrapped.threadId).toBe(12);
+        const raw = wrapped.connection;
+        expect(raw).not.toBe(native);
+        expect(wrapped.connection).toBe(raw);
+        expect(raw.connection).toBe(raw);
+        expect(raw.threadId).toBe(12);
+        expect(wrapped.on("event")).toBe(wrapped);
+        expect(raw.on("event")).toBe(raw);
+
+        const callback = jest.fn();
+        expect(raw.query("SELECT 42", callback)).toBe(command);
+        expect(raw.execute("SELECT ?", [42], callback)).toBe(command);
+        expect(callback.mock.calls).toEqual([[null, rows], [null, rows]]);
+        const failedPrepare = jest.fn();
+        expect(raw.prepare("invalid", failedPrepare)).toBe(command);
+        expect(failedPrepare).toHaveBeenCalledWith(prepareError, undefined);
+        const preparedCallback = jest.fn();
+        expect(raw.prepare("SELECT ?", preparedCallback)).toBe(command);
+        const callbackStatement = preparedCallback.mock.calls[0][1];
+        expect(preparedCallback.mock.calls[0][0]).toBeNull();
+        expect(callbackStatement).not.toBe(statement);
+        expect(callbackStatement.id).toBe(7);
+        expect(callbackStatement.execute([42], callback)).toBe(command);
+
+        const promiseNative = raw.promise();
+        expect(promiseNative).not.toBe(promiseConnection);
+        expect(wrapped.promise()).toBe(promiseNative);
+        expect(promiseNative.promise()).toBe(promiseNative);
+        expect(promiseNative.connection).toBe(raw);
+        expect(await promiseNative.query("SELECT 42")).toEqual([rows, []]);
+        expect(await promiseNative.execute("SELECT ?", [42])).toEqual([rows, []]);
+        const preparedPromise = await promiseNative.prepare("SELECT ?");
+        expect(await wrapped.prepare("SELECT ?")).toBe(preparedPromise);
+        expect(preparedPromise).not.toBe(prepared);
+        expect(preparedPromise.statement).toBe(callbackStatement);
+        expect(await preparedPromise.execute([42])).toEqual([rows, []]);
+        expect(await preparedPromise.statement.execute([42])).toEqual([rows, []]);
+
+        const cachedCalls = [
+            [raw.query, ["SELECT 99", callback]],
+            [raw.execute, ["SELECT ?", [99], callback]],
+            [raw.prepare, ["SELECT ?", preparedCallback]],
+            [raw.promise, []],
+            [raw.on, ["event"]],
+            [callbackStatement.execute, [[99], callback]],
+            [promiseNative.query, ["SELECT 99"]],
+            [promiseNative.execute, ["SELECT ?", [99]]],
+            [promiseNative.prepare, ["SELECT ?"]],
+            [promiseNative.promise, []],
+            [preparedPromise.execute, [[99]]],
+            [preparedPromise.statement.execute, [[99]]],
+            [wrapped.prepare, ["SELECT ?"]],
+            [wrapped.promise, []],
+            [wrapped.on, ["event"]],
+        ] as const;
+        const nativeCalls = [dispatch, prepare, promise, self, callback, preparedCallback, failedPrepare];
+        const callCounts = nativeCalls.map(mock => mock.mock.calls.length);
+        manager.closeGate(connection);
+        for (const [method, args] of cachedCalls) {
+            expect(() => method(...args)).toThrow(TransactionClosedError);
+        }
+        expect(() => raw.query("SELECT 99", callback)).toThrow(TransactionClosedError);
+        expect(() => preparedPromise.statement.execute([99])).toThrow(TransactionClosedError);
+        expect(() => manager.wrapConnection(connection)).toThrow(TransactionClosedError);
+        expect(nativeCalls.map(mock => mock.mock.calls.length)).toEqual(callCounts);
+    });
+
+    it("preserves scalar properties and empty results instead of trying to wrap them", () => {
+        const manager = new GateTestManager({} as any);
+        const native: any = {
+            connection: null,
+            statement: "not a statement",
+            prepare: jest.fn().mockReturnValue(undefined),
+            promise: jest.fn().mockReturnValue(null),
+            ping: jest.fn().mockReturnValue("pong"),
+        };
+        const connection: any = {
+            connection: false,
+            prepare: jest.fn().mockReturnValue(undefined),
+            promise: jest.fn().mockReturnValue(null),
+            ping: jest.fn().mockReturnValue("pong"),
+        };
+        const wrapped: any = manager.wrapConnection(connection);
+        expect(wrapped.connection).toBe(false);
+        connection.connection = "not a connection";
+        expect(wrapped.connection).toBe("not a connection");
+        connection.connection = native;
+        const raw = wrapped.connection;
+        expect(raw.connection).toBeNull();
+        native.connection = "not a connection";
+        expect(raw.connection).toBe("not a connection");
+        expect(raw.statement).toBe("not a statement");
+        native.statement = null;
+        expect(raw.statement).toBeNull();
+        expect(raw.prepare("SELECT 1")).toBeUndefined();
+        expect(raw.promise()).toBeNull();
+        expect(raw.ping()).toBe("pong");
+        expect(wrapped.prepare("SELECT 1")).toBeUndefined();
+        expect(wrapped.promise()).toBeNull();
+        expect(wrapped.ping()).toBe("pong");
+    });
+});
 
 describe("MySQL driver (real database)", () => {
     const pool = createPool({ uri: url, connectionLimit: 4 });

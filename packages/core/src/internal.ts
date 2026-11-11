@@ -4,6 +4,17 @@ import type { TransactionOptions } from "./config";
 import type { PlatformTransactionManager } from "./manager";
 import type { Propagation } from "./propagation";
 import type { TxState } from "./asyncLocal";
+import { TransactionClosedError } from "./error";
+
+export interface TransactionGate {
+    closed: boolean;
+    readonly parent?: TransactionGate;
+}
+export function assertConnectionOpen(gate: TransactionGate): void {
+    for (let current: TransactionGate | undefined = gate; current; current = current.parent) {
+        if (current.closed) throw new TransactionClosedError();
+    }
+}
 
 // Private bridge: testing never replaces or monkeypatches a real driver manager.
 export interface TestBoundaryInfo {
@@ -20,6 +31,7 @@ export interface TestSession {
     lifecycle: "initializing" | "ready" | "failed";
     initializationError?: unknown;
     context?: MetadataWrappedTransaction<any>;
+    connectionGate?: TransactionGate;
     counter: number;
     closed: boolean;
     broken?: unknown;
@@ -27,21 +39,16 @@ export interface TestSession {
     admitting: boolean;
     testConnectionActive: boolean;
     managedActive: number;
-    pendingConnections: Set<Promise<unknown>>;
-    pendingTransactions: Set<Promise<unknown>>;
-    callerPromises: Set<TestCallerPromise>;
     begin(options: TransactionOptions, propagation: Propagation, parent?: TxState): TestBoundaryInfo;
     attach(state: TxState, info: TestBoundaryInfo): void;
     complete(info: TestBoundaryInfo, outcome: "committed" | "rolled-back"): void;
     failNext(operation: "begin" | "commit" | "rollback", info: TestBoundaryInfo): void;
     runAfterCommit<T>(state: TxState, callback: () => T): T;
 }
-export interface TestCallerPromise {
-    readonly promise: Promise<unknown>;
-    readonly topLevel: boolean;
-}
 export const testAccess = new WeakMap<PlatformTransactionManager<any>, {
     begin(options?: TransactionOptions): Promise<MetadataWrappedTransaction<any>>;
+    gate(tx: any): TransactionGate;
+    close(tx: any): void;
     rollback(tx: any): Promise<void>;
     release(tx: any, failed: boolean): Promise<void>;
     outside<T>(fn: () => T): T;
@@ -60,9 +67,7 @@ interface TestStore {
     sessions: Map<PlatformTransactionManager<any>, TestSession>;
     scopes: Map<PlatformTransactionManager<any>, { open: boolean }>;
     provenance?: "withTestConnection" | "managed" | "hook";
-    managedScopes?: Map<TestSession, TestManagedScope>;
 }
-export interface TestManagedScope { active: boolean; }
 // Importing the production entry initializes the bridge, not a testing context.
 // Allocate the extra async-local storage only when a testing helper is used.
 let storage: AsyncLocalStorage<TestStore> | undefined;
@@ -70,23 +75,14 @@ let sessionSequence = 0;
 export function createTestSessionId(): string {
     return `${process.pid.toString(36)}_${(++sessionSequence).toString(36)}`;
 }
-export function currentTestManagedScope(session: TestSession): TestManagedScope | undefined {
-    const scope = storage?.getStore()?.managedScopes?.get(session);
-    return scope?.active ? scope : undefined;
-}
-export function runTestManagedScope<T>(session: TestSession, scope: TestManagedScope, fn: () => T): T {
-    const store = storage!.getStore()!;
-    const managedScopes = new Map(store.managedScopes);
-    managedScopes.set(session, scope);
-    return storage!.run({ ...store, managedScopes }, () => runTestProvenance("managed", fn));
-}
 export function assertTestSessionReady(session: TestSession): void {
     if (session.lifecycle === "failed") {
         const error = new Error("Test transaction initialization failed");
         Object.assign(error, { cause: session.initializationError });
         throw error;
     }
-    if (session.closed || "broken" in session) throw new Error("The test transaction has finished or could not be restored");
+    if (session.closed) throw new TransactionClosedError();
+    if ("broken" in session) throw new Error("The test transaction could not be restored");
     if (session.kind === "integration" && (session.lifecycle !== "ready" || !session.context)) {
         throw new Error("Test transaction has not begun: initialization is still in progress");
     }
@@ -97,25 +93,6 @@ export function testSession(manager: PlatformTransactionManager<any>): TestSessi
 export function currentTestSession(): TestSession | undefined {
     const sessions = storage?.getStore()?.sessions;
     return sessions ? Array.from(sessions.values()).reverse()[0] : undefined;
-}
-/** Keep pending caller promises for cleanup without hiding earlier rejections. */
-export function observeTestTransaction<T>(promise: Promise<T>): Promise<T> {
-    const session = currentTestSession();
-    if (session?.kind === "integration" && !session.closed && session.pendingTransactions.size) {
-        const entry: TestCallerPromise = {
-            topLevel: !currentTestManagedScope(session),
-            promise: promise.then(value => {
-                session.callerPromises.delete(entry);
-                return value;
-            }, error => {
-                session.callerPromises.delete(entry);
-                throw error;
-            }),
-        };
-        session.callerPromises.add(entry);
-        return entry.promise as Promise<T>;
-    }
-    return promise;
 }
 export function testProvenance(): TestStore["provenance"] {
     return storage?.getStore()?.provenance;

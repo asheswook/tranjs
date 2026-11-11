@@ -1,5 +1,4 @@
 import { runInTransaction } from "./manager";
-import { observeTestTransaction } from "./internal";
 import { Propagation } from "./propagation";
 import { TransactionConfig } from "./config";
 
@@ -20,7 +19,7 @@ export function Transactional(arg: Propagation | TransactionConfig = Propagation
         const originalMethod = descriptor.value!;
 
         descriptor.value = function (...args: any[]): Promise<T> {
-            return observeTestTransaction(runInTransaction(() => originalMethod.apply(this, args), config));
+            return runInTransaction(() => originalMethod.apply(this, args), config);
         };
         Object.defineProperty(descriptor.value, "name", { value: originalMethod.name, configurable: true });
         // reflect-metadata remains optional for applications which do not use it.

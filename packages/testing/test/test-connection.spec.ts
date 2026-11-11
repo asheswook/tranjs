@@ -1,6 +1,6 @@
 import {
     afterCommit, afterRollback, clearTransactionManager, ctx, DatasourceSetupError, DEFAULT_DATASOURCE,
-    Propagation, transactional, TransactionSystemError, useTransactionManager,
+    Propagation, transactional, TransactionClosedError, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
 import { withTestConnection, mockTransactions, currentProbe, TestOptions, withTestTransaction } from "../src";
 import { FakeTransactionManager } from "../src/fake";
@@ -191,7 +191,7 @@ describe("withTestConnection", () => {
         let retained!: Promise<void>;
         await withTestTransaction(() => {
             retained = gate.promise.then(async () => {
-                await expect(withTestConnection(callback)).rejects.toThrow("The test transaction has finished or could not be restored");
+                await expect(withTestConnection(callback)).rejects.toThrow(TransactionClosedError);
             });
         });
         gate.resolve();
@@ -386,6 +386,24 @@ describe("withTestConnection", () => {
         expect(manager.rollbackToSavepoint).toHaveBeenCalledTimes(2);
     });
 
+    it("finalizes already-resolved native query promises normally without waiting for callback bookkeeping", async () => {
+        await withTestTransaction(async () => {
+            await expect(withTestConnection((db: Connection) => {
+                void db.query(Promise.resolve(7));
+                return "callback completed";
+            })).resolves.toBe("callback completed");
+            const native = Promise.resolve(8);
+            await expect(withTestConnection((db: Connection) => {
+                const query = db.query(native);
+                expect(query).toBe(native);
+                return query;
+            })).resolves.toBe(8);
+            expect(manager.releaseSavepoint).toHaveBeenCalledTimes(2);
+            expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
+        });
+        expect(manager.rollbackTransaction).toHaveBeenCalledTimes(1);
+    });
+
     it("aggregates distinct callback and settled query failures", async () => {
         const queryError = new Error("query");
         const callbackError = new Error("callback");
@@ -499,8 +517,8 @@ describe("withTestConnection", () => {
         const callback = jest.fn();
         await expect(withTestTransaction(async () => {
             await expect(withTestConnection(callback)).rejects.toBe(error);
-            await expect(withTestConnection(callback)).rejects.toThrow("The test transaction has finished or could not be restored");
-            await expect(transactional(callback)()).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(withTestConnection(callback)).rejects.toThrow("The test transaction could not be restored");
+            await expect(transactional(callback)()).rejects.toThrow("The test transaction could not be restored");
         })).rejects.toBe(error);
         expect(callback).not.toHaveBeenCalled();
         expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
@@ -531,7 +549,7 @@ describe("withTestConnection", () => {
             catch (error) { broken = error; }
             expect(broken).toBeInstanceOf(TransactionSystemError);
             expect(broken).toMatchObject({ cause: recoveryError, applicationError });
-            await expect(withTestConnection(() => 1)).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(withTestConnection(() => 1)).rejects.toThrow("The test transaction could not be restored");
         });
         const result = await work.catch(error => error);
         expect(result).toBe(broken);
@@ -566,56 +584,47 @@ describe("withTestConnection", () => {
         expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), true);
     });
 
-    it("drains a forgotten successful withTestConnection before physical rollback and rejects the body", async () => {
+    it("does not wait for a forgotten never-settling connection callback and revokes its cached facade", async () => {
         const entered = deferred();
-        const gate = deferred();
-        const work = withTestTransaction(() => {
-            void withTestConnection(async () => {
+        let connection!: Connection;
+        await expect(withTestTransaction(async () => {
+            void withTestConnection((db: Connection) => {
+                connection = db;
                 entered.resolve();
-                await gate.promise;
-                expect(testSession(manager)!.admitting).toBe(false);
+                return new Promise<void>(() => {});
             });
+            await entered.promise;
             return "body completed";
-        });
-        await entered.promise;
-        expect(manager.rollbackTransaction).not.toHaveBeenCalled();
-        const assertion = expect(work).rejects.toMatchObject({
-            message: "withTestTransaction callback returned while withTestConnection was still running",
-            errors: [expect.objectContaining({ message: "withTestTransaction callback returned while withTestConnection was still running" })],
-        });
-        gate.resolve();
-        await assertion;
-        expect(manager.releaseSavepoint).toHaveBeenCalledTimes(1);
+        })).resolves.toBe("body completed");
+        expect(() => connection.query(Promise.resolve(1))).toThrow(TransactionClosedError);
+        expect(() => connection.query(Promise.resolve(1))).toThrow("Transaction already finished");
+        expect(manager.query).not.toHaveBeenCalled();
+        expect(manager.releaseSavepoint).not.toHaveBeenCalled();
+        expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
         expect(manager.rollbackTransaction).toHaveBeenCalledTimes(1);
+        expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), false);
     });
 
-    it("aggregates pending withTestConnection, body, withTestConnection callback, physical rollback and release errors", async () => {
+    it.each([false, true])("rejects a connection callback finishing after root closure without cleanup SQL (callback fails: %s)", async fails => {
         const entered = deferred();
-        const gate = deferred();
-        const bodyError = new Error("body");
+        const resume = deferred();
         const connectionError = new Error("withTestConnection");
-        const rollbackError = new Error("physical rollback");
-        const releaseError = new Error("physical release");
-        manager.rollbackTransaction.mockRejectedValueOnce(rollbackError);
-        manager.releaseTransaction.mockRejectedValueOnce(releaseError);
-        const work = withTestTransaction(() => {
-            void withTestConnection(async () => { entered.resolve(); await gate.promise; throw connectionError; });
-            throw bodyError;
-        });
-        await entered.promise;
-        expect(manager.rollbackTransaction).not.toHaveBeenCalled();
-        const assertion = expect(work).rejects.toMatchObject({
-            cause: releaseError,
-            applicationError: {
-                cause: rollbackError,
-                applicationError: {
-                    message: "withTestTransaction callback returned while withTestConnection was still running",
-                    errors: [expect.any(Error), bodyError, connectionError],
-                },
-            },
-        });
-        gate.resolve();
+        let operation!: Promise<void>;
+        await expect(withTestTransaction(async () => {
+            operation = withTestConnection(async () => {
+                entered.resolve();
+                await resume.promise;
+                if (fails) throw connectionError;
+            });
+            await entered.promise;
+            return "body completed";
+        })).resolves.toBe("body completed");
+        expect(manager.rollbackTransaction).toHaveBeenCalledTimes(1);
+        expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), false);
+        const assertion = expect(operation).rejects.toThrow(TransactionClosedError);
+        resume.resolve();
         await assertion;
-        expect(manager.releaseTransaction).toHaveBeenCalledWith(expect.any(Object), true);
+        expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
+        expect(manager.releaseSavepoint).not.toHaveBeenCalled();
     });
 });

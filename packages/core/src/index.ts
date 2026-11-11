@@ -9,7 +9,7 @@ export type { MetadataWrappedTransaction, TransactionContext, TransactionMetadat
 export {
     ConcurrentNestedTransactionError, DatasourceSetupError, IllegalTransactionStateException,
     InvalidIsolationLevelError, NestedTransactionNotSupportedError, NoTransactionContextError,
-    TransactionContextMixingError, TransactionSystemError, TransactionTimeoutError,
+    TransactionClosedError, TransactionContextMixingError, TransactionSystemError, TransactionTimeoutError,
     UnexpectedRollbackError, UnsupportedTransactionPropagationException,
 } from "./error";
 export { AsyncLocal } from "./asyncLocal";
