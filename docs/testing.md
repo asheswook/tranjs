@@ -352,6 +352,7 @@ See [connection lifetime](drivers.md#connection-lifetime) for rules on using con
 - Explicit transaction-control SQL and DDL that commits implicitly, such as MySQL schema changes. Apply migrations separately.
 - Sequence increments, emails, HTTP calls, files, caches and mock state. Mock external effects or clean them up separately.
 - External effects from detached work after the callback, including unawaited timers or runner callbacks. The helper does not stop that work.
+- Queries that detached work sends through driver objects other than the `ctx()` connection after the test ends. With a pool, they can reach the next test. If your code keeps such references, registering the connection-per-transaction manager in tests (`usePostgreSQLClientPerTransaction`, `useMySQLConnectionPerTransaction`) makes this less likely, because each test's connection is closed when the test ends. It does not catch a query sent while the test is finishing.
 
 ## Tests that need real commits
 

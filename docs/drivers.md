@@ -96,13 +96,13 @@ The pool manager applies isolation with `SET TRANSACTION ISOLATION LEVEL …`, t
 
 ## Connection lifetime
 
-After a transaction or test ends, calling `ctx()` from work that outlived it throws `TransactionClosedError` (exported by `@tranjs/core`) before sending SQL. Queries through a connection or method kept from `ctx()` throw too. Before 1.2.0 these queries ran on a connection that had already been returned to the pool.
+After a transaction or test ends, `ctx()` throws `TransactionClosedError` (exported by `@tranjs/core`) when called from work that outlived it. A connection you kept from `ctx()` throws the same error when you run a query through it, and so do methods you took from it or bound. The error is thrown before the query is passed to the driver. Before 1.2.0 these queries ran on a connection that had already gone back to the pool.
 
 A query already sent to the database can finish before cleanup. The test helper does not wait for calls you forgot to await. TranJS does not detect a missing `await`; use `@typescript-eslint/no-floating-promises` to catch it.
 
 Joined calls and `NESTED` scopes share their parent's connection from `ctx()`, which stays usable until that transaction ends. `REQUIRES_NEW` has its own connection from `ctx()` that stops working when the child transaction ends, even in tests where both use the same physical connection. The connection passed to a `withTestConnection` callback stops working when that callback or its enclosing test ends.
 
-The lifetime check applies to connections from `ctx()`; `manager.getCurrentTransaction()` returns the raw connection for custom `ctx()` implementations.
+The check covers the connection `ctx()` returns and its own query methods. It does not cover objects the driver hands out itself: the `this` of an event listener, properties such as `connection`, the internals of a query or command object, or the raw connection from `manager.getCurrentTransaction()`. Do not use any of these after the transaction ends. A query sent through them can run outside a transaction or land in whichever transaction holds that pooled connection next.
 
 ## Supported runtimes
 
