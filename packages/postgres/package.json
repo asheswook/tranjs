@@ -4,10 +4,13 @@
   "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/postgres" },
   "version": "1.2.0",
   "description": "TranJS driver for postgres.js. (PostgreSQL)",
+  "homepage": "https://github.com/asheswook/tranjs/tree/main/packages/postgres#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "package.json",
+    "README.md"
   ],
   "engines": {
     "node": ">=18"

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "TranJS",
+  "description": "Declarative transactions for JavaScript and TypeScript without an ORM: @Transactional and transactional() over pg, postgres.js and mysql2.",
+  "excludeFolders": ["scripts", "test", "packages/core"],
+  "excludeFiles": ["CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "LICENSE.md", "CHANGELOG.md"]
+}
