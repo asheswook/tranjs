@@ -133,14 +133,14 @@ describe("withTestConnection", () => {
         useTransactionManager(named, other);
         const denied = jest.fn();
         await withTestTransaction(async () => {
-            await expect(withTestConnection(denied, { datasource: other })).rejects.toThrow("live withTestTransaction");
+            await expect(withTestConnection(denied, { datasource: other })).rejects.toThrow("requires an active withTestTransaction callback");
             expect(manager.getCurrentTransaction()).toBeUndefined();
             expect(named.getCurrentTransaction()).toBeUndefined();
             expect(() => ctx()).toThrow("No transaction context");
             await expect(withTestConnection((db: Connection) => db.query(Promise.resolve("default")))).resolves.toBe("default");
         });
         await withTestTransaction(async () => {
-            await expect(withTestConnection(denied, { datasource: DEFAULT_DATASOURCE })).rejects.toThrow("live withTestTransaction");
+            await expect(withTestConnection(denied, { datasource: DEFAULT_DATASOURCE })).rejects.toThrow("requires an active withTestTransaction callback");
             await expect(withTestConnection((db: Connection) => db.query(Promise.resolve("named")))).resolves.toBe("named");
         }, { datasource: other });
         expect(denied).not.toHaveBeenCalled();
@@ -152,11 +152,11 @@ describe("withTestConnection", () => {
 
     it("rejects outside a session and for an unregistered datasource as promises", async () => {
         const callback = jest.fn();
-        await expect(withTestConnection(callback)).rejects.toThrow("live withTestTransaction");
+        await expect(withTestConnection(callback)).rejects.toThrow("requires an active withTestTransaction callback");
         await withTestTransaction(async () => {
             await expect(withTestConnection(callback, { datasource: other })).rejects.toBeInstanceOf(DatasourceSetupError);
             useTransactionManager(new TestConnectionManager(), other);
-            await expect(withTestConnection(callback, { datasource: other })).rejects.toThrow("live withTestTransaction");
+            await expect(withTestConnection(callback, { datasource: other })).rejects.toThrow("requires an active withTestTransaction callback");
         });
         expect(callback).not.toHaveBeenCalled();
         expect(manager.createSavepoint).not.toHaveBeenCalled();
@@ -177,7 +177,7 @@ describe("withTestConnection", () => {
         const release = jest.spyOn(fake as any, "releaseSavepoint");
         const callback = jest.fn();
         await withTestTransaction(async () => {
-            await expect(withTestConnection(callback)).rejects.toThrow("does not support withTestConnection connections");
+            await expect(withTestConnection(callback)).rejects.toThrow("does not support withTestConnection");
             await expect(transactional(() => 7)()).resolves.toBe(7);
         });
         expect(callback).not.toHaveBeenCalled();
@@ -191,7 +191,7 @@ describe("withTestConnection", () => {
         let retained!: Promise<void>;
         await withTestTransaction(() => {
             retained = gate.promise.then(async () => {
-                await expect(withTestConnection(callback)).rejects.toThrow("closed or broken");
+                await expect(withTestConnection(callback)).rejects.toThrow("The test transaction has finished or could not be restored");
             });
         });
         gate.resolve();
@@ -217,7 +217,7 @@ describe("withTestConnection", () => {
             await expect(withTestConnection(callback)).rejects.toMatchObject({ message: "Test transaction initialization failed", cause: error });
             session.lifecycle = "ready";
             session.admitting = false;
-            await expect(withTestConnection(callback)).rejects.toThrow("no longer admits withTestConnection work");
+            await expect(withTestConnection(callback)).rejects.toThrow("withTestConnection was called after the withTestTransaction callback finished");
             session.admitting = true;
         });
         expect(callback).not.toHaveBeenCalled();
@@ -233,8 +233,8 @@ describe("withTestConnection", () => {
             const first = withTestConnection(callback);
             expect(testSession(manager)!.testConnectionActive).toBe(true);
             expect(callback).not.toHaveBeenCalled();
-            await expect(withTestConnection(denied)).rejects.toThrow("overlaps an active");
-            await expect(transactional(denied)()).rejects.toThrow("overlaps an active withTestConnection");
+            await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
+            await expect(transactional(denied)()).rejects.toThrow("A transaction overlaps an active withTestConnection callback");
             savepoint.resolve();
             expect(await first).toBe("first");
             expect(testSession(manager)!.testConnectionActive).toBe(false);
@@ -251,7 +251,7 @@ describe("withTestConnection", () => {
             await withTestTransaction(async () => {
                 const work = transactional(async () => { entered.resolve(); await gate.promise; }, { propagation })();
                 // SUPPORTS/NOT_SUPPORTED have no owner savepoint, but still own the overlap gate.
-                await expect(withTestConnection(callback)).rejects.toThrow("overlaps an active");
+                await expect(withTestConnection(callback)).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
                 await entered.promise;
                 gate.resolve();
                 await work;
@@ -265,13 +265,13 @@ describe("withTestConnection", () => {
         await withTestTransaction(async () => {
             const session = testSession(manager)!;
             session.managedActive = 1;
-            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
+            await expect(withTestConnection(() => {})).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
             session.managedActive = 0;
             session.testConnectionActive = true;
-            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
+            await expect(withTestConnection(() => {})).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
             session.testConnectionActive = false;
             session.root.open = true;
-            await expect(withTestConnection(() => {})).rejects.toThrow("overlaps an active");
+            await expect(withTestConnection(() => {})).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
             session.root.open = false;
         });
         expect(manager.createSavepoint).not.toHaveBeenCalled();
@@ -285,10 +285,10 @@ describe("withTestConnection", () => {
             await withTestConnection(async () => {
                 await Promise.resolve();
                 for (const datasource of [undefined, other]) {
-                    await expect(transactional(denied, { propagation, datasource })()).rejects.toThrow("forbidden inside a withTestConnection callback");
+                    await expect(transactional(denied, { propagation, datasource })()).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
                 }
-                await expect(secondary.executeTransaction(propagation, denied)).rejects.toThrow("forbidden inside a withTestConnection callback");
-                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                await expect(secondary.executeTransaction(propagation, denied)).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
             });
         });
         expect(denied).not.toHaveBeenCalled();
@@ -302,8 +302,8 @@ describe("withTestConnection", () => {
         await withTestTransaction(async () => {
             await withTestConnection(() => {
                 retained = gate.promise.then(async () => {
-                    await expect(transactional(denied, { propagation: Propagation.SUPPORTS })()).rejects.toThrow("forbidden inside a withTestConnection callback");
-                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                    await expect(transactional(denied, { propagation: Propagation.SUPPORTS })()).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
                 });
             });
             expect(testSession(manager)!.testConnectionActive).toBe(false);
@@ -326,9 +326,9 @@ describe("withTestConnection", () => {
         };
         await withTestTransaction(async () => {
             await transactional(async () => {
-                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
                 afterCommit(async () => {
-                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
                 });
             })();
             const error = new Error("owner rollback");
@@ -338,7 +338,7 @@ describe("withTestConnection", () => {
             })()).rejects.toBe(error);
             expect(rollbackCalls).toBe(1);
             expect(rollbackResult).toMatchObject({
-                status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
+                status: "rejected", reason: { message: "withTestConnection was called inside another connection callback, a transaction callback or a transaction hook" },
             });
             expect(testSession(manager)!.root.open).toBe(false);
             expect(testSession(manager)!.managedActive).toBe(0);
@@ -346,15 +346,15 @@ describe("withTestConnection", () => {
             resume.resolve();
             const [retainedResult] = await retained;
             expect(retainedResult).toMatchObject({
-                status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
+                status: "rejected", reason: { message: "withTestConnection was called inside another connection callback, a transaction callback or a transaction hook" },
             });
             await afterCommit(async () => {
                 await Promise.resolve();
-                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
             });
             await withTestConnection(async () => {
                 await afterCommit(async () => {
-                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection is forbidden");
+                    await expect(withTestConnection(denied)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
                 });
             });
             await withTestConnection(() => 1);
@@ -426,7 +426,7 @@ describe("withTestConnection", () => {
             // Let the executor observe callback completion, not just callback entry.
             await Promise.resolve();
             await Promise.resolve();
-            expect(() => connection.query(Promise.resolve(0))).toThrow("lease is revoked");
+            expect(() => connection.query(Promise.resolve(0))).toThrow("The connection was used after its withTestConnection callback finished");
             expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
             expect(manager.releaseSavepoint).not.toHaveBeenCalled();
             const assertion = fails
@@ -470,8 +470,8 @@ describe("withTestConnection", () => {
             await expect(withTestConnection((db: Connection) => {
                 retained = db;
                 return asynchronous ? Promise.resolve(db) : db;
-            })).rejects.toThrow("returned its connection facade");
-            expect(() => retained.query(Promise.resolve(1))).toThrow("lease is revoked");
+            })).rejects.toThrow("withTestConnection returned its connection");
+            expect(() => retained.query(Promise.resolve(1))).toThrow("The connection was used after its withTestConnection callback finished");
             await withTestConnection(() => "recovered");
         });
         expect(manager.query).not.toHaveBeenCalled();
@@ -488,7 +488,7 @@ describe("withTestConnection", () => {
             });
             expect(result.value).toBe(7);
             expect(getter).not.toHaveBeenCalled();
-            expect(() => result.nested[0].query(Promise.resolve(1))).toThrow("lease is revoked");
+            expect(() => result.nested[0].query(Promise.resolve(1))).toThrow("The connection was used after its withTestConnection callback finished");
         });
         expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
         expect(manager.query).not.toHaveBeenCalled();
@@ -499,8 +499,8 @@ describe("withTestConnection", () => {
         const callback = jest.fn();
         await expect(withTestTransaction(async () => {
             await expect(withTestConnection(callback)).rejects.toBe(error);
-            await expect(withTestConnection(callback)).rejects.toThrow("closed or broken");
-            await expect(transactional(callback)()).rejects.toThrow("closed or broken");
+            await expect(withTestConnection(callback)).rejects.toThrow("The test transaction has finished or could not be restored");
+            await expect(transactional(callback)()).rejects.toThrow("The test transaction has finished or could not be restored");
         })).rejects.toBe(error);
         expect(callback).not.toHaveBeenCalled();
         expect(manager.rollbackToSavepoint).not.toHaveBeenCalled();
@@ -531,7 +531,7 @@ describe("withTestConnection", () => {
             catch (error) { broken = error; }
             expect(broken).toBeInstanceOf(TransactionSystemError);
             expect(broken).toMatchObject({ cause: recoveryError, applicationError });
-            await expect(withTestConnection(() => 1)).rejects.toThrow("closed or broken");
+            await expect(withTestConnection(() => 1)).rejects.toThrow("The test transaction has finished or could not be restored");
         });
         const result = await work.catch(error => error);
         expect(result).toBe(broken);
@@ -580,8 +580,8 @@ describe("withTestConnection", () => {
         await entered.promise;
         expect(manager.rollbackTransaction).not.toHaveBeenCalled();
         const assertion = expect(work).rejects.toMatchObject({
-            message: "Pending withTestConnection work drained before test rollback",
-            errors: [expect.objectContaining({ message: expect.stringContaining("pending withTestConnection work") })],
+            message: "withTestTransaction callback returned while withTestConnection was still running",
+            errors: [expect.objectContaining({ message: "withTestTransaction callback returned while withTestConnection was still running" })],
         });
         gate.resolve();
         await assertion;
@@ -609,7 +609,7 @@ describe("withTestConnection", () => {
             applicationError: {
                 cause: rollbackError,
                 applicationError: {
-                    message: "Pending withTestConnection work drained before test rollback",
+                    message: "withTestTransaction callback returned while withTestConnection was still running",
                     errors: [expect.any(Error), bodyError, connectionError],
                 },
             },

@@ -29,11 +29,16 @@ export interface TestSession {
     managedActive: number;
     pendingConnections: Set<Promise<unknown>>;
     pendingTransactions: Set<Promise<unknown>>;
+    callerPromises: Set<TestCallerPromise>;
     begin(options: TransactionOptions, propagation: Propagation, parent?: TxState): TestBoundaryInfo;
     attach(state: TxState, info: TestBoundaryInfo): void;
     complete(info: TestBoundaryInfo, outcome: "committed" | "rolled-back"): void;
     failNext(operation: "begin" | "commit" | "rollback", info: TestBoundaryInfo): void;
     runAfterCommit<T>(state: TxState, callback: () => T): T;
+}
+export interface TestCallerPromise {
+    readonly promise: Promise<unknown>;
+    readonly topLevel: boolean;
 }
 export const testAccess = new WeakMap<PlatformTransactionManager<any>, {
     begin(options?: TransactionOptions): Promise<MetadataWrappedTransaction<any>>;
@@ -81,7 +86,7 @@ export function assertTestSessionReady(session: TestSession): void {
         Object.assign(error, { cause: session.initializationError });
         throw error;
     }
-    if (session.closed || "broken" in session) throw new Error("Test transaction is closed or broken");
+    if (session.closed || "broken" in session) throw new Error("The test transaction has finished or could not be restored");
     if (session.kind === "integration" && (session.lifecycle !== "ready" || !session.context)) {
         throw new Error("Test transaction has not begun: initialization is still in progress");
     }
@@ -93,11 +98,22 @@ export function currentTestSession(): TestSession | undefined {
     const sessions = storage?.getStore()?.sessions;
     return sessions ? Array.from(sessions.values()).reverse()[0] : undefined;
 }
-/** The session owns failures of admitted work, including an unobserved caller promise. */
+/** Keep pending caller promises for cleanup without hiding earlier rejections. */
 export function observeTestTransaction<T>(promise: Promise<T>): Promise<T> {
     const session = currentTestSession();
     if (session?.kind === "integration" && !session.closed && session.pendingTransactions.size) {
-        promise.catch(() => {});
+        const entry: TestCallerPromise = {
+            topLevel: !currentTestManagedScope(session),
+            promise: promise.then(value => {
+                session.callerPromises.delete(entry);
+                return value;
+            }, error => {
+                session.callerPromises.delete(entry);
+                throw error;
+            }),
+        };
+        session.callerPromises.add(entry);
+        return entry.promise as Promise<T>;
     }
     return promise;
 }
@@ -125,7 +141,7 @@ export function testScope<T>(manager: PlatformTransactionManager<any>, fn: () =>
     catch (error) { return Promise.reject(error); }
     if (!session?.context) return fn();
     const parent = store!.scopes.get(manager) ?? session.root;
-    if (parent.open) return Promise.reject(new Error("Overlapping transaction savepoint scopes inside withTestTransaction are not supported; await each branch"));
+    if (parent.open) return Promise.reject(new Error("Transactions overlap inside withTestTransaction"));
     parent.open = true;
     const scopes = new Map(store!.scopes);
     scopes.set(manager, { open: false });

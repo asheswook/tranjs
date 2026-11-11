@@ -2,7 +2,7 @@ import { Propagation, transactional } from "@tranjs/core";
 import {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
     assertSameTransaction, assertSeparateTransaction, withTestConnection, TestOptions, matchers, mockTransactions,
-    currentProbe, TestTransactionInfo, TestTransactionProbe, withTestTransaction,
+    currentProbe, TestTransactionRecord, TestTransactionProbe, withTestTransaction,
 } from "@tranjs/testing";
 import type { TestConnection as PgTestConnection } from "@tranjs/pg";
 import type { TestConnection as Mysql2TestConnection } from "@tranjs/mysql2";
@@ -60,16 +60,16 @@ export function consumeProbe(tx: TestTransactionProbe): void {
     const result: string = work(1);
     const tracked = tx.track({ work, count: 1 });
     const trackedResult: string = tracked.work(tracked.count);
-    const info: TestTransactionInfo | undefined = tx.txOf(work);
-    const later: TestTransactionInfo | undefined = tx.txOf(tracked.work, 1);
-    const records: readonly TestTransactionInfo[] = tx.records;
+    const info: TestTransactionRecord | undefined = tx.txOf(work);
+    const later: TestTransactionRecord | undefined = tx.txOf(tracked.work, 1);
+    const records: readonly TestTransactionRecord[] = tx.records;
     const datasource: string | symbol = tx.datasource;
     tx.failNext("begin");
     tx.failNext("commit", { containing: work, times: 2, error: new Error("commit") });
     tx.failNext("rollback", { where: transaction => transaction.options.readOnly === true, error: "rollback" });
     if (info) {
         const outcome: "active" | "committed" | "rolled-back" = info.outcome;
-        const parent: TestTransactionInfo | undefined = info.parent;
+        const parent: TestTransactionRecord | undefined = info.parent;
         const propagation: Propagation = info.propagation;
         void outcome;
         void parent;

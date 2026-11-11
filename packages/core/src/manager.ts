@@ -110,7 +110,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     /** Internal optional capability implemented by driver-owned withTestConnection adapters. */
     protected createTestConnection(tx: Tx, lease: TestConnectionLease): unknown {
-        throw new Error("This transaction manager does not support withTestConnection connections");
+        throw new Error("This transaction manager does not support withTestConnection");
     }
 
     protected getRemainingTimeout(): number | undefined {
@@ -356,12 +356,12 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     ): Promise<R> {
         const current = currentTestSession();
         if (!current) return this.dispatchTransaction(propagation, callback, options);
-        if (testProvenance() === "withTestConnection") throw new Error("Managed transaction entry is forbidden inside a withTestConnection callback");
-        if (current.testConnectionActive) throw new Error("Managed transaction entry overlaps an active withTestConnection");
+        if (testProvenance() === "withTestConnection") throw new Error("A transaction cannot start inside a withTestConnection callback");
+        if (current.testConnectionActive) throw new Error("A transaction overlaps an active withTestConnection callback");
         const session = testSession(this);
         if (session) assertTestSessionReady(session);
         const parentScope = session && currentTestManagedScope(session);
-        if (session && !session.admitting && !parentScope) throw new Error("Test session no longer admits managed work");
+        if (session && !session.admitting && !parentScope) throw new Error("A transaction was called after the withTestTransaction callback finished");
         // A mock's registration may already be restored to another manager, but
         // work retained by that closed session must not enter a real transaction.
         if (current !== session && (current.closed || "broken" in current)) {

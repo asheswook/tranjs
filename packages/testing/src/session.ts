@@ -7,30 +7,30 @@ import { FakeTransactionManager } from "./fake";
 import { registerProbeOwner, registerTrackedFunction, trackedFunctionForOwner, TrackedFunction } from "./metadata";
 import type { TestOptions } from "./options";
 
-export interface TestTransactionInfo extends TestBoundaryInfo {
-    readonly parent?: TestTransactionInfo;
+export interface TestTransactionRecord extends TestBoundaryInfo {
+    readonly parent?: TestTransactionRecord;
 }
 export interface TestFailureSelector {
     containing?: Function;
-    where?: (info: TestTransactionInfo) => boolean;
+    where?: (info: TestTransactionRecord) => boolean;
     times?: number;
     error?: unknown;
 }
 export interface TestTransactionProbe {
     readonly datasource: string | symbol;
-    readonly records: readonly TestTransactionInfo[];
+    readonly records: readonly TestTransactionRecord[];
     track<T extends object>(target: T): T;
-    txOf(fn: Function, call?: number): TestTransactionInfo | undefined;
+    txOf(fn: Function, call?: number): TestTransactionRecord | undefined;
     failNext(operation: "begin" | "commit" | "rollback", selector?: TestFailureSelector): void;
 }
 
 function createProbe(manager: PlatformTransactionManager<any>, datasource: string | symbol, kind: TestSession["kind"]): {
     probe: TestTransactionProbe; session: TestSession;
 } {
-    const records: TestTransactionInfo[] = [];
-    const states = new WeakMap<TxState, TestTransactionInfo>();
-    const outcomes = new WeakMap<TestTransactionInfo, TestTransactionInfo["outcome"]>();
-    const calls = new WeakMap<Function, (TestTransactionInfo | undefined)[]>();
+    const records: TestTransactionRecord[] = [];
+    const states = new WeakMap<TxState, TestTransactionRecord>();
+    const outcomes = new WeakMap<TestTransactionRecord, TestTransactionRecord["outcome"]>();
+    const calls = new WeakMap<Function, (TestTransactionRecord | undefined)[]>();
     const owner = {};
     let sequence = 0;
     const completions: TrackedFunction["completions"] = new WeakMap();
@@ -50,7 +50,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
         for (const key of Reflect.ownKeys(target)) {
             const descriptor = Reflect.getOwnPropertyDescriptor(target, key)!;
             if (typeof descriptor.value === "function" && !descriptor.configurable && !descriptor.writable) {
-                throw new TypeError("Cannot track a function with frozen function-valued properties; configure and track the mock before freezing it");
+                throw new TypeError("A function with frozen function-valued properties cannot be tracked");
             }
         }
         const recorded = calls.get(target) ?? [];
@@ -134,7 +134,7 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
                 },
                 defineProperty: (_object, key, descriptor) => Reflect.defineProperty(target, key, descriptor),
                 deleteProperty: (_object, key) => Reflect.deleteProperty(target, key),
-                preventExtensions() { throw new TypeError("Freeze the original object before tracking, not the tracked wrapper"); },
+                preventExtensions() { throw new TypeError("A tracked object cannot be frozen"); },
             });
         }
         wrappers.set(target, wrapper);
@@ -165,10 +165,10 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
         },
         failNext(operation, selector = {}) {
             if (!["begin", "commit", "rollback"].includes(operation)) throw new TypeError("Unknown transaction failure operation");
-            if (selector.containing && selector.where) throw new TypeError("Choose containing or where, not both");
+            if (selector.containing && selector.where) throw new TypeError("A failure selector contains both containing and where");
             if (selector.containing) {
                 trackedCalls(selector.containing);
-                if (operation === "begin") throw new Error("A begin failure cannot select containing: the tracked call has not run yet; use where or the next begin");
+                if (operation === "begin") throw new Error("A begin failure cannot select containing because the tracked call has not run yet");
             }
             const times = selector.times ?? 1;
             if (!Number.isInteger(times) || times < 1) throw new RangeError("Failure times must be a positive integer");
@@ -179,9 +179,10 @@ function createProbe(manager: PlatformTransactionManager<any>, datasource: strin
         id: createTestSessionId(), datasource,
         kind, lifecycle: kind === "mock" ? "ready" : "initializing",
         counter: 0, closed: false, root: { open: false },
-        admitting: true, testConnectionActive: false, managedActive: 0, pendingConnections: new Set(), pendingTransactions: new Set(),
+        admitting: true, testConnectionActive: false, managedActive: 0,
+        pendingConnections: new Set(), pendingTransactions: new Set(), callerPromises: new Set(),
         begin(options, propagation, parent) {
-            const info: TestTransactionInfo = Object.freeze({
+            const info: TestTransactionRecord = Object.freeze({
                 id: records.length + 1,
                 options: Object.freeze({ ...options }),
                 parent: parent ? states.get(parent) : undefined,
@@ -223,9 +224,9 @@ const probes = new WeakMap<TestSession, TestTransactionProbe>();
 export function currentProbe(datasource?: string | symbol): TestTransactionProbe {
     const manager = datasource === undefined ? undefined : registeredManager(datasource);
     const session = datasource === undefined ? currentTestSession() : manager && testSession(manager);
-    if (!session || session.closed) throw new Error("currentProbe() requires an active transaction test session");
+    if (!session || session.closed) throw new Error("currentProbe() requires an active transaction test callback");
     const probe = probes.get(session);
-    if (!probe) throw new Error("currentProbe() requires an active transaction test session");
+    if (!probe) throw new Error("currentProbe() requires an active transaction test callback");
     return probe;
 }
 
@@ -283,17 +284,29 @@ export async function withTestTransaction<T>(fn: (tx: TestTransactionProbe) => T
             throw error;
         } finally {
             session.admitting = false;
-            const runningTransactions = session.pendingTransactions.size;
+            const callers = [...session.callerPromises];
+            const runningTransactions = Math.max(session.pendingTransactions.size,
+                callers.filter(entry => entry.topLevel).length, callers.length ? 1 : 0);
             const runningConnections = session.pendingConnections.size;
             if (runningTransactions || runningConnections) {
                 const message = runningTransactions
                     ? `withTestTransaction callback returned while ${runningTransactions} transaction${runningTransactions === 1 ? " was" : "s were"} still running`
-                    : "Pending withTestConnection work drained before test rollback";
-                const settled = await Promise.allSettled([...session.pendingTransactions, ...session.pendingConnections]);
+                    : "withTestTransaction callback returned while withTestConnection was still running";
+                const waiting = setTimeout(() => {
+                    console.warn("withTestTransaction is still waiting for unfinished work after its callback returned (1 second)");
+                }, 1000);
+                waiting.unref();
+                let settled: PromiseSettledResult<unknown>[];
+                try {
+                    // allSettled handles only the caller promises still pending at exit.
+                    settled = await Promise.allSettled([
+                        ...session.pendingTransactions, ...callers.map(entry => entry.promise), ...session.pendingConnections,
+                    ]);
+                } finally { clearTimeout(waiting); }
                 const errors = [...(runningTransactions ? [new Error(message)] : []),
-                    ...(runningConnections ? [new Error("withTestTransaction callback exited with pending withTestConnection work")] : []),
+                    ...(runningConnections ? [new Error("withTestTransaction callback returned while withTestConnection was still running")] : []),
                     ...(failure ? [failure.error] : []),
-                    ...settled.flatMap(result => result.status === "rejected" ? [result.reason] : [])];
+                    ...new Set(settled.flatMap(result => result.status === "rejected" ? [result.reason] : []))];
                 failure = { error: new AggregateError(errors, message) };
             }
             session.closed = true;

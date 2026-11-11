@@ -254,11 +254,11 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             let data: any;
             const assertRevoked = async () => {
                 const before = dispatches.mock.calls.length;
-                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
+                await expect(Promise.resolve().then(() => query(escaped, "SELECT 1"))).rejects.toThrow("The connection was used after its withTestConnection callback finished");
                 for (const method of extracted) {
-                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
+                    await expect(Promise.resolve().then(() => method("SELECT 1"))).rejects.toThrow("The connection was used after its withTestConnection callback finished");
                 }
-                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow(/withTestConnection|revok|closed|complete/i);
+                if (callTag) await expect(Promise.resolve().then(callTag)).rejects.toThrow("The connection was used after its withTestConnection callback finished");
                 expect(dispatches).toHaveBeenCalledTimes(before);
             };
             await test(async () => {
@@ -287,7 +287,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                 for (const propagation of propagations) {
                     for (const selected of [datasource, other]) {
                         const callback = jest.fn();
-                        await expect(tx(callback, { propagation, datasource: selected })).rejects.toThrow(/withTestConnection/i);
+                        await expect(tx(callback, { propagation, datasource: selected })).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
                         expect(callback).not.toHaveBeenCalled();
                     }
                 }
@@ -296,7 +296,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                     @Transactional({ datasource: other, propagation: Propagation.SUPPORTS })
                     async run() { body(); }
                 }
-                await expect(new Service().run()).rejects.toThrow(/withTestConnection/i);
+                await expect(new Service().run()).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
                 expect(body).not.toHaveBeenCalled();
             }));
         });
@@ -305,11 +305,11 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             await test(async () => {
                 const body = jest.fn();
                 await fix(async () => {
-                    await expect(fix(body)).rejects.toThrow(/withTestConnection|recurs/i);
-                    await expect(withTestConnection(body, { datasource: other })).rejects.toThrow(/withTestConnection|session/i);
+                    await expect(fix(body)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
+                    await expect(withTestConnection(body, { datasource: other })).rejects.toThrow("withTestConnection requires an active withTestTransaction callback");
                 });
                 for (const propagation of [Propagation.REQUIRED, Propagation.SUPPORTS, Propagation.NOT_SUPPORTED, Propagation.NEVER]) {
-                    await tx(async () => { await expect(fix(body)).rejects.toThrow(/withTestConnection|callback|transaction|scope/i); }, { propagation });
+                    await tx(async () => { await expect(fix(body)).rejects.toThrow("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook"); }, { propagation });
                 }
                 let hookCalls = 0;
                 const hookResults: PromiseSettledResult<unknown>[] = [];
@@ -334,14 +334,14 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                 resume.resolve();
                 const [retainedResult] = await retained;
                 expect(retainedResult).toMatchObject({
-                    status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
+                    status: "rejected", reason: { message: "withTestConnection was called inside another connection callback, a transaction callback or a transaction hook" },
                 });
                 await afterCommit(hook, datasource); // immediate ownerless branch
                 expect(hookCalls).toBe(3);
                 expect(hookResults).toHaveLength(3);
                 for (const result of hookResults) {
                     expect(result).toMatchObject({
-                        status: "rejected", reason: { message: "withTestConnection is forbidden inside a withTestConnection, managed callback or hook" },
+                        status: "rejected", reason: { message: "withTestConnection was called inside another connection callback, a transaction callback or a transaction hook" },
                     });
                 }
                 expect(body).not.toHaveBeenCalled();
@@ -355,8 +355,8 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                 const ownerBody = jest.fn();
                 const connectionBody = jest.fn();
                 try {
-                    await expect(tx(ownerBody)).rejects.toThrow(/overlap|withTestConnection|await each/i);
-                    await expect(fix(connectionBody)).rejects.toThrow(/overlap|withTestConnection|await each/i);
+                    await expect(tx(ownerBody)).rejects.toThrow("A transaction overlaps an active withTestConnection callback");
+                    await expect(fix(connectionBody)).rejects.toThrow("withTestConnection overlaps another connection callback or transaction");
                     expect(ownerBody).not.toHaveBeenCalled();
                     expect(connectionBody).not.toHaveBeenCalled();
                 } finally { finish.resolve(); await first; }
@@ -378,7 +378,9 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                     const body = jest.fn();
                     try {
                         await started.promise;
-                        await expect(ownerFirst ? fix(body) : tx(body)).rejects.toThrow(/overlap|withTestConnection|await each/i);
+                        await expect(ownerFirst ? fix(body) : tx(body)).rejects.toThrow(ownerFirst
+                            ? "withTestConnection overlaps another connection callback or transaction"
+                            : "A transaction overlaps an active withTestConnection callback");
                         expect(body).not.toHaveBeenCalled();
                     } finally { finish.resolve(); await first; }
                 }
@@ -486,7 +488,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                     started.resolve();
                     await finish.promise;
                     const body = jest.fn();
-                    await expect(fix(body)).rejects.toThrow(/closed|closing|admi|withTestConnection|session/i);
+                    await expect(fix(body)).rejects.toThrow("withTestConnection was called after the withTestTransaction callback finished");
                     expect(body).not.toHaveBeenCalled();
                     await insert(db, 1); // admitted work may finish after exit starts
                     completed = true;
@@ -502,7 +504,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             await expect(pending).rejects.toBe(failure);
             expect(completed).toBe(true);
             for (const expected of [bodyError, failure, rollbackError, releaseError]) expect(errors(error)).toContain(expected);
-            expect(errors(error).some(e => e instanceof Error && /pending|unawaited|await.*withTestConnection|withTestConnection.*await/i.test(e.message))).toBe(true);
+            expect(errors(error).some(e => e instanceof Error && e.message === "withTestTransaction callback returned while withTestConnection was still running")).toBe(true);
         });
 
         it("fails a successful but unawaited withTestConnection at session exit after draining it", async () => {
@@ -526,7 +528,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                 await started.promise;
             });
             setImmediate(finish.resolve);
-            await expect(operation).rejects.toThrow(/pending|unawaited|await.*withTestConnection|withTestConnection.*await/i);
+            await expect(operation).rejects.toThrow("withTestTransaction callback returned while withTestConnection was still running");
             await pending;
             expect(completed).toBe(true);
         });
@@ -607,13 +609,13 @@ export function testConnectionContract(label: string, create: (options: { maxCon
 
         it("rejects outside, mock and bound closed sessions before callback execution", async () => {
             const body = jest.fn();
-            await expect(fix(body)).rejects.toThrow(/withTestTransaction|session/i);
+            await expect(fix(body)).rejects.toThrow("withTestConnection requires an active withTestTransaction callback");
             await mockTransactions(async () => {
                 await expect(fix(body)).rejects.toThrow(/mockTransactions|mock/i);
             }, { datasource });
             let closed!: () => Promise<unknown>;
             await test(async () => { closed = AsyncResource.bind(() => fix(body)); });
-            await expect(closed()).rejects.toThrow(/closed|session|active/i);
+            await expect(closed()).rejects.toThrow("The test transaction has finished or could not be restored");
             expect(body).not.toHaveBeenCalled();
         });
 

@@ -60,8 +60,8 @@ async function detachedInsideB() {
     let bodies = 0;
     await testing.withTestTransaction(async a => {
         task = gate.promise.then(async () => {
-            assert.throws(() => testing.currentProbe(), /active.*session/i);
-            await assert.rejects(core.transactional(() => { bodies++; })(), /closed/i);
+            assert.throws(() => testing.currentProbe(), { message: "currentProbe() requires an active transaction test callback" });
+            await assert.rejects(core.transactional(() => { bodies++; })(), { message: "The test transaction has finished or could not be restored" });
             assert.equal(a.records.length, 0);
         });
     });
@@ -94,12 +94,12 @@ async function mockDetached({ afterAll = false } = {}) {
     try {
         await testing.mockTransactions(async a => {
             task = gate.promise.then(async () => {
-                assert.throws(() => testing.currentProbe(), /active.*session/i);
+                assert.throws(() => testing.currentProbe(), { message: "currentProbe() requires an active transaction test callback" });
                 for (const propagation of Object.values(core.Propagation)) {
                     await assert.rejects(core.transactional(async () => {
                         bodies++;
                         await driver.ctx(datasource).query('SELECT 1');
-                    }, { datasource, propagation })(), /closed/i);
+                    }, { datasource, propagation })(), { message: "The test transaction has finished or could not be restored" });
                 }
                 assert.equal(a.records.length, 0);
             });
@@ -124,7 +124,7 @@ async function mockDetached({ afterAll = false } = {}) {
     const outsideAndCleanup = async () => {
         try {
             const before = begins;
-            assert.throws(() => testing.currentProbe(), /active.*session/i);
+            assert.throws(() => testing.currentProbe(), { message: "currentProbe() requires an active transaction test callback" });
             const result = await core.transactional(async () => {
                 const backend = await pidFor(datasource);
                 const { rows } = await driver.ctx(datasource).query('SELECT 1 AS live');
@@ -164,7 +164,7 @@ async function scheduleAfterAll(clock) {
         await helper(async a => {
             setTimeout(() => { item.timerTask = write(item.id, observed)(); }, 1);
             item.promiseTask = gate.promise.then(async () => {
-                await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), /closed/i);
+                await assert.rejects(core.transactional(() => assert.fail('closed callback ran'))(), { message: "The test transaction has finished or could not be restored" });
                 assert.equal(a.records.length, 0);
             });
         });
@@ -177,7 +177,7 @@ async function scheduleAfterAll(clock) {
             for (const { timerTask, observed, id, source } of pending) {
                 await timerTask;
                 assert.equal(observed.probe, undefined);
-                assert.match(observed.probeError.message, /active.*session/i);
+                assert.match(observed.probeError.message, /^currentProbe\(\) requires an active transaction test callback$/);
                 assert.equal(typeof observed.pid, 'number');
                 assert.equal(await h.count(id), 1, 'production commit must be externally visible');
                 console.log(`LIFETIME_${source === 'mock' ? 'MOCK_' : ''}AFTER_ALL:fake-owner=production:backend=physical:persisted=1:detached=closed-A-rejected`);
@@ -194,7 +194,7 @@ async function scheduleAfterAll(clock) {
 function completionWrite(observed) { return write('completion-hook', observed); }
 async function verifyCompletion(observed, a) {
     assert.equal(observed.probe, undefined, 'runner completion hook unexpectedly retained an active probe');
-    assert.match(observed.probeError.message, /active.*session/i);
+    assert.match(observed.probeError.message, /^currentProbe\(\) requires an active transaction test callback$/);
     assert.equal(typeof observed.pid, 'number');
     assert.equal(a.records.length, 0);
     assert.equal(await h.count('completion-hook'), 1);

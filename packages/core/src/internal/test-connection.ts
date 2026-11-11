@@ -6,16 +6,16 @@ import { assertTestSessionReady, currentTestSession, TestConnectionLease, runTes
 export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: string | symbol): Promise<Awaited<R>> {
     try {
         const current = currentTestSession();
-        if (!current) throw new Error("withTestConnection requires a live withTestTransaction session");
+        if (!current) throw new Error("withTestConnection requires an active withTestTransaction callback");
         assertTestSessionReady(current);
         const manager = getTransactionManager(datasource ?? current.datasource);
         const session = testSession(manager);
-        if (!session) throw new Error("withTestConnection requires a live withTestTransaction session");
+        if (!session) throw new Error("withTestConnection requires an active withTestTransaction callback");
         if (session.kind === "mock") throw new Error("withTestConnection is unavailable in mockTransactions");
         assertTestSessionReady(session);
-        if (!session.admitting) throw new Error("Test session no longer admits withTestConnection work");
-        if (testProvenance()) throw new Error("withTestConnection is forbidden inside a withTestConnection, managed callback or hook");
-        if (session.root.open || session.managedActive || session.testConnectionActive) throw new Error("withTestConnection overlaps an active withTestConnection or managed transaction");
+        if (!session.admitting) throw new Error("withTestConnection was called after the withTestTransaction callback finished");
+        if (testProvenance()) throw new Error("withTestConnection was called inside another connection callback, a transaction callback or a transaction hook");
+        if (session.root.open || session.managedActive || session.testConnectionActive) throw new Error("withTestConnection overlaps another connection callback or transaction");
         const access = testAccess.get(manager)!;
         const tx = session.context!.transaction;
         const name = `tranjs_${session.id}_connection_${++session.counter}`;
@@ -23,7 +23,7 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
         const pending = new Set<Promise<unknown>>();
         const errors: unknown[] = [];
         const lease: TestConnectionLease = {
-            assert() { if (!open) throw new Error("withTestConnection connection lease is revoked after callback completion"); },
+            assert() { if (!open) throw new Error("The connection was used after its withTestConnection callback finished"); },
             track<T>(operation: () => PromiseLike<T>): Promise<T> {
                 lease.assert();
                 const promise = Promise.resolve(operation());
@@ -49,9 +49,9 @@ export function executeTestConnection<C, R>(fn: (db: C) => R, datasource?: strin
                 value = await runTestProvenance("withTestConnection", async () => {
                     const db = access.testConnection(tx, lease) as C;
                     const returned = fn(db);
-                    if ((returned as unknown) === db) throw new Error("withTestConnection returned its connection facade");
+                    if ((returned as unknown) === db) throw new Error("withTestConnection returned its connection");
                     const result = await returned;
-                    if (result === db) throw new Error("withTestConnection returned its connection facade");
+                    if (result === db) throw new Error("withTestConnection returned its connection");
                     return result;
                 });
             } catch (error) { failure = { error }; }

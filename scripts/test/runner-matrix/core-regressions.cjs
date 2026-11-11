@@ -131,7 +131,7 @@ async function brokenSavepointRecovery() {
                 assert.equal(error.applicationError, application);
                 assert.equal(error.cause, recovery);
                 assert.equal(probe.records[0].outcome, 'rolled-back');
-                await assert.rejects(core.transactional(() => assert.fail('broken session admitted work'), { datasource })(), /broken|aborted|recovery/i);
+                await assert.rejects(core.transactional(() => assert.fail('broken session admitted work'), { datasource })(), { message: "The test transaction has finished or could not be restored" });
                 throw error;
             } finally { callbackFinally = true; }
         }, { datasource }), error => {

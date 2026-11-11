@@ -123,7 +123,7 @@ async function runtimeChecks() {
                 assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "No physical commit during session");
             }, { datasource });
             assert.deepEqual((await pool.query(`SELECT * FROM ${table}`)).rows, [], "Session must physically roll back");
-            assert.throws(() => otherApi.currentProbe(datasource), /session/i);
+            assert.throws(() => otherApi.currentProbe(datasource), { message: "currentProbe() requires an active transaction test callback" });
         }
     } finally {
         core.clearTransactionManager(datasource);

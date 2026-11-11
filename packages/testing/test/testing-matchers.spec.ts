@@ -419,7 +419,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
         });
         expect(begin).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledTimes(1);
-        expect(() => currentProbe()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
     });
 
     it("keeps failed initialization's cause in retained native-begin tasks", async () => {
@@ -437,7 +437,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
                     await expect(result).rejects.toThrow("initialization failed");
                     await expect(result).rejects.toMatchObject({ cause });
                 }
-                expect(() => currentProbe()).toThrow("active transaction test session");
+                expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
             });
             throw cause;
         });
@@ -445,7 +445,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
         release();
         await detached;
         expect(callback).not.toHaveBeenCalled();
-        expect(() => currentProbe()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
     });
 
     it("allocates hook provenance storage only when an afterCommit callback runs", async () => {
@@ -487,8 +487,8 @@ describe("currentProbe() accessor and portable lifecycle", () => {
     });
 
     it("rejects access outside a session, even without a registered datasource", () => {
-        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test session");
-        expect(() => currentProbe(Symbol("missing"))).toThrow("currentProbe() requires an active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
+        expect(() => currentProbe(Symbol("missing"))).toThrow("currentProbe() requires an active transaction test callback");
     });
 
     it("returns the exact probe across awaits in mock and integration helpers", async () => {
@@ -506,7 +506,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
                 expect(currentProbe()).toBe(tx);
             })();
         });
-        expect(() => currentProbe()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
     });
 
     it("keeps concurrent integration sessions and named mock sessions separate", async () => {
@@ -534,7 +534,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
         const gate = new Promise<void>(resolve => { release = resolve; });
         let dangling!: Promise<void>;
         await mockTransactions(() => {
-            dangling = gate.then(() => { expect(() => currentProbe()).toThrow("active transaction test session"); });
+            dangling = gate.then(() => { expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback"); });
         });
         release();
         await dangling;
@@ -546,7 +546,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
             const gate = new Promise<void>(resolve => { release = resolve; });
             let dangling!: Promise<void>;
             await mockTransactions(() => {
-                dangling = gate.then(() => { expect(() => currentProbe()).toThrow("active transaction test session"); });
+                dangling = gate.then(() => { expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback"); });
             }, { datasource: Symbol("inner") });
             expect(currentProbe()).toBe(outer);
             release();
@@ -573,7 +573,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
         expect(begin).toHaveBeenCalledTimes(1);
         expect(rollback).toHaveBeenCalledTimes(1);
         expect(release).toHaveBeenCalledTimes(1);
-        expect(() => currentProbe()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
         begin.mockRestore();
         await withTestTransaction(() => {});
     });
@@ -590,7 +590,7 @@ describe("currentProbe() accessor and portable lifecycle", () => {
         expect(callback).not.toHaveBeenCalled();
         expect(rollback).not.toHaveBeenCalled();
         expect(release).not.toHaveBeenCalled();
-        expect(() => currentProbe()).toThrow("active transaction test session");
+        expect(() => currentProbe()).toThrow("currentProbe() requires an active transaction test callback");
     });
 
     it.each([undefined, new Error("application")])("retains application failure %p when physical release fails", async applicationError => {

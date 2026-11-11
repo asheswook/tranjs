@@ -25,7 +25,6 @@ class AuditService {
     async recordAudit(): Promise<void> { await this.repository.insertAudit(); }
 }
 class IndependentAuditService extends AuditService {
-    // Agent mistake: an atomic write was changed from REQUIRED to REQUIRES_NEW.
     @Transactional(Propagation.REQUIRES_NEW)
     async recordAudit(): Promise<void> { await this.repository.insertAudit(); }
 }
@@ -42,7 +41,6 @@ class OrderService {
     }
 }
 class MissingDecoratorOrderService extends OrderService {
-    // Agent mistake: @Transactional was removed from the entry point.
     async placeOrder(): Promise<void> {
         await this.writeOrder();
         await afterCommit(() => this.mailer.sendReceipt());
@@ -52,7 +50,6 @@ class PrematureEmailOrderService extends OrderService {
     @Transactional()
     async placeOrder(): Promise<void> {
         await this.writeOrder();
-        // Agent mistake: the side effect moved from afterCommit into the body.
         await this.mailer.sendReceipt();
     }
 }

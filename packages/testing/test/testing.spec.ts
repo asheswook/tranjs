@@ -3,7 +3,7 @@ import {
     getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, transactional,
     Transactional, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
-import { mockTransactions, TestTransactionInfo, TestTransactionProbe, withTestTransaction } from "../src";
+import { mockTransactions, TestTransactionRecord, TestTransactionProbe, withTestTransaction } from "../src";
 import { FakeTransactionManager } from "../src/fake";
 import { testSession } from "../../core/src/internal";
 
@@ -274,7 +274,7 @@ describe("mockTransactions", () => {
             retained = gate.then(async () => {
                 expect(getTransactionManager()).toBe(original);
                 for (const propagation of Object.values(Propagation)) {
-                    await expect(transactional(callback, { propagation })()).rejects.toThrow("closed or broken");
+                    await expect(transactional(callback, { propagation })()).rejects.toThrow("The test transaction has finished or could not be restored");
                 }
             });
         });
@@ -474,7 +474,7 @@ describe("withTestTransaction", () => {
         const physicalCommit = jest.spyOn(manager as any, "commitTransaction");
         const physicalRollback = jest.spyOn(manager as any, "rollbackTransaction");
         const physicalRelease = jest.spyOn(manager as any, "releaseTransaction");
-        let info!: TestTransactionInfo;
+        let info!: TestTransactionRecord;
         const committed = jest.fn();
         const rolledBack = jest.fn();
         expect(await withTestTransaction(async tx => {
@@ -508,7 +508,7 @@ describe("withTestTransaction", () => {
     it.each([new Error("application"), undefined, null, "plain value"])("preserves thrown value %p", async error => {
         const physicalRollback = jest.spyOn(manager as any, "rollbackTransaction");
         const physicalRelease = jest.spyOn(manager as any, "releaseTransaction");
-        let info!: TestTransactionInfo;
+        let info!: TestTransactionRecord;
         await expect(withTestTransaction(tx => {
             const work = tx.track(jest.fn());
             return transactional(() => {
@@ -725,9 +725,9 @@ describe("withTestTransaction", () => {
                 const nested = transactional(() => {}, { propagation: Propagation.NESTED })();
                 await expect(nested).rejects.toBeInstanceOf(TransactionSystemError);
                 await expect(nested).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
-                await expect(transactional(callback)()).rejects.toThrow("closed or broken");
+                await expect(transactional(callback)()).rejects.toThrow("The test transaction has finished or could not be restored");
                 await expect(transactional(callback, { propagation: Propagation.REQUIRES_NEW })())
-                    .rejects.toThrow("closed or broken");
+                    .rejects.toThrow("The test transaction has finished or could not be restored");
                 expect(callback).not.toHaveBeenCalled();
             })()).rejects.toThrow("rollback-only");
         })).rejects.toMatchObject({ cause: recoveryError, applicationError: constraintError });
@@ -940,7 +940,7 @@ describe("withTestTransaction", () => {
             tx.failNext("commit", { containing: work, error: commitError });
             tx.failNext("rollback", { containing: work, error: new Error("injected") });
             await expect(transactional(work)()).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
-            await expect(transactional(work)()).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: nativeError, applicationError: commitError });
     });
@@ -964,7 +964,7 @@ describe("withTestTransaction", () => {
             await expect(result).rejects.toMatchObject({ cause: recoveryError, applicationError });
             expect(tx.txOf(work)!.outcome).toBe("rolled-back");
             expect(poisoned.getCurrentTransaction()).toBeUndefined();
-            await expect(transactional(work)()).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
             expect(tx.records).toHaveLength(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
@@ -1007,7 +1007,7 @@ describe("withTestTransaction", () => {
             expect(tx.txOf(work)!.outcome).toBe("rolled-back");
             expect(rolledBack).toHaveBeenCalledTimes(1);
             expect(committed).not.toHaveBeenCalled();
-            await expect(transactional(work)()).rejects.toThrow("closed or broken");
+            await expect(transactional(work)()).rejects.toThrow("The test transaction has finished or could not be restored");
             expect(work).toHaveBeenCalledTimes(1);
         })).rejects.toMatchObject({ cause: recoveryError, applicationError });
         expect(rollback).toHaveBeenCalledTimes(1);

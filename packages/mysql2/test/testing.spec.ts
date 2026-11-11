@@ -293,7 +293,7 @@ describe("withTestTransaction / mysql2 pool (real database)", () => {
             try {
                 await started.promise;
                 const callback = jest.fn();
-                await expect(tx(callback, { propagation: attempted })).rejects.toThrow(/overlap|concurr|parallel|sibling nested/i);
+                await expect(tx(callback, { propagation: attempted })).rejects.toThrow("Transactions overlap inside withTestTransaction");
                 expect(callback).not.toHaveBeenCalled();
             } finally {
                 finish.resolve();

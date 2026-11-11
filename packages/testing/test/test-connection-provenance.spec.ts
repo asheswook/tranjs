@@ -20,7 +20,7 @@ it.each([false, true])("retains withTestConnection denial through nested test se
         await withTestConnection(async () => {
             const nested = () => mockTransactions(async () => {
                 let calls = 0;
-                await expect(transactional(() => { calls++; })()).rejects.toThrow("forbidden inside a withTestConnection callback");
+                await expect(transactional(() => { calls++; })()).rejects.toThrow("A transaction cannot start inside a withTestConnection callback");
                 expect(calls).toBe(0);
             });
             if (hook) await afterCommit(nested);

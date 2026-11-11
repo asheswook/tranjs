@@ -11,6 +11,109 @@ function runNode(script: string, esm = false): void {
 }
 
 describe("built package exports", () => {
+    const managerScript = `
+        const assert = require('node:assert/strict');
+        const core = require('@tranjs/core');
+        const testing = require('@tranjs/testing');
+        let rollbacks = 0;
+        let releases = 0;
+        class Manager extends core.PlatformTransactionManager {
+            async beginTransaction() { return { transaction: {}, metadata: { driverName: 'promise-test' } }; }
+            async commitTransaction() {}
+            async rollbackTransaction() { rollbacks++; }
+            async releaseTransaction() { releases++; }
+            async createSavepoint() {}
+            async rollbackToSavepoint() {}
+            async releaseSavepoint() {}
+        }
+        core.useTransactionManager(new Manager());
+        const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+    `;
+
+    it("reports unawaited rejections that settle before the integration callback finishes", () => {
+        runNode(managerScript + `
+            const unhandled = [];
+            process.on('unhandledRejection', error => { unhandled.push(error); });
+            (async () => {
+                for (const mode of ['production', 'mock', 'integration']) {
+                    const expected = [];
+                    const body = async () => {
+                        const direct = new Error(mode + ' direct');
+                        const decorated = new Error(mode + ' decorated');
+                        const joined = new Error(mode + ' joined');
+                        expected.push(direct, decorated, joined);
+                        void core.transactional(() => { throw direct; })();
+                        await pause(20);
+                        const descriptor = { value() { throw decorated; }, configurable: true, writable: true };
+                        core.Transactional()({}, 'fail', descriptor);
+                        void descriptor.value();
+                        await pause(20);
+                        await core.transactional(() => {
+                            void core.transactional(async () => { await pause(5); throw joined; })();
+                        })();
+                        await pause(20);
+                        assert.deepEqual(unhandled.splice(0), expected);
+                    };
+                    if (mode === 'production') await body();
+                    else if (mode === 'mock') await testing.mockTransactions(body);
+                    else await testing.withTestTransaction(body);
+                    await pause(10);
+                    assert.deepEqual(unhandled, []);
+                }
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+        `);
+    });
+
+    it("reports a rejected call still pending at exit without a second unhandled rejection", () => {
+        runNode(managerScript + `
+            const unhandled = [];
+            process.on('unhandledRejection', error => { unhandled.push(error); });
+            (async () => {
+                let finish;
+                const gate = new Promise(resolve => { finish = resolve; });
+                const failure = new Error('late failure');
+                const operation = testing.withTestTransaction(() => {
+                    void core.transactional(async () => { await gate; throw failure; })();
+                });
+                const checked = assert.rejects(operation, error => {
+                    assert(error instanceof AggregateError);
+                    assert.equal(error.message, 'withTestTransaction callback returned while 1 transaction was still running');
+                    assert(error.errors.includes(failure));
+                    return true;
+                });
+                await pause(20);
+                assert.equal(rollbacks, 0);
+                finish();
+                await checked;
+                await pause(20);
+                assert.deepEqual(unhandled, []);
+                assert.equal(rollbacks, 1);
+                assert.equal(releases, 1);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+        `);
+    });
+
+    it("warns while forgotten work never settles without releasing its connection", () => {
+        runNode(managerScript + `
+            const warnings = [];
+            console.warn = message => { warnings.push(message); };
+            let finished = false;
+            testing.withTestTransaction(() => {
+                void core.transactional(() => new Promise(() => {}))();
+            }).then(() => { finished = true; }, () => { finished = true; });
+            setTimeout(() => {
+                try {
+                    assert.equal(finished, false);
+                    assert.deepEqual(warnings, [
+                        'withTestTransaction is still waiting for unfinished work after its callback returned (1 second)',
+                    ]);
+                    assert.equal(rollbacks, 0);
+                    assert.equal(releases, 0);
+                } catch (error) { console.error(error); process.exitCode = 1; }
+            }, 1200);
+        `);
+    });
+
     it("supports requiring the testing package", () => {
         runNode(`
             const assert = require('node:assert/strict');

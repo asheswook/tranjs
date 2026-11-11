@@ -4,7 +4,7 @@ export {
     mockTransactions, currentProbe, withTestTransaction,
 } from "./session";
 export type {
-    TestFailureSelector, TestTransactionInfo, TestTransactionProbe,
+    TestFailureSelector, TestTransactionRecord, TestTransactionProbe,
 } from "./session";
 export {
     assertAfterCommitOf, assertCommitted, assertOutsideTransaction, assertRolledBack,
