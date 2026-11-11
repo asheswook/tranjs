@@ -65,8 +65,11 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
         return createPostgresTestConnection(tx, lease);
     }
 
-    protected testTransactionAbortedError(cause: unknown): Error {
-        return Object.assign(new TransactionAbortedError(), { cause });
+    protected testTransactionCommitError(cause: unknown): unknown {
+        if ((cause as { code?: string })?.code === "25P02") {
+            return Object.assign(new TransactionAbortedError(), { cause });
+        }
+        return cause;
     }
 
     private readonly wrappers = new WeakMap<ReservedTransactionSql, TransactionSql>();

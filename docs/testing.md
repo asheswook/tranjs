@@ -514,7 +514,7 @@ Use real timers and await the work. The same option works in service scopes unde
 | Failure | Result / action |
 |---|---|
 | Cleanup after application failure | `TransactionSystemError.applicationError` retains the application failure; `cause` retains cleanup failure |
-| Caught PostgreSQL SQL error leaves owner aborted | Savepoint completion recovers, runs rollback hooks, and rejects: `@tranjs/pg` uses `TestTransactionAbortedError` (`25P02`); `@tranjs/postgres` uses `TransactionAbortedError` |
+| Caught PostgreSQL SQL error leaves owner aborted | Savepoint completion recovers, runs rollback hooks, and rejects with `TransactionAbortedError` in both `@tranjs/pg` and `@tranjs/postgres` |
 | Recovery fails | Session is poisoned; stop opening scopes. Callback `finally` still runs for ordinary resource cleanup |
 | Recovery and final physical rollback both fail | Outer `cause` = physical rollback error; outer `applicationError` = recovery `TransactionSystemError`, whose `cause` = recovery error and `applicationError` = original failure |
 | Final cleanup fails | Reset the database; do not assume isolation held |

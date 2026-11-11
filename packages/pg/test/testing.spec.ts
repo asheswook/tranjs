@@ -5,7 +5,7 @@ import {
     useTransactionManager,
 } from "@tranjs/core";
 import { withTestTransaction } from "@tranjs/testing";
-import { ctx, PostgreSQLClientPerTransactionManager, PostgreSQLTransactionManager } from "../src";
+import { ctx, PostgreSQLClientPerTransactionManager, PostgreSQLTransactionManager, TransactionAbortedError } from "../src";
 
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
 const failure = new Error("application failure");
@@ -193,6 +193,33 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
         });
     });
 
+    it.each([false, true])("rejects the same caught-error service with TransactionAbortedError (test session: %s)", async integration => {
+        const committed = jest.fn();
+        const rolledBack = jest.fn();
+        const service = () => tx(async () => {
+            afterCommit(committed, datasource);
+            afterRollback(rolledBack, datasource);
+            await insert(1);
+            await expect(ctx(datasource).query("SELECT 1 / 0")).rejects.toMatchObject({ code: "22012" });
+            return "service returned normally";
+        });
+        const check = async () => {
+            const operation = service();
+            await expect(operation).rejects.toBeInstanceOf(TransactionAbortedError);
+            if (integration) await expect(operation).rejects.toMatchObject({ cause: { code: "25P02" } });
+            expect(committed).not.toHaveBeenCalled();
+            expect(rolledBack).toHaveBeenCalledTimes(1);
+        };
+        if (integration) {
+            await test(async probe => {
+                await check();
+                expect(probe.records.map(record => record.outcome)).toEqual(["rolled-back"]);
+                expect(await tx(ids)).toEqual([]);
+            });
+        } else await check();
+        expect(await outsideIds()).toEqual([]);
+    });
+
     it("recovers an aborted savepoint when application code catches a PostgreSQL query error", async () => {
         const hooks: string[] = [];
         await test(async () => {
@@ -202,7 +229,7 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
                 await tx(async () => {
                     await expect(insert(1)).rejects.toMatchObject({ code: "23505" });
                 });
-            })).rejects.toThrow(/aborted|savepoint|release|commit/i);
+            })).rejects.toBeInstanceOf(TransactionAbortedError);
             expect(await tx(ids)).toEqual([]);
             await tx(async () => {
                 await insert(2);
@@ -211,7 +238,7 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
                     afterRollback(() => { hooks.push("rollback"); }, datasource);
                     await insert(3);
                     await expect(insert(3)).rejects.toMatchObject({ code: "23505" });
-                }, { propagation: Propagation.REQUIRES_NEW })).rejects.toThrow(/aborted|savepoint|release|commit/i);
+                }, { propagation: Propagation.REQUIRES_NEW })).rejects.toBeInstanceOf(TransactionAbortedError);
                 expect(hooks).toEqual(["rollback"]);
                 expect(await ids()).toEqual([2]);
                 await insert(4);

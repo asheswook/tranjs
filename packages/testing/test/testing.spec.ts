@@ -870,7 +870,7 @@ describe("withTestTransaction", () => {
         expect(manager.getCurrentTransaction()).toBeUndefined();
     });
 
-    it("wraps aborted savepoint commits with the fallback 25P02 error and recovers for the next owner", async () => {
+    it("preserves a third-party driver's native savepoint commit error and recovers for the next owner", async () => {
         const cause = Object.assign(new Error("transaction aborted"), { code: "25P02" });
         class AbortedManager extends FakeTransactionManager {
             private abortNextRelease = true;
@@ -897,7 +897,7 @@ describe("withTestTransaction", () => {
                 work();
                 afterCommit(committed);
                 afterRollback(rolledBack);
-            })()).rejects.toMatchObject({ name: "TestTransactionAbortedError", code: "25P02", cause });
+            })()).rejects.toBe(cause);
             expect(tx.txOf(work)!.outcome).toBe("rolled-back");
             expect(committed).not.toHaveBeenCalled();
             expect(rolledBack).toHaveBeenCalledTimes(1);

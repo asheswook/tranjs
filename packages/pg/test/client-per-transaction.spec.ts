@@ -58,24 +58,87 @@ describe("PostgreSQL client per transaction (real database)", () => {
     it("reports a COMMIT that PostgreSQL turned into ROLLBACK after a caught statement error", async () => {
         const afterCommit = jest.fn();
         const afterRollback = jest.fn();
-        await expect(runInTransaction(async () => {
+        await expect(transactional(async () => {
             registerAfterCommit(afterCommit);
             registerAfterRollback(afterRollback);
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
             try { await ctx().query("SELECT 1 / 0"); } catch { /* caught by application code */ }
             return "service returned normally";
-        })).rejects.toBeInstanceOf(TransactionAbortedError);
+        })()).rejects.toBeInstanceOf(TransactionAbortedError);
         expect(await ids()).toEqual([]);
         expect(afterCommit).not.toHaveBeenCalled();
         expect(afterRollback).toHaveBeenCalledTimes(1);
     });
 
     it("commits normally after a NESTED step failed and rolled back to its savepoint", async () => {
-        await runInTransaction(async () => {
+        await transactional(async () => {
             await ctx().query(`INSERT INTO ${table} VALUES (1)`);
-            await runInTransaction(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED }).catch(() => {});
-        });
+            await transactional(async () => { await ctx().query("SELECT 1 / 0"); }, { propagation: Propagation.NESTED })().catch(() => {});
+        })();
         expect(await ids()).toEqual([1]);
+    });
+
+    it("rejects the owner COMMIT after a joined REQUIRED scope catches a SQL error", async () => {
+        const afterCommit = jest.fn();
+        const afterRollback = jest.fn();
+        const result = transactional(async () => {
+            registerAfterCommit(afterCommit);
+            registerAfterRollback(afterRollback);
+            const outer = ctx();
+            await outer.query(`INSERT INTO ${table} VALUES (1)`);
+            await expect(transactional(async () => {
+                expect(ctx()).toBe(outer);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                await expect(ctx().query("SELECT 1 / 0")).rejects.toMatchObject({ code: "22012" });
+                return "joined scope returned normally";
+            }, { propagation: Propagation.REQUIRED })()).resolves.toBe("joined scope returned normally");
+            expect(afterRollback).not.toHaveBeenCalled();
+            expect(end).not.toHaveBeenCalled();
+            return "owner returned normally";
+        })();
+        await expect(result).rejects.toBeInstanceOf(TransactionAbortedError);
+        await expect(result).rejects.not.toBeInstanceOf(UnexpectedRollbackError);
+        expect(afterCommit).not.toHaveBeenCalled();
+        expect(afterRollback).toHaveBeenCalledTimes(1);
+        expect(end).toHaveBeenCalledTimes(1);
+        expect(await ids()).toEqual([]);
+        await transactional(async () => { await ctx().query(`INSERT INTO ${table} VALUES (3)`); })();
+        expect(end).toHaveBeenCalledTimes(2);
+        expect(await ids()).toEqual([3]);
+    });
+
+    it("rejects an aborted REQUIRES_NEW COMMIT without affecting the outer transaction", async () => {
+        const innerAfterCommit = jest.fn();
+        const innerAfterRollback = jest.fn();
+        const outerAfterCommit = jest.fn();
+        const outerAfterRollback = jest.fn();
+        await transactional(async () => {
+            registerAfterCommit(outerAfterCommit);
+            registerAfterRollback(outerAfterRollback);
+            const outer = ctx();
+            await outer.query(`INSERT INTO ${table} VALUES (1)`);
+            const inner = transactional(async () => {
+                expect(ctx()).not.toBe(outer);
+                registerAfterCommit(innerAfterCommit);
+                registerAfterRollback(innerAfterRollback);
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                await expect(ctx().query("SELECT 1 / 0")).rejects.toMatchObject({ code: "22012" });
+            }, { propagation: Propagation.REQUIRES_NEW })();
+            await expect(inner).rejects.toBeInstanceOf(TransactionAbortedError);
+            await expect(inner).rejects.not.toBeInstanceOf(UnexpectedRollbackError);
+            expect(innerAfterCommit).not.toHaveBeenCalled();
+            expect(innerAfterRollback).toHaveBeenCalledTimes(1);
+            expect(end).toHaveBeenCalledTimes(1);
+            expect(ctx()).toBe(outer);
+            await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+        })();
+        expect(outerAfterCommit).toHaveBeenCalledTimes(1);
+        expect(outerAfterRollback).not.toHaveBeenCalled();
+        expect(end).toHaveBeenCalledTimes(2);
+        expect(await ids()).toEqual([1, 3]);
+        await transactional(async () => { await ctx().query(`INSERT INTO ${table} VALUES (4)`); })();
+        expect(end).toHaveBeenCalledTimes(3);
+        expect(await ids()).toEqual([1, 3, 4]);
     });
 
     it("commits and ends the client exactly once", async () => {

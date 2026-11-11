@@ -209,12 +209,9 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         }
     }
 
-    /** Drivers may preserve their own public aborted-transaction error type. */
-    protected testTransactionAbortedError(cause: unknown): Error {
-        const error = new Error("PostgreSQL test transaction scope was aborted; savepoint commit failed and the scope was rolled back");
-        error.name = "TestTransactionAbortedError";
-        Object.assign(error, { cause, code: "25P02" });
-        return error;
+    /** Drivers may normalize savepoint completion failures to their public commit errors. */
+    protected testTransactionCommitError(cause: unknown): unknown {
+        return cause;
     }
 
     private async recoverTestSavepoint(tx: Tx, name: string): Promise<void> {
@@ -289,7 +286,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                             state.active = false;
                             await this.inScope(null, () => this.synchronize(state.afterRollback));
                         }
-                        if (savepoint && (error as { code?: string })?.code === "25P02") throw this.testTransactionAbortedError(error);
+                        if (savepoint) throw this.testTransactionCommitError(error);
                         throw error;
                     }
                     if (info) session!.complete(info, "committed");

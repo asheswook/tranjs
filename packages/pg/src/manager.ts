@@ -49,6 +49,13 @@ abstract class PostgreSQLManagerBase extends PlatformTransactionManager<PoolClie
         return createPgTestConnection(tx, lease);
     }
 
+    protected testTransactionCommitError(cause: unknown): unknown {
+        if ((cause as { code?: string })?.code === "25P02") {
+            return Object.assign(new TransactionAbortedError(), { cause });
+        }
+        return cause;
+    }
+
     public checkDeadline(): number | undefined { return this.getRemainingTimeout(); }
 
     public wrapConnection(connection: PoolClient): PoolClient {
