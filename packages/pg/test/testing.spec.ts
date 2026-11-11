@@ -4,7 +4,7 @@ import {
     transactional, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
-import { withTestTransaction } from "@tranjs/testing";
+import { assertAfterCommitOf, assertOutsideTransaction, withTestTransaction } from "@tranjs/testing";
 import { ctx, PostgreSQLClientPerTransactionManager, PostgreSQLTransactionManager, TransactionAbortedError } from "../src";
 
 const url = process.env.PG_URL ?? "postgres://postgres:postgres@localhost:5432/postgres";
@@ -176,6 +176,120 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
             });
         });
         expect(events).toEqual(["commit", "rollback", "inner", "outer"]);
+    });
+
+    it("omitted named hooks follow the logical service owner rather than the hidden physical test transaction", async () => {
+        const events: string[] = [];
+        await test(async t => {
+            // The hidden physical transaction is not an ambient service owner.
+            await afterCommit(() => { events.push("outside owner"); });
+            afterRollback(() => { events.push("wrong physical rollback"); });
+            expect(events).toEqual(["outside owner"]);
+            const committed = t.track(function committed() { events.push("owner commit"); });
+            const joinedCommit = t.track(function joinedCommit() { events.push("joined commit"); });
+            const nestedCommit = t.track(function nestedCommit() { events.push("nested commit"); });
+            const wrongRollback = jest.fn();
+            const joined = t.track(async () => {
+                afterCommit(joinedCommit);
+                await insert(2);
+            });
+            const nested = t.track(async () => {
+                afterCommit(nestedCommit);
+                afterRollback(wrongRollback);
+                await insert(3);
+                throw failure;
+            });
+            const service = t.track(async () => {
+                afterCommit(committed);
+                afterRollback(wrongRollback);
+                await insert(1);
+                await tx(joined);
+                await expect(tx(nested, { propagation: Propagation.NESTED })).rejects.toBe(failure);
+                expect(await ids()).toEqual([1, 2]);
+                expect(events).toEqual(["outside owner"]);
+                expect(wrongRollback).not.toHaveBeenCalled();
+            });
+            await tx(service);
+            expect(events).toEqual(["outside owner", "owner commit", "joined commit", "nested commit"]);
+            expect(wrongRollback).not.toHaveBeenCalled();
+            expect(t.records).toHaveLength(1);
+            expect(t.txOf(service)?.outcome).toBe("committed");
+            expect(t.txOf(joined)).toBe(t.txOf(service));
+            expect(t.txOf(nested)).toBe(t.txOf(service));
+            for (const hook of [committed, joinedCommit, nestedCommit]) {
+                expect(t.txOf(hook)).toBeUndefined();
+                assertOutsideTransaction(hook);
+                assertAfterCommitOf(hook, service);
+            }
+            expect(await tx(ids)).toEqual([1, 2]);
+            expect(await outsideIds()).toEqual([]);
+        });
+        expect(events).toEqual(["outside owner", "owner commit", "joined commit", "nested commit"]);
+        expect(await outsideIds()).toEqual([]);
+    });
+
+    it("omitted named hooks separate REQUIRES_NEW children from the rolling-back logical owner", async () => {
+        const events: string[] = [];
+        await test(async t => {
+            const childCommit = t.track(function childCommit() { events.push("child commit"); });
+            const wrongCommit = jest.fn();
+            const child = t.track(async () => {
+                afterCommit(childCommit);
+                afterRollback(() => { events.push("wrong child rollback"); });
+                await insert(2);
+                expect(events).toEqual([]);
+            });
+            const failedChild = t.track(async () => {
+                afterCommit(wrongCommit);
+                afterRollback(() => { events.push("child rollback"); });
+                await insert(3);
+                expect(events).toEqual(["child commit"]);
+                throw failure;
+            });
+            const joined = t.track(async () => {
+                afterRollback(() => { events.push("joined rollback"); });
+            });
+            const nested = t.track(async () => {
+                afterRollback(() => { events.push("nested rollback"); });
+                await insert(5);
+                throw failure;
+            });
+            const service = t.track(async () => {
+                afterCommit(wrongCommit);
+                afterRollback(() => { events.push("owner rollback"); });
+                await insert(1);
+                await tx(joined);
+                await expect(tx(nested, { propagation: Propagation.NESTED })).rejects.toBe(failure);
+                expect(events).toEqual([]);
+                await tx(child, { propagation: Propagation.REQUIRES_NEW });
+                expect(events).toEqual(["child commit"]);
+                await expect(tx(failedChild, { propagation: Propagation.REQUIRES_NEW })).rejects.toBe(failure);
+                expect(events).toEqual(["child commit", "child rollback"]);
+                expect(await ids()).toEqual([1, 2]);
+                throw failure;
+            });
+            await expect(tx(service)).rejects.toBe(failure);
+            expect(events).toEqual(["child commit", "child rollback", "owner rollback", "joined rollback", "nested rollback"]);
+            expect(wrongCommit).not.toHaveBeenCalled();
+            expect(t.records).toHaveLength(3);
+            expect(t.txOf(service)?.outcome).toBe("rolled-back");
+            expect(t.txOf(joined)).toBe(t.txOf(service));
+            expect(t.txOf(nested)).toBe(t.txOf(service));
+            expect(t.txOf(child)?.outcome).toBe("committed");
+            expect(t.txOf(child)?.parent).toBe(t.txOf(service));
+            expect(t.txOf(failedChild)?.outcome).toBe("rolled-back");
+            expect(t.txOf(failedChild)?.parent).toBe(t.txOf(service));
+            expect(t.txOf(childCommit)).toBeUndefined();
+            assertOutsideTransaction(childCommit);
+            assertAfterCommitOf(childCommit, child);
+            expect(() => assertAfterCommitOf(childCommit, service)).toThrow();
+            expect(await tx(ids)).toEqual([]);
+            await tx(() => insert(4));
+            expect(await tx(ids)).toEqual([4]);
+            expect(await outsideIds()).toEqual([]);
+        });
+        expect(events).toEqual(["child commit", "child rollback", "owner rollback", "joined rollback", "nested rollback"]);
+        expect(await outsideIds()).toEqual([]);
     });
 
     it("uses an inner owner's own deadline and recovers the parent after timeout", async () => {

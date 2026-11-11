@@ -273,6 +273,31 @@ async function main() {
     }
     await add('propagation/invalid', ({ run }) => run(() => 42, { propagation: 'INVALID' }));
     await add('datasource/missing', ({ run }) => run(() => 42, { datasource: 'missing' }));
+    await add('hooks/implicit-named-datasource', async ({ run, mark, hook, manager }) => {
+        const datasource = 'analytics';
+        core.useTransactionManager(manager, datasource);
+        core.useTransactionManager(undefined);
+        try {
+            await run(() => {
+                core.afterCommit(hook('implicit-commit'));
+                core.afterCommit(hook('explicit-commit'), datasource);
+                core.afterRollback(hook('wrong-rollback'));
+                mark('commit-body');
+            }, { datasource });
+            try {
+                await run(() => {
+                    core.afterCommit(hook('wrong-commit'));
+                    core.afterRollback(hook('implicit-rollback'));
+                    core.afterRollback(hook('explicit-rollback'), datasource);
+                    mark('rollback-body');
+                    throw new Error('named body failed');
+                }, { datasource });
+            } catch (error) {
+                if (error.message !== 'named body failed') throw error;
+            }
+            return 'named hooks complete';
+        } finally { core.useTransactionManager(undefined, datasource); }
+    });
     await add('detached/new-transaction-after-commit', async ({ run, mark, manager }) => {
         let resume;
         const ready = new Promise(resolve => { resume = resolve; });

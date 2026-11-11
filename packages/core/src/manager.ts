@@ -64,16 +64,23 @@ export function transactional<This, Args extends unknown[], R>(
     };
 }
 
-/** Register on the physical transaction; without an active transaction, run immediately. */
-export function afterCommit(fn: TransactionSynchronization, datasource: string | symbol = DEFAULT_DATASOURCE): void | Promise<void> {
-    const state = AsyncLocal.Frame?.txs.get(managers.get(datasource)!);
+function synchronizationState(datasource?: string | symbol): TxState | undefined {
+    const frame = AsyncLocal.Frame;
+    if (datasource !== undefined) return frame?.txs.get(managers.get(datasource)!) ?? undefined;
+    const context = AsyncLocal.Context;
+    return Array.from(frame?.txs.values() ?? []).find(state => state?.active && state.context === context) ?? undefined;
+}
+
+/** Register on the selected transaction, or the innermost active one when no datasource is given. */
+export function afterCommit(fn: TransactionSynchronization, datasource?: string | symbol): void | Promise<void> {
+    const state = synchronizationState(datasource);
     if (state?.active) state.afterCommit.push(fn);
     else return runTestProvenance("hook", fn);
 }
 
 /** Register on the physical transaction (including NESTED scopes); without one, ignore. */
-export function afterRollback(fn: TransactionSynchronization, datasource: string | symbol = DEFAULT_DATASOURCE): void {
-    const state = AsyncLocal.Frame?.txs.get(managers.get(datasource)!);
+export function afterRollback(fn: TransactionSynchronization, datasource?: string | symbol): void {
+    const state = synchronizationState(datasource);
     if (state?.active) state.afterRollback.push(fn);
 }
 

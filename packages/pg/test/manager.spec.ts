@@ -475,6 +475,53 @@ describe("PostgreSQL driver (real database)", () => {
         expect(await ids()).toEqual([2]);
     });
 
+    it.each([false, true])("omitted named-datasource hooks run only after physical SQL completion (rollback: %s)", async rollback => {
+        const events: string[] = [];
+        const observedRows: number[][] = [];
+        const committed = jest.fn(async () => {
+            events.push("commit hook");
+            observedRows.push(await ids());
+        });
+        const rolledBack = jest.fn(async () => {
+            events.push("rollback hook");
+            observedRows.push(await ids());
+        });
+        let querySpy: jest.SpyInstance | undefined;
+        try {
+            const operation = transactional(async () => {
+                const connection = getTransactionManager(second).getCurrentTransaction() as NativeClient;
+                const query = connection.query;
+                querySpy = jest.spyOn(connection, "query").mockImplementation(((...args: any[]) => {
+                    const result = Reflect.apply(query, connection, args);
+                    if (args[0] === "COMMIT" || args[0] === "ROLLBACK") {
+                        return Promise.resolve(result).then(completed => {
+                            events.push(`SQL ${completed.command}`);
+                            return completed;
+                        });
+                    }
+                    return result;
+                }) as any);
+                registerAfterCommit(committed);
+                registerAfterRollback(rolledBack);
+                await ctx(second).query(`INSERT INTO ${table} VALUES (1)`);
+                expect(await ids()).toEqual([]);
+                expect(committed).not.toHaveBeenCalled();
+                expect(rolledBack).not.toHaveBeenCalled();
+                if (rollback) throw failure;
+            }, { datasource: second })();
+            if (rollback) await expect(operation).rejects.toBe(failure);
+            else await operation;
+            expect(events).toEqual(rollback ? ["SQL ROLLBACK", "rollback hook"] : ["SQL COMMIT", "commit hook"]);
+            expect(observedRows).toEqual([rollback ? [] : [1]]);
+            expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 1);
+            expect(rolledBack).toHaveBeenCalledTimes(rollback ? 1 : 0);
+            expect(await ids()).toEqual(rollback ? [] : [1]);
+        } finally {
+            querySpy?.mockRestore();
+            await pool.query(`DELETE FROM ${table}`);
+        }
+    });
+
     it("throws the compatibility error outside a transaction", () => {
         expect(() => ctx()).toThrow("Transaction context not initialized");
     });
