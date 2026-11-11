@@ -4,7 +4,7 @@
   "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/mysql2" },
   "version": "1.3.0",
   "description": "TranJS driver for mysql2. (MySQL)",
-  "homepage": "https://github.com/asheswook/tranjs/tree/main/packages/mysql2#readme",
+  "homepage": "https://github.com/asheswook/tranjs#readme",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

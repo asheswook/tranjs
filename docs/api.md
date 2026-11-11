@@ -219,7 +219,7 @@ The transaction config, `ctx()` and the hooks each take an optional datasource a
 | `ctx()` | The innermost active transaction in the current async context, whatever its datasource | The current transaction of the manager registered under that name |
 | `afterCommit` / `afterRollback` | The innermost active transaction in the current async context, whatever its datasource | The current transaction of the manager registered under that name |
 
-When transactions on two datasources are nested, the inner one is the innermost, in either nesting order: `ctx()` returns its connection and hooks attach to it. An explicit name selects that datasource's transaction, including an outer one.
+When transactions on two datasources are nested, the inner one is selected, in either nesting order: `ctx()` returns its connection and hooks attach to it. An explicit name selects that datasource's transaction, including an outer one.
 
 `ctx()` throws in these cases:
 
@@ -232,13 +232,13 @@ When transactions on two datasources are nested, the inner one is the innermost,
 | Name given, its manager has no active transaction | `Error("Transaction context not initialized")` |
 | Called from work that kept the async context of a completed inner transaction, with the name omitted or naming that transaction's datasource | `TransactionClosedError`, even while an outer transaction is still active. `ctx()` does not fall back to the outer connection. |
 
-"No active transaction" includes `SUPPORTS`, `NOT_SUPPORTED` and `NEVER` scopes that run without one.
+"No active transaction" includes `SUPPORTS`, `NOT_SUPPORTED` and `NEVER` scopes that run without one. A transaction suspended by `NOT_SUPPORTED` or `REQUIRES_NEW` is not active inside that scope. A transaction on another datasource is not suspended by it and still counts.
 
 The hooks do not throw. When the selection finds no active transaction, `afterCommit` runs the callback immediately and `afterRollback` does nothing. That covers an explicit name whose manager has no active transaction in the current async context, including a name with no registration: a misspelt name makes `afterCommit` run its callback before the commit.
 
 A hook registered from work that kept the async context of a completed inner transaction does not attach to that transaction. With the name omitted, it attaches to an outer transaction on another datasource that is still active. Without one it is handled as outside a transaction, which includes a completed `REQUIRES_NEW` transaction on the same datasource as its outer transaction.
 
-This selection ships in `@tranjs/core` 1.2.1 (hooks) together with `@tranjs/pg` 1.3.1, `@tranjs/mysql2` 1.3.1 and `@tranjs/postgres` 1.2.1 (`ctx()`). In earlier versions an omitted datasource in `ctx()` and the hooks meant the default datasource.
+This selection ships in `@tranjs/core` 1.2.1 (hooks) together with `@tranjs/pg` 1.3.1, `@tranjs/mysql2` 1.3.1 and `@tranjs/postgres` 1.2.1 (`ctx()`).
 
 ## Testing helpers
 

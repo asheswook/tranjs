@@ -136,7 +136,7 @@ Core generates savepoint names and manages rollback-only state, including the [r
 
 The minimal `ctx()` above returns the raw connection. Core checks deadlines before commit, but query-level enforcement needs a wrapper. The [bundled driver wrappers](../packages/pg/src/manager.ts) are examples.
 
-`getRemainingTimeout()` is protected. The bundled drivers expose it through a public method and call it before each query. It returns the remaining milliseconds, or `undefined` without a deadline; on expiry it marks rollback-only and throws `TransactionTimeoutError`. The bundled drivers then pass the remaining time as the driver's per-query timeout, replacing any user or pool timeout, including a shorter one. That is their choice, not a core rule: a custom driver can take the smaller of the two. Without a deadline they leave the query options untouched.
+`getRemainingTimeout()` is protected. The bundled drivers expose it through a public method and call it before each query. It returns the remaining milliseconds, or `undefined` without a deadline; on expiry it marks rollback-only and throws `TransactionTimeoutError`. The bundled drivers then pass the remaining time as the driver's per-query timeout, replacing any user or pool timeout, including a shorter one. That is their choice, not a core rule: a custom driver can take the smaller of the two. Without a deadline they leave the query options untouched. Their wrappers bind every other connection method to the real connection.
 
 When that injected timer fires, the protected `expireTransaction()` marks the transaction rollback-only and returns a `TransactionTimeoutError` without rechecking the clock: timers can fire just before `Date.now()` reaches the deadline. It returns `undefined` without a deadline.
 
