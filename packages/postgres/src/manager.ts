@@ -114,6 +114,8 @@ abstract class PostgresManagerBase extends PlatformTransactionManager<ReservedTr
                     return (channel: string, payload: string) =>
                         wrapper`select pg_notify(${channel}, ${"" + payload})`.then(() => undefined);
                 }
+                // Inherited bind/valueOf methods must receive the proxy, not the native SQL function.
+                if (!Object.prototype.hasOwnProperty.call(target, property)) return value;
                 // Pure serializer helpers must retain their identity and custom properties.
                 if (property === "typed" || property === "types") return value;
                 if (typeof value === "function") return new Proxy(value, {

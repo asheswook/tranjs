@@ -445,6 +445,29 @@ describe("postgres.js pool manager (real database)", () => {
         }, { timeout: 1000 })();
     });
 
+    it.each(["pool", "connection"])("keeps guarded SQL helpers as own reserved-function properties in %s mode", async mode => {
+        if (mode === "connection") usePostgresConnectionPerTransaction(url);
+        await transactional(async () => {
+            const native: any = raw();
+            const ownHelpers = ["unsafe", "file", "notify", "json", "array", "typed", "types"];
+            if (process.env.POSTGRES_MAJOR !== "3") ownHelpers.push("batch", "identifier");
+            for (const name of ownHelpers) {
+                expect(Object.prototype.hasOwnProperty.call(native, name)).toBe(true);
+                expect(typeof native[name]).toBe("function");
+            }
+            if (process.env.POSTGRES_MAJOR === "3") {
+                expect(native.batch).toBeUndefined();
+                expect(native.identifier).toBeUndefined();
+            }
+            for (const name of ["bind", "valueOf", "call", "apply"]) {
+                expect(Object.prototype.hasOwnProperty.call(native, name)).toBe(false);
+            }
+            const connection: any = ctx();
+            expect(connection.valueOf()).toBe(connection);
+            expect((await connection.bind(null)`SELECT 42 AS value`)[0].value).toBe(42);
+        })();
+    });
+
     it.each(["pool", "connection"])("preserves custom typed helpers and the types alias in %s mode", async mode => {
         const types = { bigint: postgres.BigInt };
         const custom = postgres(url, { max: 1, onnotice: false, types });
@@ -514,11 +537,13 @@ describe("postgres.js pool manager (real database)", () => {
         }, { timeout: 10000 })()).rejects.toThrow(UnexpectedRollbackError);
     });
 
-    it.each(["tagged", "unsafe", "then", "execute", "cursor", "forEach", "readable"])(
+    it.each(["tagged", "bind", "valueOf", "unsafe", "then", "execute", "cursor", "forEach", "readable"])(
         "checks an expired deadline before %s dispatch", async format => {
             await expect(transactional(async () => {
                 const connection = ctx();
-                const pending = format === "tagged" || format === "unsafe" ? undefined
+                const callable = format === "bind" ? (connection as any).bind(null)
+                    : format === "valueOf" ? connection.valueOf() as typeof connection : connection;
+                const pending = ["tagged", "bind", "valueOf", "unsafe"].includes(format) ? undefined
                     : format === "readable" ? connection.unsafe("COPY (SELECT 1) TO STDOUT") : connection`SELECT 1`;
                 // Driver debug is called only for dispatched SQL, not lazy query construction.
                 debug.mockClear();
@@ -527,7 +552,7 @@ describe("postgres.js pool manager (real database)", () => {
                     const dispatch = async () => {
                         const query = pending ?? (format === "unsafe" || format === "readable"
                             ? connection.unsafe(format === "readable" ? "COPY (SELECT 1) TO STDOUT" : "SELECT 1")
-                            : connection`SELECT 1`);
+                            : callable`SELECT 1`);
                         if (format === "execute") await query.execute();
                         else if (format === "cursor") { for await (const _rows of query.cursor(1)) { /* consume */ } }
                         else if (format === "forEach") await query.forEach(() => {});

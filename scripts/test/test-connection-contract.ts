@@ -74,13 +74,23 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             const operations: (() => unknown)[] = [];
             for (const method of methods) {
                 const bound = db[method].bind(db);
+                const nullBound = db[method].bind(null);
                 operations.push(() => db[method](`INSERT INTO ${table} VALUES (901)`));
                 operations.push(() => bound(`INSERT INTO ${table} VALUES (902)`));
+                operations.push(() => nullBound(`INSERT INTO ${table} VALUES (907)`));
             }
+            const value = db.valueOf();
+            operations.push(() => query(value, `INSERT INTO ${table} VALUES (906)`));
             if (driver.kind === "postgres") {
                 const bound = Function.prototype.bind.call(db, undefined);
+                const memberBound = db.bind(null);
+                const identifier = db(table);
                 operations.push(() => db`SELECT ${903}::integer AS n`);
                 operations.push(() => bound`SELECT ${904}::integer AS n`);
+                operations.push(() => memberBound`INSERT INTO ${identifier} VALUES (${905})`);
+                operations.push(() => value`INSERT INTO ${identifier} VALUES (${910})`);
+                operations.push(() => db.bind(null)`INSERT INTO ${identifier} VALUES (${908})`);
+                operations.push(() => db.valueOf()`INSERT INTO ${identifier} VALUES (${909})`);
             }
             return operations;
         };
@@ -710,7 +720,7 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             }
         });
 
-        it.each(["commit", "rollback"])("revokes production ctx and bound methods after %s, including detached helpers", async outcome => {
+        it.each(["commit", "rollback"])("revokes production ctx, bound methods and valueOf after %s, including during connection reuse", async outcome => {
             let cached: any;
             let late!: (() => unknown)[];
             let lookup!: () => any;
@@ -732,6 +742,8 @@ export function testConnectionContract(label: string, create: (options: { maxCon
             await tx(async () => {
                 expect(ambient()).not.toBe(cached);
                 expect(driver.rows(await query(ambient(), "SELECT 7 AS n"))).toHaveLength(1);
+                await assertClosed([lookup, detached, ...late]);
+                expect(await ids(ambient())).toEqual([]);
             });
         });
 
@@ -835,12 +847,14 @@ export function testConnectionContract(label: string, create: (options: { maxCon
                     }
                 });
                 await assertClosed(parentLate);
+                expect(await fix(ids)).toEqual([]);
                 await tx(async () => {
                     expect(ambient()).not.toBe(parent);
                     await query(ambient(), "SELECT 5 AS n");
                 });
             });
             await assertClosed(parentLate);
+            expect(driver.rows(await driver.outside(`SELECT id FROM ${table}`))).toEqual([]);
             const savepoints = dispatches.mock.calls.map(call => String(call[1])).filter(sql => /^SAVEPOINT /i.test(sql));
             expect(savepoints.length).toBeGreaterThan(0);
             expect(new Set(savepoints).size).toBe(savepoints.length);
