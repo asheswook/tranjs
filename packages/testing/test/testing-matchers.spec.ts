@@ -1,6 +1,7 @@
 import { AssertionError } from "node:assert";
+import { AsyncResource } from "node:async_hooks";
 import {
-    afterCommit, afterRollback, clearTransactionManager, getTransactionManager, Propagation,
+    afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, getTransactionManager, Propagation,
     transactional, TransactionSystemError, useTransactionManager,
 } from "@tranjs/core";
 import {
@@ -239,6 +240,80 @@ describe("framework-neutral transaction assertions", () => {
             })()).rejects.toThrow("rollback");
             assertOutsideTransaction(mail);
             check(mail).not.toRunAfterCommitOf(save);
+        });
+    });
+
+    it.each(["mock", "integration"])("never calls a commit hook from a rolled-back NESTED scope (%s)", async kind => {
+        if (kind === "integration") useTransactionManager(new FakeTransactionManager());
+        const helper = kind === "mock" ? mockTransactions : withTestTransaction;
+        await helper(async tx => {
+            const save = tx.track(function save() {});
+            const mail = tx.track(function mail() {});
+            const releasedMail = tx.track(function releasedMail() {});
+            const cleanup = tx.track(function cleanup() {});
+            await transactional(async () => {
+                save();
+                await transactional(() => { afterCommit(releasedMail); afterRollback(mail); }, Propagation.NESTED)();
+                await expect(transactional(() => {
+                    afterCommit(mail);
+                    afterRollback(cleanup);
+                    throw new Error("savepoint");
+                }, Propagation.NESTED)()).rejects.toThrow("savepoint");
+                // The savepoint's rollback hook ran inside the logical owner, which is still open.
+                assertSameTransaction(cleanup, save);
+            })();
+            assertCommitted(save);
+            expect(() => assertOutsideTransaction(mail)).toThrow("0 calls recorded");
+            assertAfterCommitOf(releasedMail, save);
+            check(cleanup).not.toRunAfterCommitOf(save);
+            expect(tx.records).toHaveLength(1);
+        });
+    });
+
+    it.each(["mock", "integration"])("a late hook invoked immediately is an outside call, not an afterCommit dispatch (%s)", async kind => {
+        if (kind === "integration") useTransactionManager(new FakeTransactionManager());
+        const helper = kind === "mock" ? mockTransactions : withTestTransaction;
+        await helper(async tx => {
+            const save = tx.track(function save() {});
+            const failedSave = tx.track(function failedSave() {});
+            const lateMail = tx.track(function lateMail() {});
+            const lateCleanup = tx.track(function lateCleanup() {});
+            const neverMail = tx.track(function neverMail() {});
+            let late!: <T>(fn: () => T) => T;
+            await transactional(() => { save(); late = AsyncResource.bind(<T>(fn: () => T): T => fn()); })();
+            late(() => { afterCommit(lateMail); void afterRollback(neverMail); });
+            await expect(transactional(() => {
+                failedSave();
+                late = AsyncResource.bind(<T>(fn: () => T): T => fn());
+                throw new Error("rollback");
+            })()).rejects.toThrow("rollback");
+            await late(() => { afterCommit(neverMail); return afterRollback(lateCleanup); });
+            assertCommitted(save);
+            assertRolledBack(failedSave);
+            // Both ran, after their transaction's logical outcome, but neither was dispatched by it.
+            assertOutsideTransaction(lateMail);
+            assertOutsideTransaction(lateCleanup);
+            expect(() => assertAfterCommitOf(lateMail, save)).toThrow(AssertionError);
+            check(lateMail).not.toRunAfterCommitOf(save);
+            check(lateCleanup).not.toRunAfterCommitOf(failedSave);
+            expect(() => assertOutsideTransaction(neverMail)).toThrow("0 calls recorded");
+        });
+    });
+
+    it("follows logical outcomes for an injected commit failure and an unregistered name inside a test session", async () => {
+        await mockTransactions(async tx => {
+            const save = tx.track(function save() {});
+            const cleanup = tx.track(function cleanup() {});
+            const mail = tx.track(function mail() {});
+            let late!: <T>(fn: () => T) => T;
+            tx.failNext("commit", { containing: save });
+            await expect(transactional(() => { save(); late = AsyncResource.bind(<T>(fn: () => T): T => fn()); })()).rejects.toThrow("commit failed");
+            await late(() => { afterCommit(mail); return afterRollback(cleanup); });
+            assertRolledBack(save);
+            assertOutsideTransaction(cleanup);
+            expect(() => assertOutsideTransaction(mail)).toThrow("0 calls recorded");
+            expect(() => afterCommit(mail, "unregistered")).toThrow(DatasourceSetupError);
+            expect(() => afterRollback(mail, "unregistered")).toThrow(DatasourceSetupError);
         });
     });
 

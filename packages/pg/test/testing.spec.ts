@@ -1,6 +1,7 @@
+import { AsyncResource } from "node:async_hooks";
 import { DatabaseError, Pool } from "pg";
 import {
-    afterCommit, afterRollback, clearTransactionManager, IsolationLevel, Propagation,
+    afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, IsolationLevel, Propagation,
     transactional, Transactional, TransactionTimeoutError, UnexpectedRollbackError,
     useTransactionManager,
 } from "@tranjs/core";
@@ -187,15 +188,16 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
             expect(events).toEqual(["outside owner"]);
             const committed = t.track(function committed() { events.push("owner commit"); });
             const joinedCommit = t.track(function joinedCommit() { events.push("joined commit"); });
-            const nestedCommit = t.track(function nestedCommit() { events.push("nested commit"); });
+            const discardedCommit = jest.fn();
+            const nestedRollback = t.track(function nestedRollback() { events.push("nested rollback"); });
             const wrongRollback = jest.fn();
             const joined = t.track(async () => {
                 afterCommit(joinedCommit);
                 await insert(2);
             });
             const nested = t.track(async () => {
-                afterCommit(nestedCommit);
-                afterRollback(wrongRollback);
+                afterCommit(discardedCommit);
+                afterRollback(nestedRollback);
                 await insert(3);
                 throw failure;
             });
@@ -206,17 +208,21 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
                 await tx(joined);
                 await expect(tx(nested, { propagation: Propagation.NESTED })).rejects.toBe(failure);
                 expect(await ids()).toEqual([1, 2]);
-                expect(events).toEqual(["outside owner"]);
+                // The savepoint rollback already ran the NESTED scope's rollback hook.
+                expect(events).toEqual(["outside owner", "nested rollback"]);
                 expect(wrongRollback).not.toHaveBeenCalled();
             });
             await tx(service);
-            expect(events).toEqual(["outside owner", "owner commit", "joined commit", "nested commit"]);
+            expect(events).toEqual(["outside owner", "nested rollback", "owner commit", "joined commit"]);
             expect(wrongRollback).not.toHaveBeenCalled();
+            expect(discardedCommit).not.toHaveBeenCalled();
             expect(t.records).toHaveLength(1);
             expect(t.txOf(service)?.outcome).toBe("committed");
             expect(t.txOf(joined)).toBe(t.txOf(service));
             expect(t.txOf(nested)).toBe(t.txOf(service));
-            for (const hook of [committed, joinedCommit, nestedCommit]) {
+            // It ran while the logical owner was still open, not after its completion.
+            expect(t.txOf(nestedRollback)).toBe(t.txOf(service));
+            for (const hook of [committed, joinedCommit]) {
                 expect(t.txOf(hook)).toBeUndefined();
                 assertOutsideTransaction(hook);
                 assertAfterCommitOf(hook, service);
@@ -224,7 +230,7 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
             expect(await tx(ids)).toEqual([1, 2]);
             expect(await outsideIds()).toEqual([]);
         });
-        expect(events).toEqual(["outside owner", "owner commit", "joined commit", "nested commit"]);
+        expect(events).toEqual(["outside owner", "nested rollback", "owner commit", "joined commit"]);
         expect(await outsideIds()).toEqual([]);
     });
 
@@ -237,13 +243,13 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
                 afterCommit(childCommit);
                 afterRollback(() => { events.push("wrong child rollback"); });
                 await insert(2);
-                expect(events).toEqual([]);
+                expect(events).toEqual(["nested rollback"]);
             });
             const failedChild = t.track(async () => {
                 afterCommit(wrongCommit);
                 afterRollback(() => { events.push("child rollback"); });
                 await insert(3);
-                expect(events).toEqual(["child commit"]);
+                expect(events).toEqual(["nested rollback", "child commit"]);
                 throw failure;
             });
             const joined = t.track(async () => {
@@ -260,16 +266,17 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
                 await insert(1);
                 await tx(joined);
                 await expect(tx(nested, { propagation: Propagation.NESTED })).rejects.toBe(failure);
-                expect(events).toEqual([]);
+                expect(events).toEqual(["nested rollback"]);
                 await tx(child, { propagation: Propagation.REQUIRES_NEW });
-                expect(events).toEqual(["child commit"]);
+                expect(events).toEqual(["nested rollback", "child commit"]);
                 await expect(tx(failedChild, { propagation: Propagation.REQUIRES_NEW })).rejects.toBe(failure);
-                expect(events).toEqual(["child commit", "child rollback"]);
+                expect(events).toEqual(["nested rollback", "child commit", "child rollback"]);
                 expect(await ids()).toEqual([1, 2]);
                 throw failure;
             });
             await expect(tx(service)).rejects.toBe(failure);
-            expect(events).toEqual(["child commit", "child rollback", "owner rollback", "joined rollback", "nested rollback"]);
+            // The NESTED hook ran once, at its savepoint rollback, and not again for the owner.
+            expect(events).toEqual(["nested rollback", "child commit", "child rollback", "owner rollback", "joined rollback"]);
             expect(wrongCommit).not.toHaveBeenCalled();
             expect(t.records).toHaveLength(3);
             expect(t.txOf(service)?.outcome).toBe("rolled-back");
@@ -288,8 +295,81 @@ describe.each(["pool", "per-transaction"])("withTestTransaction / pg / %s (real 
             expect(await tx(ids)).toEqual([4]);
             expect(await outsideIds()).toEqual([]);
         });
-        expect(events).toEqual(["child commit", "child rollback", "owner rollback", "joined rollback", "nested rollback"]);
+        expect(events).toEqual(["nested rollback", "child commit", "child rollback", "owner rollback", "joined rollback"]);
         expect(await outsideIds()).toEqual([]);
+    });
+
+    it("applies savepoint and late-registration hook rules to logical outcomes on a real connection", async () => {
+        const events: string[] = [];
+        const wrong = jest.fn();
+        await test(async t => {
+            let lateNested!: () => void | Promise<void>;
+            const owner = t.track(async () => {
+                await insert(1);
+                await tx(async () => {
+                    afterCommit(() => { events.push("released commit"); });
+                    afterRollback(wrong);
+                    await insert(2);
+                }, { propagation: Propagation.NESTED });
+                await expect(tx(async () => {
+                    afterCommit(wrong);
+                    // The owner is still usable when a savepoint's rollback hooks run, for new savepoints too.
+                    afterRollback(async () => {
+                        await tx(() => insert(6), { propagation: Propagation.NESTED });
+                        events.push(`savepoint rollback sees ${await ids()}`);
+                    });
+                    await insert(3);
+                    lateNested = AsyncResource.bind(() => {
+                        afterCommit(wrong);
+                        return afterRollback(() => { events.push("late nested rollback"); });
+                    });
+                    throw failure;
+                }, { propagation: Propagation.NESTED })).rejects.toBe(failure);
+                expect(events).toEqual(["savepoint rollback sees 1,2,6"]);
+                await lateNested();
+                expect(events).toEqual(["savepoint rollback sees 1,2,6", "late nested rollback"]);
+            });
+            await tx(owner);
+            expect(events).toEqual(["savepoint rollback sees 1,2,6", "late nested rollback", "released commit"]);
+            expect(t.txOf(owner)?.outcome).toBe("committed");
+
+            const mail = t.track(function mail() { events.push("late mail"); });
+            let lateCommitted!: () => void | Promise<void>;
+            const committedOwner = t.track(async () => {
+                await insert(4);
+                lateCommitted = AsyncResource.bind(() => {
+                    afterRollback(wrong);
+                    return afterCommit(mail);
+                });
+            });
+            await tx(committedOwner);
+            await lateCommitted();
+            expect(events.slice(3)).toEqual(["late mail"]);
+            // Immediate invocation is a call outside a transaction, not a managed afterCommit dispatch.
+            assertOutsideTransaction(mail);
+            expect(() => assertAfterCommitOf(mail, committedOwner)).toThrow();
+
+            let lateRolledBack!: () => void | Promise<void>;
+            await expect(tx(async () => {
+                await insert(5);
+                lateRolledBack = AsyncResource.bind(() => {
+                    afterCommit(wrong);
+                    return afterRollback(async () => { events.push("late rollback"); });
+                });
+                throw failure;
+            })).rejects.toBe(failure);
+            const returned = lateRolledBack();
+            expect(returned).toBeInstanceOf(Promise);
+            await returned;
+            expect(events.slice(4)).toEqual(["late rollback"]);
+
+            expect(() => afterCommit(wrong, "unregistered")).toThrow(DatasourceSetupError);
+            expect(() => afterRollback(wrong, "unregistered")).toThrow(DatasourceSetupError);
+            expect(await tx(ids)).toEqual([1, 2, 4, 6]);
+            expect(await outsideIds()).toEqual([]);
+        });
+        expect(wrong).not.toHaveBeenCalled();
+        expect(events).toHaveLength(5);
     });
 
     it("uses an inner owner's own deadline and recovers the parent after timeout", async () => {

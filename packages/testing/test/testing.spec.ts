@@ -1,3 +1,4 @@
+import { AsyncResource } from "node:async_hooks";
 import {
     afterCommit, afterRollback, clearTransactionManager, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, IllegalTransactionStateException, IsolationLevel, Propagation, transactional,
@@ -594,6 +595,35 @@ describe("withTestTransaction", () => {
         await assertion;
         expect(rollbackSavepoint).not.toHaveBeenCalled();
         expect(releaseSavepoint).not.toHaveBeenCalled();
+    });
+
+    it("an owner abandoned by the end of the test has an unknown outcome: its hooks never report a commit", async () => {
+        const entered = deferred();
+        const resume = deferred();
+        const committed = jest.fn();
+        const rolledBack = jest.fn();
+        let operation!: Promise<void>;
+        let late!: <T>(fn: () => T) => T;
+        await withTestTransaction(async () => {
+            operation = transactional(async () => {
+                late = AsyncResource.bind(<T>(fn: () => T): T => fn());
+                afterCommit(committed);
+                afterRollback(rolledBack);
+                entered.resolve();
+                await resume.promise;
+            })();
+            await entered.promise;
+        });
+        const assertion = expect(operation).rejects.toThrow(TransactionClosedError);
+        resume.resolve();
+        await assertion;
+        // Hooks queued before the test ended are dropped with the abandoned owner, as before.
+        expect(committed).not.toHaveBeenCalled();
+        expect(rolledBack).not.toHaveBeenCalled();
+        expect(late(() => afterCommit(committed))).toBeUndefined();
+        await late(() => afterRollback(rolledBack));
+        expect(committed).not.toHaveBeenCalled();
+        expect(rolledBack).toHaveBeenCalledTimes(1);
     });
 
     it("shares joined and NESTED gates but closes a REQUIRES_NEW child without closing its parent", async () => {
