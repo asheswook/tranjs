@@ -95,7 +95,7 @@ function ctx(datasource?: string | symbol): Connection {
 
 After `register(pool, name?)` has run, `@Transactional` and `transactional` use this manager. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
 
-The example's `ctx()` looks its manager up by name, so an omitted name means the default datasource. The bundled drivers select the innermost active transaction instead; see [datasource selection](api.md#datasource-selection).
+The example's `ctx()` looks its manager up by name, so an omitted name means the default datasource. The bundled drivers select the innermost transaction instead; see [datasource selection](api.md#datasource-selection). `afterCommit` and `afterRollback` come from core and use that selection with any manager.
 
 `manager.assertCurrentTransactionOpen()` makes `ctx()` throw `TransactionClosedError` after the transaction ends. A connection kept from `ctx()` is not covered; the bundled drivers wrap it for the [connection lifetime check](drivers.md#connection-lifetime).
 

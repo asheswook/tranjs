@@ -114,7 +114,9 @@ The connection `ctx()` returns is a wrapper around the driver's connection. It f
 
 After a transaction or test ends, `ctx()` throws `TransactionClosedError` (exported by `@tranjs/core`) when called from work that outlived it. That holds while an outer transaction is still active: `ctx()` does not fall back to the outer connection (see [datasource selection](api.md#datasource-selection)). A connection kept from `ctx()` throws the same error when a query is run through it, and so do methods taken from it or bound. The error is thrown before the query is passed to the driver.
 
-The check needs `@tranjs/core` 1.2.0 with `@tranjs/pg` 1.3.0, `@tranjs/mysql2` 1.3.0 or `@tranjs/postgres` 1.2.0. Earlier versions ran these queries on a connection that had already gone back to the pool.
+The check needs `@tranjs/core` 1.2.0 with `@tranjs/pg` 1.3.0, `@tranjs/mysql2` 1.3.0 or `@tranjs/postgres` 1.2.0. Earlier versions ran these queries on a connection that had already gone back to the pool. Before `@tranjs/pg` 1.4.0, `@tranjs/mysql2` 1.4.0 and `@tranjs/postgres` 1.3.0, `ctx()` without a name always means the default datasource. The [selection across datasources](api.md#datasource-selection) needs one of those versions, each of which needs `@tranjs/core` 1.3.0.
+
+`afterCommit` and `afterRollback` do not throw for a finished transaction. They act on its outcome; see [hooks](api.md#hooks).
 
 A query already sent to the database can finish before cleanup. `withTestTransaction` does not wait for calls that were not awaited. TranJS does not detect a missing `await`. A lint rule such as `@typescript-eslint/no-floating-promises` is one way to catch it.
 

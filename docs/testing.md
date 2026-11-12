@@ -292,7 +292,7 @@ test("publishes after saving", () => mockTransactions(async tx => {
 }));
 ```
 
-`toRunAfterCommitOf` checks that the call came through that transaction's hook. Calling a function later, outside a transaction, is a different case. A function called inside a transaction that the hook starts does not match either; `tx.txOf(fn)` gives its record instead.
+`toRunAfterCommitOf` checks that the call came through that transaction's hook. Calling a function later, outside a transaction, is a different case. So is a hook that `afterCommit` calls immediately because its transaction had already finished: it is recorded as a call outside a transaction, and `toRunAfterCommitOf` fails for it. A function called inside a transaction that the hook starts does not match either; `tx.txOf(fn)` gives its record instead.
 
 node:test has no `expect`. Example with the `assert*` functions:
 
@@ -357,9 +357,9 @@ Passing both `containing` and `where` throws `TypeError`. With no selector, the 
 | Database transactions | The code opens and finishes transactions | One test transaction; transactions the code starts use savepoints |
 | `ctx()` outside a transaction the code starts | Throws | Also throws. `withTestConnection` and `transactional` functions both reach the test transaction. |
 | `REQUIRED`, `MANDATORY`, `SUPPORTS` | Join or require an existing transaction according to their propagation rules | The same rules; the test transaction does not count as one the code started |
-| `NESTED` | A savepoint shares its enclosing transaction's state, hooks and deadline | The same sharing, including one shared probe record |
+| `NESTED` | A savepoint shares its enclosing transaction's state and deadline. Its [hooks follow the savepoint](api.md#hooks-in-nested-scopes). | The same, including one shared probe record |
 | `REQUIRES_NEW` | An independent transaction with its own connection and committed data | A separate record on the same connection; sees enclosing writes and rolls back with them |
-| Commit hooks | Run after the database commits | Run after a successful savepoint, before the final rollback |
+| Hooks | Follow the commit or rollback of the database transaction | Follow the outcome of the transaction the code started, which is the outcome of its savepoint. They run before the final rollback, and the final rollback runs none. |
 | Service `isolationLevel` / `readOnly` | Apply when a database transaction starts | Recorded, but do not change the test transaction's settings |
 | Timeouts | Transaction deadlines and driver query checks | The same checks; arbitrary I/O may finish later and server cancellation depends on the driver |
 | Deferred PostgreSQL constraints | Checked according to their modes, including at COMMIT | Checked when a service or `NESTED` savepoint finishes, with the prior modes restored |

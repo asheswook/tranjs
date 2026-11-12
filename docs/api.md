@@ -17,11 +17,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 usePostgreSQLTransactionManager(pool);
 ```
 
-Registration replaces the manager for that datasource process-wide. A transaction that began under the previous manager keeps running, and `ctx()` without a name still returns its connection. Lookups by datasource resolve the new manager: a transactional call made inside the old transaction does not join it (`REQUIRED` begins a separate transaction, `MANDATORY` throws `IllegalTransactionStateException`), `ctx(name)` throws `Error("Transaction context not initialized")`, and a hook given an explicit name is handled as outside a transaction (see [Datasource selection](#datasource-selection)).
+Registration replaces the manager for that datasource process-wide. A transaction that began under the previous manager keeps running, and `ctx()` without a name still returns its connection. Lookups by datasource resolve the new manager: a transactional call made inside the old transaction does not join it (`REQUIRED` begins a separate transaction, `MANDATORY` throws `IllegalTransactionStateException`), `ctx(name)` throws `Error("Transaction context not initialized")`, and a hook given that name finds no transaction (see [Datasource selection](#datasource-selection)).
 
 `useTransactionManager(manager, name?)` registers any manager, including a [custom driver](self-implement-guide.md)'s. Omitting the name selects the default datasource. `getTransactionManager(name?)` retrieves a registered manager.
 
-`clearTransactionManager(name?)` removes the default or named manager registration and does nothing if none is registered. A transaction in progress still commits or rolls back, and `ctx()` without a name still returns its connection. From then on, lookups by datasource throw `DatasourceSetupError` until a manager is registered again: that covers transactional calls and `ctx(name)`. A hook given an explicit name is handled as outside a transaction.
+`clearTransactionManager(name?)` removes the default or named manager registration and does nothing if none is registered. A transaction in progress still commits or rolls back, and `ctx()` without a name still returns its connection. From then on, lookups by datasource throw `DatasourceSetupError` until a manager is registered again: that covers transactional calls, `ctx(name)` and a hook given that name. A hook with the name omitted still registers on the transaction in progress.
 
 ```typescript
 // Example: removing registrations.
@@ -127,7 +127,7 @@ If a method throws, its transaction rolls back and the error is rethrown. Errors
 
 If a method that joined an existing transaction (`REQUIRED`, `MANDATORY`, `SUPPORTS`) throws, the whole transaction is marked **rollback-only**. Catching the error in the outer method doesn't undo that: when the outer method returns, the transaction rolls back and `UnexpectedRollbackError` is thrown.
 
-A failing `NESTED` scope rolls back to its savepoint. A successful savepoint rollback clears the **entire** rollback-only flag, including any flag set before that nested scope began. If a nested callback returns normally while rollback-only, core rolls back to the savepoint, clears the flag, and throws `UnexpectedRollbackError`. The outer callback may catch it and commit. A failed savepoint rollback is logged, leaves the transaction rollback-only, and preserves the original exception. Resetting rollback-only never extends the deadline; the owner still checks it before commit.
+A failing `NESTED` scope rolls back to its savepoint. A successful savepoint rollback clears the **entire** rollback-only flag, including any flag set before that nested scope began. If a nested callback returns normally while rollback-only, core rolls back to the savepoint, clears the flag, and throws `UnexpectedRollbackError`. The outer callback may catch it and commit. A failed savepoint rollback is logged, leaves the transaction rollback-only, and preserves the original exception. Resetting rollback-only never extends the deadline; the owner still checks it before commit. Hooks registered in a `NESTED` scope follow its savepoint; see [Hooks](#hooks-in-nested-scopes).
 
 `NESTED` scopes inside each other are allowed. Two at once in the same parent (for example with `Promise.all`) throw `ConcurrentNestedTransactionError`, because a connection has one savepoint stack.
 
@@ -173,16 +173,57 @@ class OrderService {
 }
 ```
 
-`afterCommit(fn, datasource?)` and `afterRollback(fn, datasource?)` accept synchronous or async callbacks. They attach to a physical transaction: joined and `NESTED` scopes register on their owner's transaction, and a hook registered in a `NESTED` scope stays registered if that scope rolls back to its savepoint. [Datasource selection](#datasource-selection) describes which transaction an omitted or explicit `datasource` selects.
+```typescript
+// Signatures of the hooks. TransactionSynchronization is exported by @tranjs/core.
+type TransactionSynchronization = () => void | Promise<void>;
+function afterCommit(fn: TransactionSynchronization, datasource?: string | symbol): void | Promise<void>;
+function afterRollback(fn: TransactionSynchronization, datasource?: string | symbol): void | Promise<void>;
+```
+
+`afterCommit(fn, datasource?)` and `afterRollback(fn, datasource?)` accept synchronous or async callbacks. Each call selects one transaction, and what the call does depends on the state of that transaction. [Datasource selection](#datasource-selection) describes which transaction an omitted or explicit `datasource` selects. A hook is never moved to another transaction.
+
+| State of the selected transaction | `afterCommit(fn)` | `afterRollback(fn)` |
+|---|---|---|
+| None selected | Calls `fn` immediately and returns its result | Does nothing |
+| In progress, including while it is committing or rolling back | Calls `fn` after it commits | Calls `fn` after it rolls back, or after its commit or rollback fails |
+| Committed | Calls `fn` immediately and returns its result | Does nothing |
+| Rolled back, or its commit or rollback failed | Does nothing | Calls `fn` immediately |
+
+The last two rows apply to work that outlives the transaction it started in, such as a timer or a promise that was not awaited.
+
+Hooks registered on a transaction in progress run when it completes:
 
 | Hook | Behavior |
 |---|---|
-| `afterCommit` | Runs sequentially in registration order after successful commit. The first error stops later hooks and propagates to the caller. The transaction remains committed; no rollback or `afterRollback` hooks run. |
-| `afterRollback` | Runs in registration order after rollback, including failed rollback, or after failed commit. Errors are logged and swallowed so later hooks still run. |
+| `afterCommit` | Runs sequentially in registration order after successful commit. The first error stops later hooks and propagates to the caller of the transaction. The transaction remains committed; no rollback or `afterRollback` hooks run. |
+| `afterRollback` | Runs sequentially in registration order after rollback, including failed rollback, or after failed commit. Errors are logged through the manager's logger and swallowed, so later hooks still run. |
 
-Without an active transaction, `afterCommit` invokes the callback immediately and returns its result; `afterRollback` does nothing.
+`afterRollback` callbacks also run when a commit or rollback fails. That they ran does not establish that the database rolled back; see [rollback rules](#rollback-rules).
+
+A call that registers `fn`, or does nothing, returns `undefined`. When `afterCommit` calls `fn` immediately, it returns what `fn` returns, and an error from `fn` reaches the caller of `afterCommit`. When `afterRollback` calls `fn` immediately, it returns a promise that resolves once `fn` has finished. An error from `fn` is logged through the manager's logger and the promise does not reject, so a call that is not awaited causes no unhandled rejection.
+
+While a transaction's hooks run after its commit or rollback, that transaction is suspended for them. A hook registered inside one of them cannot select the completing transaction, by name or with the name omitted. The selection rules apply as anywhere else: they find a transaction on another datasource, or none, and the table above applies to what they find.
 
 By the time `afterCommit` runs, the transaction is finished and its `ctx()` connection rejects queries. SQL in an `afterCommit` hook needs a transaction of its own. That transaction uses a second connection, because the hook runs before the first one goes back to the pool. With a pool of one connection it waits for a connection that is not released until the hook returns, so the hook never returns.
+
+To require a transaction, register the hook from a function declared with `Propagation.MANDATORY`. Unless a transaction on its datasource is in progress, that function rejects with `IllegalTransactionStateException` and the hook is never registered. That includes a call from work that outlived the transaction.
+
+### Hooks in NESTED scopes
+
+Joined scopes (`REQUIRED`, `MANDATORY`, `SUPPORTS`) register on the transaction they joined. In a `NESTED` scope, hooks follow the savepoint:
+
+| The `NESTED` scope | Its `afterCommit` hooks | Its `afterRollback` hooks |
+|---|---|---|
+| Rolls back to its savepoint | Discarded | Run at that point, before the nested call rejects and while the enclosing transaction is still open. They do not run again if that transaction later rolls back. |
+| Ends any other way | Pass to the enclosing scope when the nested call ends, and are handled from then on as hooks registered there | The same |
+
+When the enclosing scope is the transaction's own, the hooks run when the transaction completes. When it is another `NESTED` scope, they follow that scope's savepoint in turn. A failed savepoint rollback belongs to the second row: the hooks pass to the enclosing scope, and the transaction is rollback-only.
+
+An `afterRollback` hook that runs at a savepoint rollback runs inside the enclosing transaction, so `ctx()` returns that transaction's connection there, and a hook registered inside it registers on the enclosing scope. Its errors are logged and swallowed, like those of any `afterRollback` hook.
+
+A hook registered from work that kept the async context of a `NESTED` scope that has ended follows that scope. After a savepoint rollback, `afterRollback` calls `fn` immediately and `afterCommit` does nothing. Otherwise the hook is handled as one registered in the enclosing scope.
+
+A `NESTED` scope can still be open when its enclosing transaction finishes, if the nested call was not awaited. That call rejects with `TransactionClosedError`. Its hooks then run when it ends, by the outcome of the enclosing transaction, and errors from both kinds are logged.
 
 ## Multiple datasources
 
@@ -202,7 +243,7 @@ usePostgreSQLTransactionManager(analyticsPool, "analytics");
 class ReportService {
     @Transactional({ datasource: "analytics" })
     async build() {
-        // ctx() selects the analytics transaction here (@tranjs/pg 1.3.1 or later).
+        // ctx() selects the analytics transaction here (@tranjs/pg 1.4.0 or later).
         // ctx("analytics") is equivalent.
         return ctx().query("SELECT 1");
     }
@@ -216,10 +257,12 @@ The transaction config, `ctx()` and the hooks each take an optional datasource a
 | Call | Datasource omitted | Datasource given |
 |---|---|---|
 | `@Transactional` / `transactional` config | The default datasource | The manager registered under that name |
-| `ctx()` | The innermost active transaction in the current async context, whatever its datasource | The current transaction of the manager registered under that name |
-| `afterCommit` / `afterRollback` | The innermost active transaction in the current async context, whatever its datasource | The current transaction of the manager registered under that name |
+| `ctx()` | The innermost transaction in the current async context, whatever its datasource | The transaction of the manager registered under that name in the current async context |
+| `afterCommit` / `afterRollback` | The innermost transaction in the current async context, whatever its datasource | The transaction of the manager registered under that name in the current async context |
 
-When transactions on two datasources are nested, the inner one is selected, in either nesting order: `ctx()` returns its connection and hooks attach to it. An explicit name selects that datasource's transaction, including an outer one.
+When transactions on two datasources are nested, the inner one is selected, in either nesting order: `ctx()` returns its connection and hooks register on it. An explicit name selects that datasource's transaction, including an outer one.
+
+The selection does not skip a transaction that has finished. Work that kept the async context of a finished transaction still selects it: `ctx()` throws `TransactionClosedError`, and a hook acts on its outcome. Neither falls back to an outer transaction that is still in progress.
 
 `ctx()` throws in these cases:
 
@@ -232,13 +275,13 @@ When transactions on two datasources are nested, the inner one is selected, in e
 | Name given, its manager has no active transaction | `Error("Transaction context not initialized")` |
 | Called from work that kept the async context of a completed inner transaction, with the name omitted or naming that transaction's datasource | `TransactionClosedError`, even while an outer transaction is still active. `ctx()` does not fall back to the outer connection. |
 
-"No active transaction" includes `SUPPORTS`, `NOT_SUPPORTED` and `NEVER` scopes that run without one. A transaction suspended by `NOT_SUPPORTED` or `REQUIRES_NEW` is not active inside that scope. A transaction on another datasource is not suspended by it and still counts.
+"No active transaction" includes `SUPPORTS`, `NOT_SUPPORTED` and `NEVER` scopes that run without one. A transaction suspended by `NOT_SUPPORTED` or `REQUIRES_NEW` is not selected inside that scope. Inside `REQUIRES_NEW` the new transaction is selected in its place. Inside `NOT_SUPPORTED`, a lookup by name finds no transaction, and a lookup with the name omitted selects the next transaction out on another datasource, if there is one. A transaction on another datasource is not suspended by the scope and still counts.
 
-The hooks do not throw. When the selection finds no active transaction, `afterCommit` runs the callback immediately and `afterRollback` does nothing. That covers an explicit name whose manager has no active transaction in the current async context, including a name with no registration: a misspelt name makes `afterCommit` run its callback before the commit.
+The hooks throw in one case: a name with no registered manager throws `DatasourceSetupError`, inside or outside a transaction. Otherwise they follow the state of the selected transaction, as the table under [Hooks](#hooks) describes. When nothing is selected, `afterCommit` calls the callback immediately and `afterRollback` does nothing. That covers an explicit name whose manager has no transaction in the current async context.
 
-A hook registered from work that kept the async context of a completed inner transaction does not attach to that transaction. With the name omitted, it attaches to an outer transaction on another datasource that is still active. Without one it is handled as outside a transaction, which includes a completed `REQUIRES_NEW` transaction on the same datasource as its outer transaction.
+A hook registered from work that kept the async context of a finished transaction acts on that transaction's outcome, with the name omitted or naming its datasource. That holds while an outer transaction is still in progress, whether the outer one is on another datasource or was suspended by `REQUIRES_NEW`: the hook is not moved to it.
 
-This selection ships in `@tranjs/core` 1.2.1 (hooks) together with `@tranjs/pg` 1.3.1, `@tranjs/mysql2` 1.3.1 and `@tranjs/postgres` 1.2.1 (`ctx()`).
+These rules ship in `@tranjs/core` 1.3.0 (hooks) together with `@tranjs/pg` 1.4.0, `@tranjs/mysql2` 1.4.0 and `@tranjs/postgres` 1.3.0 (`ctx()`). In earlier versions an omitted name selected the default datasource, for `ctx()` and for the hooks. The hooks also did not follow outcomes: one registered after its transaction had finished, or given a name with no registered manager, was handled as outside a transaction, and a hook in a `NESTED` scope stayed with the enclosing transaction after a savepoint rollback.
 
 ## Testing helpers
 
