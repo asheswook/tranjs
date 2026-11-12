@@ -4,7 +4,10 @@
 
 Changes from the published `@tranjs/core` 1.2.0, `@tranjs/pg` 1.3.0,
 `@tranjs/mysql2` 1.3.0 and `@tranjs/postgres` 1.2.0 releases.
-`@tranjs/testing` remains at 1.2.0 with its core peer range `^1.2.0`.
+`@tranjs/testing` 1.2.0 works with core 1.3.0 and is not re-released.
+
+Earlier releases are described on the
+[GitHub releases page](https://github.com/asheswook/tranjs/releases).
 
 ### Datasource selection and completed transactions
 
@@ -12,12 +15,19 @@ Changes from the published `@tranjs/core` 1.2.0, `@tranjs/pg` 1.3.0,
   transaction in the calling async context, including a named datasource,
   instead of selecting the default datasource.
 - A hook registered from the retained context of a finished transaction follows
-  that transaction's outcome. It never moves to an outer transaction that is
-  still active, including one on another datasource. After commit, `afterCommit`
-  still invokes immediately and `afterRollback` does nothing. After rollback or
-  failed commit or rollback, `afterCommit` does nothing and `afterRollback`
-  invokes immediately. Rollback callbacks are logged on error and do not throw;
-  their invocation is not proof that the database rolled back.
+  that transaction's outcome. After commit, `afterCommit` still invokes
+  immediately and `afterRollback` does nothing. After rollback or failed commit
+  or rollback, `afterCommit` does nothing and `afterRollback` invokes
+  immediately. Rollback callbacks are logged on error and do not throw; their
+  invocation is not proof that the database rolled back.
+- This applies to every finished transaction: a single transaction with no outer
+  one, a `REQUIRES_NEW` transaction on the same datasource as its outer
+  transaction, and a transaction on another datasource. Previously a late
+  `afterCommit` invoked its callback after a rollback in the first two cases,
+  and a late `afterRollback` was ignored.
+- A late hook never moves to an outer transaction that is still active.
+  Previously a hook with the datasource omitted could register on an active
+  outer transaction of the default datasource.
 - An explicit datasource name with no registered manager now throws
   `DatasourceSetupError` for either hook instead of acting as outside a
   transaction. This includes a cleared registration and an explicit
@@ -39,13 +49,13 @@ Changes from the published `@tranjs/core` 1.2.0, `@tranjs/pg` 1.3.0,
 - If a detached nested scope is still open when its owner finishes, its held
   hooks now run when the scope ends, using the owner's outcome. Errors from
   both hook kinds are logged instead of commit-hook errors reaching the owner's
-  caller. The detached call rejects with `TransactionClosedError`.
-- Starting a nested scope from the retained context of an ended scope now
-  checks the nearest open scope's concurrency guard. An open sibling causes
-  `ConcurrentNestedTransactionError`. Previously the retained context could
-  bypass the guard, allowing a sibling rollback to undo work whose commit hook
-  later ran. Sequential nesting from retained contexts and starting independent
-  physical transactions remain supported.
+  caller.
+- Starting a nested scope from the retained context of an ended scope now also
+  checks the concurrency guard of the nearest scope that is still open. An open
+  sibling there causes `ConcurrentNestedTransactionError`. Previously the
+  retained context could bypass the guard, allowing a sibling rollback to undo
+  work whose commit hook later ran. Sequential nesting from retained contexts
+  and starting independent physical transactions remain supported.
 
 ### Testing and TypeScript
 

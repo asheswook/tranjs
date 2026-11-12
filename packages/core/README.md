@@ -200,6 +200,7 @@ postgres.js has `usePostgresConnectionPerTransaction` and MySQL has `useMySQLCon
 - [Testing](https://github.com/asheswook/tranjs/blob/main/docs/testing.md): mockTransactions, withTestTransaction, Jest, Vitest
 - [Custom drivers](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
+- [Changelog](https://github.com/asheswook/tranjs/blob/main/CHANGELOG.md): behavior changes and migration notes for each release
 
 ## Contributing
 
