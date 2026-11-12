@@ -425,6 +425,110 @@ describe("transaction hardening", () => {
         ]);
     });
 
+    describe("concurrent NESTED guard and retained contexts of ended scopes", () => {
+        type Retained = <T>(fn: () => T) => T;
+        const retain = (): Retained => AsyncResource.bind(<T>(fn: () => T): T => fn());
+        const nested = <T>(callback: () => T | Promise<T>) => manager.executeTransaction(Propagation.NESTED, callback);
+        function gate() {
+            let open!: () => void;
+            const closed = new Promise<void>(resolve => { open = resolve; });
+            return { closed, open };
+        }
+        const savepoints = () => manager.events.filter(event => event.startsWith("savepoint")).length;
+
+        it.each([
+            ["released", "the owner"], ["rolled back", "the owner"],
+            ["released", "an open NESTED scope"], ["released", "the owner, two ended levels up"],
+        ] as const)("rejects a NESTED scope from the context of a %s sibling while another is open under %s", async (ended, where) => {
+            const callbackC = jest.fn();
+            const hookC = jest.fn();
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromA!: Retained;
+                const a = () => nested(() => {
+                    fromA = retain();
+                    if (ended === "rolled back") throw new Error("A fails");
+                });
+                const scenario = async () => {
+                    // 1. A ends and its context is kept.
+                    if (where === "the owner, two ended levels up") await nested(a);
+                    else if (ended === "rolled back") await expect(a()).rejects.toThrow("A fails");
+                    else await a();
+                    // 2. B is open under the same effective parent.
+                    const hold = gate();
+                    const b = nested(async () => { await hold.closed; throw new Error("B fails"); });
+                    await new Promise(resolve => setImmediate(resolve));
+                    const before = savepoints();
+                    // 3. C from A's retained context is a sibling of B, not a child of the ended A.
+                    await expect(fromA(() => nested(() => { callbackC(); afterCommit(hookC); })))
+                        .rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                    expect(savepoints()).toBe(before);
+                    // The rejected call must not have released B's guard.
+                    await expect(nested(callbackC)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                    hold.open();
+                    await expect(b).rejects.toThrow("B fails");
+                    // 4. With no sibling open, the retained context starts NESTED scopes again, one at a time.
+                    await fromA(() => nested(() => { afterCommit(hookC); }));
+                    await nested(() => undefined);
+                    expect(savepoints()).toBe(before + 2);
+                };
+                if (where === "an open NESTED scope") await nested(scenario);
+                else await scenario();
+                expect(hookC).not.toHaveBeenCalled();
+            });
+            expect(callbackC).not.toHaveBeenCalled();
+            // Only the sequential scope's hook: the rejected C registered nothing.
+            expect(hookC).toHaveBeenCalledTimes(1);
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
+        it("a NESTED scope open from a retained context locks the same parent for direct siblings", async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromA!: Retained;
+                await nested(() => { fromA = retain(); });
+                const hold = gate();
+                const c = fromA(() => nested(() => hold.closed));
+                await new Promise(resolve => setImmediate(resolve));
+                await expect(nested(() => undefined)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                await expect(fromA(() => nested(() => undefined))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                hold.open();
+                await c;
+                await nested(() => undefined);
+            });
+            expect(manager.events).toEqual([
+                "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "savepoint:1:tranjs_sp_2", "release:1:tranjs_sp_2",
+                "savepoint:1:tranjs_sp_3", "release:1:tranjs_sp_3", "commit:1",
+            ]);
+        });
+
+        it("detached work from an ended NESTED scope still starts new physical transactions", async () => {
+            let fromA!: Retained;
+            await manager.executeTransaction(Propagation.REQUIRED, async outer => {
+                await nested(() => { fromA = retain(); });
+                const hold = gate();
+                const b = nested(() => hold.closed);
+                await new Promise(resolve => setImmediate(resolve));
+                // An open sibling does not block an independent transaction.
+                await fromA(() => manager.executeTransaction(Propagation.REQUIRES_NEW, inner => {
+                    expect(inner).not.toBe(outer);
+                    expect(manager.getCurrentTransaction()).toBe(inner);
+                }));
+                hold.open();
+                await b;
+            });
+            // After the owner finished, the retained context has no transaction to nest in or join.
+            for (const propagation of [Propagation.NESTED, Propagation.REQUIRED, Propagation.REQUIRES_NEW]) {
+                await fromA(() => manager.executeTransaction(propagation, tx => {
+                    expect(manager.getCurrentTransaction()).toBe(tx);
+                }));
+            }
+            expect(manager.events).toEqual([
+                "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "savepoint:1:tranjs_sp_2",
+                "begin:2", "commit:2", "release:1:tranjs_sp_2", "commit:1",
+                "begin:3", "commit:3", "begin:4", "commit:4", "begin:5", "commit:5",
+            ]);
+        });
+    });
+
     it("marks failed savepoint rollback rollback-only and rolls back the physical owner with hooks", async () => {
         const rollbackError = new Error("savepoint rollback failed");
         manager.savepointRollbackError = rollbackError;

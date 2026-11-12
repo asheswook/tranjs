@@ -453,12 +453,12 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
 
     private executeNested<R>(state: TxState, callback: (tx: Tx) => R | Promise<R>): Promise<R> {
         return testScope(this, () => {
-            const parent = AsyncLocal.Frame!.scopes!.get(this)!;
-            if (parent.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
-            parent.nestedOpen = true;
-            // Detached work may begin here after its own scope ended: hooks pass to the nearest open one.
-            let enclosing = parent;
+            // Work that kept the context of an ended NESTED scope is a child of the nearest scope still open.
+            // Guard and hooks both use that scope: an ended scope's own flag would be a second lock for it.
+            let enclosing = AsyncLocal.Frame!.scopes!.get(this)!;
             while (enclosing.outcome) enclosing = enclosing.parent!;
+            if (enclosing.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
+            enclosing.nestedOpen = true;
             return this.inScope(state, async () => {
                 const scope = AsyncLocal.Frame!.scopes!.get(this)!;
                 const hooks: HookQueues = { afterCommit: [], afterRollback: [] };
@@ -500,7 +500,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     await this.releaseSavepoint(tx, name);
                     return result;
                 } finally {
-                    parent.nestedOpen = false;
+                    enclosing.nestedOpen = false;
                     const dispatched = this.settleNestedHooks(state, scope, hooks, enclosing);
                     if (dispatched) await dispatched;
                 }

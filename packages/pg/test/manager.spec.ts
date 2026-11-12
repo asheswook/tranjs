@@ -1,7 +1,9 @@
 import { Pool, PoolClient as NativeClient, Query } from "pg";
 import QueryStream = require("pg-query-stream");
 import { EventEmitter } from "node:events";
+import { AsyncResource } from "node:async_hooks";
 import {
+    ConcurrentNestedTransactionError,
     IsolationLevel,
     DEFAULT_DATASOURCE,
     InvalidIsolationLevelError,
@@ -184,6 +186,55 @@ describe("PostgreSQL driver (real database)", () => {
             }, { propagation: Propagation.NESTED })();
         })();
         expect(await ids()).toEqual([1, 3]);
+    });
+
+    it("rejects a NESTED scope from the retained context of an ended sibling while another sibling is open", async () => {
+        const nested = { propagation: Propagation.NESTED };
+        const events: string[] = [];
+        const callbackC = jest.fn();
+        await transactional(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            // 1. A finishes; its async context is kept.
+            let fromA!: <T>(fn: () => T) => T;
+            await transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                fromA = AsyncResource.bind(<T>(fn: () => T): T => fn());
+            }, nested)();
+            // 2. B is open under the owner.
+            let closeB!: () => void;
+            const holdB = new Promise<void>(resolve => { closeB = resolve; });
+            let enteredB!: () => void;
+            const inB = new Promise<void>(resolve => { enteredB = resolve; });
+            const b = transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+                enteredB();
+                await holdB;
+                throw failure;
+            }, nested)();
+            await inB;
+            // 3. C from A's context would open a savepoint inside B's and be undone with it.
+            await expect(fromA(() => transactional(async () => {
+                callbackC();
+                await ctx().query(`INSERT INTO ${table} VALUES (4)`);
+                registerAfterCommit(() => { events.push("C commit hook"); });
+            }, nested)())).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+            // Detached work can still start an independent transaction on its own connection.
+            await fromA(() => transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (5)`);
+            }, { propagation: Propagation.REQUIRES_NEW })());
+            // 4. B rolls back to its savepoint; the owner continues.
+            closeB();
+            await expect(b).rejects.toBe(failure);
+            // With no sibling open, the retained context nests again and its work and hook are kept.
+            await fromA(() => transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (6)`);
+                registerAfterCommit(() => { events.push("sequential commit hook"); });
+            }, nested)());
+            expect((await ctx().query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id)).toEqual([1, 2, 5, 6]);
+        })();
+        expect(callbackC).not.toHaveBeenCalled();
+        expect(events).toEqual(["sequential commit hook"]);
+        expect(await ids()).toEqual([1, 2, 5, 6]);
     });
 
     it("applies the requested isolation level", async () => {
