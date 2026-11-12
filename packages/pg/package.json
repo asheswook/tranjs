@@ -2,12 +2,15 @@
   "name": "@tranjs/pg",
   "version": "1.4.0",
   "description": "TranJS driver for pg. (PostgreSQL)",
+  "homepage": "https://github.com/asheswook/tranjs#readme",
   "license": "LGPL-2.1-only",
   "repository": { "type": "git", "url": "https://github.com/asheswook/tranjs.git", "directory": "packages/pg" },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "package.json",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc -b",
