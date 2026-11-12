@@ -311,6 +311,53 @@ async function main() {
             return 'named hooks complete';
         } finally { core.useTransactionManager(undefined, datasource); }
     });
+    // Work that kept the async context of a finished transaction registers both hooks.
+    for (const completion of ['commit', 'rollback']) {
+        await add(`hooks/late-after-${completion}`, async ({ run, mark, hook }) => {
+            let late;
+            try {
+                await run(() => {
+                    late = AsyncResource.bind(callback => callback());
+                    mark('body');
+                    if (completion === 'rollback') throw new Error('application failed');
+                });
+            } catch (error) {
+                if (error.message !== 'application failed') throw error;
+            }
+            const returned = late(() => {
+                core.afterCommit(hook('late-commit'));
+                return core.afterRollback(hook('late-rollback'));
+            });
+            await returned;
+            mark('after-registration');
+            return { afterRollbackReturned: returned instanceof Promise ? 'promise' : String(returned) };
+        });
+    }
+    await add('hooks/nested-savepoint-rollback', ({ run, mark, hook }) => run(async () => {
+        core.afterCommit(hook('outer-commit'));
+        core.afterRollback(hook('outer-rollback'));
+        try {
+            await run(() => {
+                core.afterCommit(hook('nested-commit'));
+                core.afterRollback(hook('nested-rollback'));
+                throw new Error('nested application failed');
+            }, { propagation: P.NESTED });
+        } catch (error) { mark(`caught:${error.message}`); }
+        mark('outer-continues');
+        return 'outer result';
+    }));
+    await add('hooks/unregistered-datasource', ({ run, mark, hook }) => run(() => {
+        const capture = callback => {
+            try { return { returned: callback() ?? null }; }
+            catch (error) { return { error: errorInfo(error) }; }
+        };
+        const result = {
+            afterCommit: capture(() => core.afterCommit(hook('unregistered-commit'), 'misspelt')),
+            afterRollback: capture(() => core.afterRollback(hook('unregistered-rollback'), 'misspelt')),
+        };
+        mark('body');
+        return result;
+    }));
     await add('ctx/implicit-named-datasource', async ({ run, mark, manager }) => {
         const datasource = 'analytics';
         core.useTransactionManager(manager, datasource);

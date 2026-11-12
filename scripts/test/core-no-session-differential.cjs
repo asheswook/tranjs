@@ -25,8 +25,9 @@ try {
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.equal(expected.length, 91, 'Keep all 87 unchanged probes and all four intended differences');
-    for (const name of ['ctx/implicit-named-datasource', 'hooks/implicit-named-datasource', 'detached/new-transaction-after-commit', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
+    assert.equal(expected.length, 95, 'Keep all 88 unchanged probes and all seven intended differences');
+    for (const name of ['ctx/implicit-named-datasource', 'hooks/implicit-named-datasource', 'detached/new-transaction-after-commit',
+        'hooks/late-after-commit', 'hooks/late-after-rollback', 'hooks/nested-savepoint-rollback', 'hooks/unregistered-datasource', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
         'async-logger/hook-failure', 'async-logger/rollback-failure',
@@ -81,6 +82,34 @@ try {
         events: [['begin', {}, null], ['named-body', 1], ['commit', 1, 1], ['release', 1, false, null]],
         loggerCalls: [], loggerRejections: [], errorIdentity: [], outside: null,
     });
+    const plain = (name, returned, outcomes, events) => ({
+        name, result: { returned }, outcomes, events, loggerCalls: [], loggerRejections: [], errorIdentity: [], outside: null,
+    });
+    // A hook registered after its transaction rolled back follows that outcome.
+    const lateAfterRollbackResult = fixed => plain('hooks/late-after-rollback',
+        { afterRollbackReturned: fixed ? 'promise' : 'undefined' }, ['rolled-back'], [
+            ['begin', {}, null], ['body', 1], ['rollback', 1, 1], ['release', 1, false, null],
+            [fixed ? 'late-rollback' : 'late-commit', null], ['after-registration', null],
+        ]);
+    // Hooks of a NESTED scope follow its savepoint, not only the physical transaction.
+    const nestedSavepointResult = fixed => plain('hooks/nested-savepoint-rollback', 'outer result', ['committed'], [
+        ['begin', {}, null], ['savepoint', 1, 'tranjs_sp_1', 1], ['rollback-savepoint', 1, 'tranjs_sp_1', 1],
+        ...(fixed ? [['nested-rollback', 1]] : []),
+        ['caught:nested application failed', 1], ['outer-continues', 1], ['commit', 1, 1], ['outer-commit', null],
+        ...(fixed ? [] : [['nested-commit', null]]),
+        ['release', 1, false, null],
+    ]);
+    // A misspelt datasource name is a setup error, not "outside a transaction".
+    const setupError = { error: { name: 'TransactionDatasourceSetupError', message: 'Datasource is not set up: misspelt' } };
+    const unregisteredResult = fixed => plain('hooks/unregistered-datasource',
+        { afterCommit: fixed ? setupError : { returned: null }, afterRollback: fixed ? setupError : { returned: null } }, ['committed'], [
+            ['begin', {}, null], ...(fixed ? [] : [['unregistered-commit', 1]]), ['body', 1], ['commit', 1, 1], ['release', 1, false, null],
+        ]);
+    const hookDifferences = {
+        'hooks/late-after-rollback': lateAfterRollbackResult,
+        'hooks/nested-savepoint-rollback': nestedSavepointResult,
+        'hooks/unregistered-datasource': unregisteredResult,
+    };
     let unchanged = 0;
     for (let index = 0; index < expected.length; index++) {
         const name = expected[index].name;
@@ -91,6 +120,9 @@ try {
         } else if (name === 'hooks/implicit-named-datasource') {
             assert.deepEqual(expected[index], namedHooksResult(false), 'Published implicit named-hook behavior changed');
             assert.deepEqual(actual[index], namedHooksResult(true), 'Implicit hooks must wait for their named transaction');
+        } else if (hookDifferences[name]) {
+            assert.deepEqual(expected[index], hookDifferences[name](false), `Published hook behavior changed: ${name}`);
+            assert.deepEqual(actual[index], hookDifferences[name](true), `Intended hook behavior is missing: ${name}`);
         } else if (name === 'ctx/implicit-named-datasource') {
             assert.deepEqual(expected[index], namedContextResult(false), 'Published implicit named ctx behavior changed');
             assert.deepEqual(actual[index], namedContextResult(true), 'Implicit ctx must select the named transaction');
@@ -100,7 +132,7 @@ try {
         }
         assert.equal(actual[index].outside, null, `Leaked transaction: ${actual[index].name}`);
     }
-    assert.equal(unchanged, 87, 'All existing production scenarios and detached new transactions must remain exactly identical');
+    assert.equal(unchanged, 88, 'All existing production scenarios, detached new transactions and late hooks after a commit must remain exactly identical');
     process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, passed: true }) + '\n');
 } finally {
     rmSync(temporary, { recursive: true, force: true });

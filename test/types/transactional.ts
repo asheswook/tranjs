@@ -1,4 +1,4 @@
-import { getTransactionManager, transactional, TransactionConfig, Propagation } from "@tranjs/core";
+import { afterCommit, afterRollback, getTransactionManager, transactional, TransactionConfig, Propagation } from "@tranjs/core";
 import { resolveContextManager } from "@tranjs/core/internal/context";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -11,6 +11,14 @@ export function assertCustomContextOpen(): void {
 export function resolvedContextManager(): ReturnType<typeof getTransactionManager> {
     return resolveContextManager();
 }
+
+// Both hooks may invoke the callback immediately, so both can return its promise.
+export type AfterCommitReturn = Expect<Equal<ReturnType<typeof afterCommit>, void | Promise<void>>>;
+export type AfterRollbackReturn = Expect<Equal<ReturnType<typeof afterRollback>, void | Promise<void>>>;
+// A caller that ignores the result, as every caller of the previous void signature does, still compiles.
+export const ignoresRollbackResult: () => void = () => { afterRollback(() => {}); };
+// @ts-expect-error The result may now be a promise, so it is not assignable to a void variable.
+export const rollbackResult: void = afterRollback(() => {});
 
 const identity = transactional(async <T>(value: T): Promise<T> => value);
 const identityResult = identity({ id: 1, name: "identity" });

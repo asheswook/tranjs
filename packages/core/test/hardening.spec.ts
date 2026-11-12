@@ -604,7 +604,7 @@ describe("transaction hardening", () => {
         expect(log.error).not.toHaveBeenCalled();
     });
 
-    it("runs afterRollback sequentially after physical rollback, including hooks from failed NESTED scopes", async () => {
+    it("runs afterRollback sequentially after physical rollback, and a failed NESTED scope's hooks at its savepoint rollback", async () => {
         const log = logger();
         manager.setLogger(log);
         const error = new Error("outer");
@@ -617,14 +617,14 @@ describe("transaction hardening", () => {
                 afterRollback(() => { manager.events.push("nested"); });
                 throw new Error("nested");
             })).rejects.toThrow("nested");
-            expect(manager.events).not.toContain("nested");
+            expect(manager.events).toContain("nested");
             afterRollback(() => { throw new Error("hook"); });
             afterRollback(() => { manager.events.push("last"); });
             afterCommit(() => { manager.events.push("wrong"); });
             throw error;
         })).rejects.toBe(error);
         expect(manager.events).toEqual([
-            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "rollback:1", "first", "nested", "last",
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "nested", "rollback:1", "first", "last",
         ]);
         expect(log.error).toHaveBeenCalledTimes(1);
     });
@@ -698,12 +698,10 @@ describe("transaction hardening", () => {
                 afterRollback(() => { order.push("inner rollback"); });
                 afterCommit(() => { order.push("explicit outer"); }, outerName);
                 afterRollback(outerRollback, outerName);
-                const immediate = jest.fn();
-                const ignored = jest.fn();
-                await afterCommit(immediate, "unregistered");
-                afterRollback(ignored, "unregistered");
-                expect(immediate).toHaveBeenCalledTimes(1);
-                expect(ignored).not.toHaveBeenCalled();
+                const unregistered = jest.fn();
+                expect(() => afterCommit(unregistered, "unregistered")).toThrow(DatasourceSetupError);
+                expect(() => afterRollback(unregistered, "unregistered")).toThrow(DatasourceSetupError);
+                expect(unregistered).not.toHaveBeenCalled();
                 expect(order).toEqual([]);
                 if (rollback) throw error;
             });
@@ -735,7 +733,7 @@ describe("transaction hardening", () => {
         expect(rolledBack).not.toHaveBeenCalled();
     });
 
-    it.each([false, true])("named joined and failed NESTED hooks stay on the physical owner (rollback: %s)", async rollback => {
+    it.each([false, true])("named joined hooks stay on the physical owner and failed NESTED hooks follow their savepoint (rollback: %s)", async rollback => {
         const b = new SavepointManager();
         useTransactionManager(b, datasourceB);
         const committed = jest.fn();
@@ -755,19 +753,20 @@ describe("transaction hardening", () => {
                 throw new Error("savepoint failure");
             })).rejects.toThrow("savepoint failure");
             expect(committed).not.toHaveBeenCalled();
-            expect(rolledBack).not.toHaveBeenCalled();
+            // Only the NESTED scope's hook: the joined one still waits for the owner.
+            expect(rolledBack).toHaveBeenCalledTimes(1);
             if (rollback) throw error;
         });
         if (rollback) await expect(operation).rejects.toBe(error);
         else await operation;
-        expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 2);
-        expect(rolledBack).toHaveBeenCalledTimes(rollback ? 2 : 0);
+        expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 1);
+        expect(rolledBack).toHaveBeenCalledTimes(rollback ? 2 : 1);
         expect(b.events).toEqual([
             "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", rollback ? "rollback:1" : "commit:1",
         ]);
     });
 
-    it.each([DEFAULT_DATASOURCE, datasourceB])("explicit %s hooks keep registered-manager replacement and clearing semantics", async datasource => {
+    it.each([DEFAULT_DATASOURCE, datasourceB])("explicit %s hooks follow the registered manager and reject a cleared name", async datasource => {
         useTransactionManager(manager, datasource);
         const replacement = new RecordingManager();
         const order: string[] = [];
@@ -779,28 +778,29 @@ describe("transaction hardening", () => {
             afterRollback(ignored, datasource);
             afterCommit(() => { order.push("omitted after replacement"); });
             useTransactionManager(undefined as any, datasource);
-            await afterCommit(() => { order.push("cleared"); }, datasource);
-            afterRollback(ignored, datasource);
+            expect(() => afterCommit(ignored, datasource)).toThrow(DatasourceSetupError);
+            expect(() => afterRollback(ignored, datasource)).toThrow(DatasourceSetupError);
             afterCommit(() => { order.push("omitted after clear"); });
-            expect(order).toEqual(["replacement inactive", "cleared"]);
+            expect(order).toEqual(["replacement inactive"]);
         });
         expect(order).toEqual([
-            "replacement inactive", "cleared", "registered owner", "omitted after replacement", "omitted after clear",
+            "replacement inactive", "registered owner", "omitted after replacement", "omitted after clear",
         ]);
         expect(ignored).not.toHaveBeenCalled();
         expect(replacement.events).toEqual([]);
     });
 
-    it("retained inactive innermost frames fall back to the active outer, then run immediately when all owners finish", async () => {
+    it("a retained finished innermost transaction keeps its hooks: they follow its outcome and never move to the active outer", async () => {
         const b = new RecordingManager();
         useTransactionManager(b, datasourceB);
         const committed = jest.fn();
         const rolledBack = jest.fn();
         let retained!: () => void | Promise<void>;
-        let retainedRollback!: () => void;
+        let retainedRollback!: () => void | Promise<void>;
         await manager.executeTransaction(Propagation.REQUIRED, async outer => {
             await b.executeTransaction(Propagation.REQUIRED, () => {
                 retained = AsyncResource.bind(() => {
+                    // The deprecated global lookup still falls back; hook selection does not.
                     expect(AsyncLocal.Context?.transaction).toBe(manager.getCurrentTransaction());
                     return afterCommit(committed);
                 });
@@ -808,9 +808,9 @@ describe("transaction hardening", () => {
             });
             expect(manager.getCurrentTransaction()).toBe(outer);
             await retained();
-            retainedRollback();
-            expect(committed).not.toHaveBeenCalled();
-            expect(rolledBack).not.toHaveBeenCalled();
+            expect(retainedRollback()).toBeUndefined();
+            expect(committed).toHaveBeenCalledTimes(1);
+            expect(manager.events).toEqual(["begin:1"]);
         });
         expect(committed).toHaveBeenCalledTimes(1);
         await retained();
