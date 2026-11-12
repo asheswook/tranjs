@@ -204,7 +204,7 @@ A call that registers `fn`, or does nothing, returns `undefined`. When `afterCom
 
 While a transaction's hooks run after its commit or rollback, that transaction is suspended for them. A hook registered inside one of them cannot select the completing transaction, by name or with the name omitted. The selection rules apply as anywhere else: they find a transaction on another datasource, or none, and the table above applies to what they find.
 
-By the time `afterCommit` runs, the transaction is finished and its `ctx()` connection rejects queries. SQL in an `afterCommit` hook needs a transaction of its own. That transaction uses a second connection, because the hook runs before the first one goes back to the pool. With a pool of one connection it waits for a connection that is not released until the hook returns, so the hook never returns.
+By the time `afterCommit` runs, the completing transaction is finished and its connection rejects queries. An enclosing transaction on another datasource stays visible inside the hook, and `ctx()` can select its connection. SQL can use that enclosing transaction or a new transaction. If the hook awaits a new transaction on the same pool as the completing transaction, it needs another connection: the completing connection is still checked out until the hook returns. With a one-connection pool, that wait deadlocks.
 
 To require a transaction, register the hook from a function declared with `Propagation.MANDATORY`. Unless a transaction on its datasource is in progress, that function rejects with `IllegalTransactionStateException` and the hook is never registered. That includes a call from work that outlived the transaction.
 
@@ -281,7 +281,7 @@ The hooks throw in one case: a name with no registered manager throws `Datasourc
 
 A hook registered from work that kept the async context of a finished transaction acts on that transaction's outcome, with the name omitted or naming its datasource. That holds while an outer transaction is still in progress, whether the outer one is on another datasource or was suspended by `REQUIRES_NEW`: the hook is not moved to it.
 
-These rules ship in `@tranjs/core` 1.3.0 (hooks) together with `@tranjs/pg` 1.4.0, `@tranjs/mysql2` 1.4.0 and `@tranjs/postgres` 1.3.0 (`ctx()`). In earlier versions an omitted name selected the default datasource, for `ctx()` and for the hooks. The hooks also did not follow outcomes: one registered after its transaction had finished, or given a name with no registered manager, was handled as outside a transaction, and a hook in a `NESTED` scope stayed with the enclosing transaction after a savepoint rollback.
+See the [changelog](../CHANGELOG.md) for release behavior changes and migration notes.
 
 ## Testing helpers
 
