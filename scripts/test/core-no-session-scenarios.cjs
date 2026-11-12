@@ -229,6 +229,32 @@ async function main() {
         mark('deepest');
         return 'nested result';
     }, { propagation: P.NESTED }), { propagation: P.NESTED })));
+    await add('nested/retained-ended-sibling', ({ run, mark, hook }) => run(async () => {
+        let fromA;
+        await run(() => { fromA = AsyncResource.bind(callback => callback()); }, { propagation: P.NESTED });
+        let enteredB;
+        const inB = new Promise(resolve => { enteredB = resolve; });
+        let closeB;
+        const holdB = new Promise(resolve => { closeB = resolve; });
+        const b = run(async () => {
+            mark('B-open');
+            enteredB();
+            await holdB;
+            throw new Error('B failed');
+        }, { propagation: P.NESTED });
+        await inB;
+        let c;
+        try {
+            await fromA(() => run(() => {
+                mark('C-body');
+                core.afterCommit(hook('C-commit'));
+            }, { propagation: P.NESTED }));
+            c = 'succeeded';
+        } catch (error) { c = errorInfo(error); }
+        closeB();
+        try { await b; } catch (error) { mark(`caught:${error.message}`); }
+        return { c };
+    }));
     for (const thrown of [undefined, null, 'plain failure', 0]) {
         await add(`non-error-throw/${String(thrown)}`, ({ run, failure }) => run(() => { throw failure('application', thrown); }), { rollback: true });
     }

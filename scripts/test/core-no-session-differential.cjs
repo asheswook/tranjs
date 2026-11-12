@@ -7,9 +7,15 @@ const { join, resolve } = require('node:path');
 
 const root = resolve(__dirname, '../..');
 const temporary = mkdtempSync(join(tmpdir(), 'tranjs-differential-'));
-const baseline = '@tranjs/core@1.1.0';
-const archive = join(__dirname, 'fixtures/tranjs-core-1.1.0.tgz');
-const integrity = 'sha512-b7zLSA0QFgcud7hlUDTxvw9PL2uyNQ+9opSFlSNa2vTrPjw3YhNihX01hzLkH2YEQDdTbMZPOeW7UKmmi7URuQ==';
+const version = process.argv[2] ?? '1.1.0';
+const integrities = {
+    '1.1.0': 'sha512-b7zLSA0QFgcud7hlUDTxvw9PL2uyNQ+9opSFlSNa2vTrPjw3YhNihX01hzLkH2YEQDdTbMZPOeW7UKmmi7URuQ==',
+    '1.2.0': 'sha512-8dW+Y4cZGGJwFmdrsFZzSk41YFJ9/JKVdSmIWf9zccFelKOnKrJX8ABGjhMjAWSSYEokqhDsLT4JIOISrrZHKg==',
+};
+assert.ok(Object.prototype.hasOwnProperty.call(integrities, version), 'Unsupported published baseline');
+const baseline = `@tranjs/core@${version}`;
+const archive = join(__dirname, `fixtures/tranjs-core-${version}.tgz`);
+const integrity = integrities[version];
 const command = (file, args, cwd = root) => execFileSync(file, args, { cwd, encoding: 'utf8', stdio: 'pipe' });
 try {
     // Use the original published tarball so the baseline needs no network access.
@@ -18,16 +24,16 @@ try {
     command('tar', ['-xzf', archive, '-C', temporary]);
     const metadata = JSON.parse(readFileSync(join(temporary, 'package/package.json'), 'utf8'));
     assert.equal(metadata.name, '@tranjs/core');
-    assert.equal(metadata.version, '1.1.0');
+    assert.equal(metadata.version, version);
     // Like the package-exports tests, the current package must already be built.
     // Do not rebuild shared dist files while another Jest suite may be loading them.
     const runner = join(__dirname, 'core-no-session-scenarios.cjs');
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.equal(expected.length, 95, 'Keep all 88 unchanged probes and all seven intended differences');
+    assert.equal(expected.length, 96, 'Keep all production probes, including the retained-NESTED guard regression');
     for (const name of ['ctx/implicit-named-datasource', 'hooks/implicit-named-datasource', 'detached/new-transaction-after-commit',
-        'hooks/late-after-commit', 'hooks/late-after-rollback', 'hooks/nested-savepoint-rollback', 'hooks/unregistered-datasource', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
+        'hooks/late-after-commit', 'hooks/late-after-rollback', 'hooks/nested-savepoint-rollback', 'hooks/unregistered-datasource', 'nested/retained-ended-sibling', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
         'async-logger/hook-failure', 'async-logger/rollback-failure',
@@ -105,15 +111,26 @@ try {
         { afterCommit: fixed ? setupError : { returned: null }, afterRollback: fixed ? setupError : { returned: null } }, ['committed'], [
             ['begin', {}, null], ...(fixed ? [] : [['unregistered-commit', 1]]), ['body', 1], ['commit', 1, 1], ['release', 1, false, null],
         ]);
+    // A retained ended scope must not supply a second lock for the same open parent.
+    const retainedNestedResult = fixed => plain('nested/retained-ended-sibling', {
+        c: fixed ? { name: 'ConcurrentNestedTransactionError', message: 'A sibling nested transaction is still open in this parent scope' } : 'succeeded',
+    }, ['committed'], [
+        ['begin', {}, null], ['savepoint', 1, 'tranjs_sp_1', 1], ['release-savepoint', 1, 'tranjs_sp_1', 1],
+        ['savepoint', 1, 'tranjs_sp_2', 1], ['B-open', 1],
+        ...(fixed ? [] : [['savepoint', 1, 'tranjs_sp_3', 1], ['C-body', 1], ['release-savepoint', 1, 'tranjs_sp_3', 1]]),
+        ['rollback-savepoint', 1, 'tranjs_sp_2', 1], ['caught:B failed', 1], ['commit', 1, 1],
+        ...(fixed ? [] : [['C-commit', null]]), ['release', 1, false, null],
+    ]);
     const hookDifferences = {
         'hooks/late-after-rollback': lateAfterRollbackResult,
         'hooks/nested-savepoint-rollback': nestedSavepointResult,
         'hooks/unregistered-datasource': unregisteredResult,
+        'nested/retained-ended-sibling': retainedNestedResult,
     };
     let unchanged = 0;
     for (let index = 0; index < expected.length; index++) {
         const name = expected[index].name;
-        if (closedConnectionNames.includes(name)) {
+        if (version === '1.1.0' && closedConnectionNames.includes(name)) {
             const completion = name.endsWith('commit') ? 'commit' : 'rollback';
             assert.deepEqual(expected[index], closedConnectionResult(completion, false), `Published retained-connection behavior changed: ${name}`);
             assert.deepEqual(actual[index], closedConnectionResult(completion, true), `Closed connection must reject without querying: ${name}`);
@@ -132,8 +149,8 @@ try {
         }
         assert.equal(actual[index].outside, null, `Leaked transaction: ${actual[index].name}`);
     }
-    assert.equal(unchanged, 88, 'All existing production scenarios, detached new transactions and late hooks after a commit must remain exactly identical');
-    process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, passed: true }) + '\n');
+    assert.equal(unchanged, version === '1.1.0' ? 88 : 90, 'All other production scenarios must remain exactly identical');
+    process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, identical: unchanged, intended: actual.length - unchanged, passed: true }) + '\n');
 } finally {
     rmSync(temporary, { recursive: true, force: true });
 }
