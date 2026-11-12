@@ -500,6 +500,67 @@ describe("transaction hardening", () => {
             ]);
         });
 
+        it.each(["released", "rolled back"] as const)("an ended (%s) scope whose own child is still open keeps guarding its retained context", async ended => {
+            const callbackD = jest.fn();
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromE!: Retained;
+                const hold = gate();
+                let c!: Promise<unknown>;
+                // E starts child C without awaiting it, then ends.
+                const e = nested(async () => {
+                    fromE = retain();
+                    const entered = gate();
+                    c = nested(async () => { entered.open(); await hold.closed; });
+                    await entered.closed;
+                    if (ended === "rolled back") throw new Error("E fails");
+                });
+                if (ended === "rolled back") await expect(e).rejects.toThrow("E fails");
+                else await e;
+                const before = savepoints();
+                // D from E's retained context is a sibling of the open C, as it was before E ended.
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    // The second attempt shows that a rejected call does not release C's lock.
+                    await expect(fromE(() => nested(callbackD))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                }
+                expect(savepoints()).toBe(before);
+                hold.open();
+                await c;
+                // C unlocked the scope it locked (E), and nothing else was left locked.
+                await fromE(() => nested(() => undefined));
+                await nested(() => undefined);
+                expect(savepoints()).toBe(before + 2);
+            });
+            expect(callbackD).not.toHaveBeenCalled();
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
+        it("walks past an ended scope with no open child, and stops at an ended ancestor that has one", async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromInner!: Retained;
+                const hold = gate();
+                let c!: Promise<unknown>;
+                // E > F: F ends with no child and its context is kept; E starts C without awaiting it, then ends.
+                await nested(async () => {
+                    await nested(() => { fromInner = retain(); });
+                    const entered = gate();
+                    c = nested(async () => { entered.open(); await hold.closed; });
+                    await entered.closed;
+                });
+                await expect(fromInner(() => nested(() => undefined))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                hold.open();
+                await c;
+                // With C ended the walk passes F and E and reaches the owner's scope.
+                const longer = gate();
+                const d = fromInner(() => nested(() => longer.closed));
+                await new Promise(resolve => setImmediate(resolve));
+                await expect(nested(() => undefined)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                longer.open();
+                await d;
+                await nested(() => undefined);
+            });
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
         it("detached work from an ended NESTED scope still starts new physical transactions", async () => {
             let fromA!: Retained;
             await manager.executeTransaction(Propagation.REQUIRED, async outer => {

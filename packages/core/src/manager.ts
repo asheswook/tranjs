@@ -455,9 +455,12 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         return testScope(this, () => {
             // Work that kept the context of an ended NESTED scope is a child of the nearest scope still open.
             // Guard and hooks both use that scope: an ended scope's own flag would be a second lock for it.
-            let enclosing = AsyncLocal.Frame!.scopes!.get(this)!;
-            while (enclosing.outcome) enclosing = enclosing.parent!;
-            if (enclosing.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
+            // An ended scope whose flag is still set has a child of its own still open, so the walk stops there.
+            let nearest = AsyncLocal.Frame!.scopes!.get(this)!;
+            while (nearest.outcome && !nearest.nestedOpen) nearest = nearest.parent!;
+            if (nearest.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
+            // Past the guard this scope is open. It is the one locked here and unlocked in the finally below.
+            const enclosing = nearest;
             enclosing.nestedOpen = true;
             return this.inScope(state, async () => {
                 const scope = AsyncLocal.Frame!.scopes!.get(this)!;

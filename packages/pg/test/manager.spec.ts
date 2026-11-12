@@ -237,6 +237,45 @@ describe("PostgreSQL driver (real database)", () => {
         expect(await ids()).toEqual([1, 2, 5, 6]);
     });
 
+    it("rejects a NESTED scope from the retained context of an ended scope whose own child is still open", async () => {
+        const nested = { propagation: Propagation.NESTED };
+        const callbackD = jest.fn();
+        let childResult!: PromiseSettledResult<unknown>;
+        await expect(transactional(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            let fromE!: <T>(fn: () => T) => T;
+            let closeC!: () => void;
+            const holdC = new Promise<void>(resolve => { closeC = resolve; });
+            let c!: Promise<unknown>;
+            // E starts child C without awaiting it, then ends.
+            await transactional(async () => {
+                fromE = AsyncResource.bind(<T>(fn: () => T): T => fn());
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                let enteredC!: () => void;
+                const inC = new Promise<void>(resolve => { enteredC = resolve; });
+                c = transactional(async () => {
+                    await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+                    enteredC();
+                    await holdC;
+                }, nested)();
+                await inC;
+            }, nested)();
+            // D from E's retained context must not open a savepoint next to the open C.
+            await expect(fromE(() => transactional(async () => {
+                callbackD();
+                await ctx().query(`INSERT INTO ${table} VALUES (4)`);
+            }, nested)())).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+            expect((await ctx().query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id)).toEqual([1, 2, 3]);
+            closeC();
+            [childResult] = await Promise.allSettled([c]);
+            throw failure;
+        })()).rejects.toBe(failure);
+        expect(callbackD).not.toHaveBeenCalled();
+        // Releasing E's savepoint already removed C's, which is what the missing await costs the caller.
+        expect(childResult).toMatchObject({ status: "rejected", reason: { code: "3B001" } });
+        expect(await ids()).toEqual([]);
+    });
+
     it("applies the requested isolation level", async () => {
         await transactional(async () => {
             const result = await ctx().query("SHOW transaction_isolation");

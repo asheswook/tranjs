@@ -255,6 +255,36 @@ async function main() {
         try { await b; } catch (error) { mark(`caught:${error.message}`); }
         return { c };
     }));
+    // An ended scope whose own child is still open keeps guarding its retained context.
+    await add('nested/retained-open-child', ({ run, mark }) => run(async () => {
+        const nested = { propagation: P.NESTED };
+        const attempt = async start => {
+            try { await start(); return 'succeeded'; }
+            catch (error) { return errorInfo(error); }
+        };
+        let fromE;
+        let closeC;
+        const holdC = new Promise(resolve => { closeC = resolve; });
+        let c;
+        await run(async () => {
+            fromE = AsyncResource.bind(callback => callback());
+            let enteredC;
+            const inC = new Promise(resolve => { enteredC = resolve; });
+            c = run(async () => {
+                mark('C-open');
+                enteredC();
+                await holdC;
+            }, nested);
+            await inC;
+        }, nested);
+        mark('E-ended');
+        const whileOpen = await attempt(() => fromE(() => run(() => mark('D-body'), nested)));
+        closeC();
+        await c;
+        mark('C-ended');
+        const afterwards = await attempt(() => fromE(() => run(() => mark('D2-body'), nested)));
+        return { whileOpen, afterwards };
+    }));
     for (const thrown of [undefined, null, 'plain failure', 0]) {
         await add(`non-error-throw/${String(thrown)}`, ({ run, failure }) => run(() => { throw failure('application', thrown); }), { rollback: true });
     }

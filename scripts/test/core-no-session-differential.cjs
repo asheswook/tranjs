@@ -31,9 +31,9 @@ try {
     const run = entry => JSON.parse(command(process.execPath, [runner, entry]));
     const expected = run(join(temporary, 'package/dist/index.js'));
     const actual = run(join(root, 'packages/core/dist/index.js'));
-    assert.equal(expected.length, 96, 'Keep all production probes, including the retained-NESTED guard regression');
+    assert.equal(expected.length, 97, 'Keep all production probes, including both retained-NESTED guard scenarios');
     for (const name of ['ctx/implicit-named-datasource', 'hooks/implicit-named-datasource', 'detached/new-transaction-after-commit',
-        'hooks/late-after-commit', 'hooks/late-after-rollback', 'hooks/nested-savepoint-rollback', 'hooks/unregistered-datasource', 'nested/retained-ended-sibling', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
+        'hooks/late-after-commit', 'hooks/late-after-rollback', 'hooks/nested-savepoint-rollback', 'hooks/unregistered-datasource', 'nested/retained-ended-sibling', 'nested/retained-open-child', 'non-error-commit/undefined', 'non-error-commit/null', 'non-error-commit/plain failure',
         'combined-release-failure/application', 'combined-release-failure/commit', 'combined-release-failure/rollback',
         'async-hooks/commit', 'async-hooks/application', 'async-hooks/commit-error', 'async-hooks/rollback-error',
         'async-logger/hook-failure', 'async-logger/rollback-failure',
@@ -149,7 +149,14 @@ try {
         }
         assert.equal(actual[index].outside, null, `Leaked transaction: ${actual[index].name}`);
     }
-    assert.equal(unchanged, version === '1.1.0' ? 88 : 90, 'All other production scenarios must remain exactly identical');
+    // The guard an ended scope keeps for its own open child is published behavior, in both baselines.
+    const openChild = actual.find(result => result.name === 'nested/retained-open-child');
+    assert.deepEqual(openChild.result, { returned: {
+        whileOpen: { name: 'ConcurrentNestedTransactionError', message: 'A sibling nested transaction is still open in this parent scope' },
+        afterwards: 'succeeded',
+    } });
+    assert.ok(!hookDifferences['nested/retained-open-child'], 'The open-child guard must be compared as identical');
+    assert.equal(unchanged, version === '1.1.0' ? 89 : 91, 'All other production scenarios must remain exactly identical');
     process.stdout.write(JSON.stringify({ scenarios: actual.length, baseline, identical: unchanged, intended: actual.length - unchanged, passed: true }) + '\n');
 } finally {
     rmSync(temporary, { recursive: true, force: true });
