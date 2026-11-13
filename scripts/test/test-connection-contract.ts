@@ -1,6 +1,7 @@
 import { AsyncResource } from "node:async_hooks";
 import {
-    afterCommit, afterRollback, clearTransactionManager, Propagation, transactional,
+    afterCommit, afterRollback, clearTransactionManager, DEFAULT_DATASOURCE, DatasourceSetupError,
+    PlatformTransactionManager, Propagation, transactional, TransactionContextMixingError,
     Transactional, TransactionClosedError, TransactionTimeoutError, useTransactionManager,
 } from "@tranjs/core";
 import { withTestConnection, mockTransactions, withTestTransaction } from "@tranjs/testing";
@@ -11,7 +12,7 @@ export interface TestConnectionDriver {
     kind: "pg" | "mysql2" | "postgres";
     manager: any;
     otherManager: any;
-    ambient: (datasource: symbol) => any;
+    ambient: (datasource?: string | symbol) => any;
     outside: (text: string) => Promise<any>;
     rows: (result: any) => any[];
     query: (db: any, text: string, values?: any[]) => Promise<any>;
@@ -45,7 +46,302 @@ async function rejected(operation: Promise<unknown>): Promise<unknown> {
     throw new Error("Expected operation to reject");
 }
 
+// No other driver dependency: this contract also runs in the postgres-v3 sandbox.
+class ForeignContextManager extends PlatformTransactionManager<{ query: jest.Mock }> {
+    readonly nativeQuery = jest.fn();
+    constructor() { super(); }
+    async beginTransaction() {
+        return { transaction: { query: this.nativeQuery }, metadata: { driverName: "foreign-context-contract" } };
+    }
+    async commitTransaction() {}
+    async rollbackTransaction() {}
+}
+
+export function contextResolutionContract(label: string, create: (options: { maxConnections: number }) => TestConnectionDriver) {
+    describe(`ctx resolution / ${label} (real database)`, () => {
+        const named = Symbol(`ctx-${label}`);
+        const alias = `ctx-${label}-alias`;
+        const foreignName = Symbol(`ctx-${label}-foreign`);
+        const failure = new Error("ctx child rollback");
+        let driver: TestConnectionDriver;
+        let dispatches: jest.Mock;
+        const ambient = () => driver.ambient();
+        const explicit = (datasource: string | symbol) => driver.ambient(datasource);
+        const tx = <R>(datasource: string | symbol, fn: () => R, propagation = Propagation.REQUIRED) =>
+            transactional(fn, { datasource, propagation })();
+        const select = async (db: any) => {
+            const rows = driver.rows(await driver.query(db, "SELECT 7 AS n"));
+            expect(Number(rows[0].n)).toBe(7);
+        };
+        const lateOperations = (db: any): (() => unknown)[] => {
+            const operations: (() => unknown)[] = [() => select(db)];
+            for (const method of driver.kind === "postgres" ? ["unsafe"] : driver.kind === "mysql2" ? ["query", "execute"] : ["query"]) {
+                const bound = db[method].bind(db);
+                operations.push(() => bound("SELECT 7 AS n"));
+            }
+            if (driver.kind === "postgres") operations.push(() => db`SELECT 7 AS n`);
+            return operations;
+        };
+        const assertClosed = async (operations: (() => unknown)[]) => {
+            const before = dispatches.mock.calls.length;
+            for (const operation of operations) {
+                const error = await rejected(Promise.resolve().then(operation));
+                expect(error).toBeInstanceOf(TransactionClosedError);
+                expect(error).toHaveProperty("message", "Transaction already finished");
+                expect(dispatches).toHaveBeenCalledTimes(before);
+            }
+        };
+
+        beforeAll(() => {
+            // Unlike the max-one fixture contract below, production nesting needs
+            // two simultaneous checkouts, even when managers share the same pool.
+            driver = create({ maxConnections: 2 });
+        });
+        beforeEach(() => {
+            clearTransactionManager();
+            useTransactionManager(driver.otherManager, named);
+            useTransactionManager(driver.otherManager, alias);
+            dispatches = jest.fn();
+            const observed = new WeakMap<object, any>();
+            const nativeTransactions = new WeakMap<object, any>();
+            for (const manager of [driver.manager, driver.otherManager]) {
+                const begin = manager.beginTransaction.bind(manager);
+                if (driver.kind === "postgres") {
+                    const release = manager.releaseTransaction.bind(manager);
+                    jest.spyOn(manager, "releaseTransaction").mockImplementation((transaction: any, ...args: any[]) =>
+                        release(nativeTransactions.get(transaction) ?? transaction, ...args));
+                }
+                jest.spyOn(manager, "beginTransaction").mockImplementation(async (...args: any[]) => {
+                    const context = await begin(...args);
+                    const transaction = context.transaction;
+                    const existing = observed.get(transaction);
+                    if (existing) {
+                        context.transaction = existing;
+                        return context;
+                    }
+                    for (const method of driver.kind === "postgres" ? ["unsafe"] : driver.kind === "mysql2" ? ["query", "execute"] : ["query"]) {
+                        const native = transaction[method].bind(transaction);
+                        jest.spyOn(transaction, method).mockImplementation((...params: any[]) => {
+                            dispatches(method, ...params);
+                            return native(...params);
+                        });
+                    }
+                    if (driver.kind === "postgres") {
+                        context.transaction = new Proxy(transaction, {
+                            apply(target, receiver, params) {
+                                dispatches("tag", ...params);
+                                return Reflect.apply(target, receiver, params);
+                            },
+                        });
+                        nativeTransactions.set(context.transaction, transaction);
+                    }
+                    observed.set(transaction, context.transaction);
+                    observed.set(context.transaction, context.transaction);
+                    return context;
+                });
+            }
+        });
+        afterEach(() => {
+            for (const key of [DEFAULT_DATASOURCE, named, alias, foreignName]) clearTransactionManager(key);
+            jest.restoreAllMocks();
+        });
+        afterAll(async () => { await driver.close(); });
+
+        it("uses the default-only live transaction and preserves explicit default selection", async () => {
+            useTransactionManager(driver.manager);
+            await tx(DEFAULT_DATASOURCE, async () => {
+                expect(ambient()).toBe(explicit(DEFAULT_DATASOURCE));
+                await select(ambient());
+            });
+        });
+
+        it.each([false, true])("uses a named-only live transaction with an inactive default registered: %s", async registered => {
+            if (registered) useTransactionManager(driver.manager);
+            await tx(named, async () => {
+                expect(ambient()).toBe(explicit(named));
+                expect(ambient()).toBe(explicit(alias));
+                await select(ambient());
+                if (registered) expect(() => explicit(DEFAULT_DATASOURCE)).toThrow("Transaction context not initialized");
+                else expect(() => explicit(DEFAULT_DATASOURCE)).toThrow(DatasourceSetupError);
+            });
+        });
+
+        it("preserves the no-default setup error and registered-default no-context error outside transactions", () => {
+            const before = dispatches.mock.calls.length;
+            expect(ambient).toThrow(DatasourceSetupError);
+            useTransactionManager(driver.manager);
+            expect(ambient).toThrow("Transaction context not initialized");
+            expect(() => explicit(named)).toThrow("Transaction context not initialized");
+            expect(dispatches).toHaveBeenCalledTimes(before);
+        });
+
+        it.each([false, true])("selects the innermost datasource in production nesting (named outer: %s)", async namedOuter => {
+            useTransactionManager(driver.manager);
+            const outerName = namedOuter ? named : DEFAULT_DATASOURCE;
+            const innerName = namedOuter ? DEFAULT_DATASOURCE : named;
+            await tx(outerName, async () => {
+                const outer = ambient();
+                expect(outer).toBe(explicit(outerName));
+                await tx(innerName, async () => {
+                    expect(ambient()).toBe(explicit(innerName));
+                    expect(ambient()).not.toBe(outer);
+                    expect(explicit(outerName)).toBe(outer);
+                    await select(ambient());
+                    await select(explicit(outerName));
+                });
+                expect(ambient()).toBe(outer);
+                await select(outer);
+            });
+        });
+
+        it("rejects a foreign innermost manager instead of falling back to the live default", async () => {
+            const foreign = new ForeignContextManager();
+            useTransactionManager(driver.manager);
+            useTransactionManager(foreign, foreignName);
+            await tx(DEFAULT_DATASOURCE, async () => {
+                const outer = ambient();
+                let retained!: () => any;
+                await tx(foreignName, async () => {
+                    const before = dispatches.mock.calls.length;
+                    expect(ambient).toThrow(TransactionContextMixingError);
+                    expect(() => explicit(foreignName)).toThrow(TransactionContextMixingError);
+                    expect(dispatches).toHaveBeenCalledTimes(before);
+                    retained = AsyncResource.bind(ambient);
+                    expect(explicit(DEFAULT_DATASOURCE)).toBe(outer);
+                    await select(outer);
+                });
+                await assertClosed([retained]);
+                expect(ambient()).toBe(outer);
+            });
+            expect(foreign.nativeQuery).not.toHaveBeenCalled();
+        });
+
+        for (const order of ["default-to-named", "named-to-default", "same-manager-REQUIRES_NEW"] as const) {
+            it.each([false, true])(`does not fall through a retained closed ${order} child (rollback: %s)`, async rollback => {
+                useTransactionManager(driver.manager);
+                const outerName = order === "named-to-default" ? named : DEFAULT_DATASOURCE;
+                const innerName = order === "default-to-named" ? named : DEFAULT_DATASOURCE;
+                const late: (() => unknown)[] = [];
+                await tx(outerName, async () => {
+                    const outer = ambient();
+                    let retainedOuter!: () => any;
+                    const operation = tx(innerName, async () => {
+                        const inner = ambient();
+                        expect(inner).toBe(explicit(innerName));
+                        expect(inner).not.toBe(outer);
+                        late.push(AsyncResource.bind(ambient), AsyncResource.bind(() => select(ambient())), ...lateOperations(inner));
+                        retainedOuter = AsyncResource.bind(() => explicit(outerName));
+                        await select(inner);
+                        if (rollback) throw failure;
+                    }, order === "same-manager-REQUIRES_NEW" ? Propagation.REQUIRES_NEW : Propagation.REQUIRED);
+                    if (rollback) await expect(operation).rejects.toBe(failure);
+                    else await operation;
+                    await assertClosed(late);
+                    // Explicit selection can still reach a different live manager;
+                    // the same manager's captured child scope must remain closed.
+                    if (order !== "same-manager-REQUIRES_NEW") {
+                        expect(retainedOuter()).toBe(outer);
+                        await select(retainedOuter());
+                    } else await assertClosed([retainedOuter]);
+                    expect(ambient()).toBe(outer);
+                    expect(explicit(outerName)).toBe(outer);
+                    await select(ambient());
+                });
+                await assertClosed(late);
+            });
+        }
+
+        it("gates named test-session owners independently of their shared physical root and a live default", async () => {
+            useTransactionManager(driver.manager);
+            const late: (() => unknown)[] = [];
+            await withTestTransaction(async () => {
+                await tx(DEFAULT_DATASOURCE, async () => {
+                    const outer = ambient();
+                    let owner: any;
+                    await tx(named, async () => {
+                        owner = ambient();
+                        const physical = driver.otherManager.getCurrentTransaction();
+                        const ownerLookup = AsyncResource.bind(ambient);
+                        late.push(ownerLookup, AsyncResource.bind(() => select(ambient())), ...lateOperations(owner));
+                        expect(owner).toBe(explicit(alias));
+                        for (const propagation of [Propagation.REQUIRED, Propagation.NESTED]) {
+                            let joinedLookup!: () => any;
+                            await tx(named, async () => {
+                                expect(ambient()).toBe(owner);
+                                expect(driver.otherManager.getCurrentTransaction()).toBe(physical);
+                                joinedLookup = AsyncResource.bind(ambient);
+                                late.push(joinedLookup, AsyncResource.bind(() => select(ambient())));
+                                await select(ambient());
+                            }, propagation);
+                            expect(joinedLookup()).toBe(owner);
+                            await select(joinedLookup());
+                            expect(ownerLookup()).toBe(owner);
+                        }
+                        for (const rollback of [false, true]) {
+                            const childLate: (() => unknown)[] = [];
+                            const operation = tx(named, async () => {
+                                const child = ambient();
+                                expect(child).not.toBe(owner);
+                                expect(child).toBe(explicit(named));
+                                expect(driver.otherManager.getCurrentTransaction()).toBe(physical);
+                                childLate.push(AsyncResource.bind(ambient), AsyncResource.bind(() => select(ambient())), ...lateOperations(child));
+                                await select(child);
+                                if (rollback) throw failure;
+                            }, Propagation.REQUIRES_NEW);
+                            if (rollback) await expect(operation).rejects.toBe(failure);
+                            else await operation;
+                            await assertClosed(childLate);
+                            late.push(...childLate);
+                            expect(ambient()).toBe(owner);
+                            await select(owner);
+                        }
+                    });
+                    // The named physical test root is still checked out, and the
+                    // default is live. Neither may revive the finished owner.
+                    await assertClosed(late);
+                    expect(ambient()).toBe(outer);
+                    await select(explicit(DEFAULT_DATASOURCE));
+                    await tx(named, async () => {
+                        expect(ambient()).not.toBe(owner);
+                        await select(ambient());
+                        await assertClosed(late);
+                    });
+                });
+                await assertClosed(late);
+            }, { datasource: named });
+            await assertClosed(late);
+        });
+
+        it.each([false, true])("selects nested datasources inside a named test session (named outer: %s)", async namedOuter => {
+            useTransactionManager(driver.manager);
+            const outerName = namedOuter ? named : DEFAULT_DATASOURCE;
+            const innerName = namedOuter ? DEFAULT_DATASOURCE : named;
+            const late: (() => unknown)[] = [];
+            await withTestTransaction(async () => {
+                await tx(outerName, async () => {
+                    const outer = ambient();
+                    await tx(innerName, async () => {
+                        const inner = ambient();
+                        expect(inner).toBe(explicit(innerName));
+                        expect(inner).not.toBe(outer);
+                        expect(explicit(outerName)).toBe(outer);
+                        late.push(AsyncResource.bind(ambient), AsyncResource.bind(() => select(ambient())), ...lateOperations(inner));
+                        await select(inner);
+                        await select(explicit(outerName));
+                    });
+                    await assertClosed(late);
+                    expect(ambient()).toBe(outer);
+                    await select(outer);
+                });
+                await assertClosed(late);
+            }, { datasource: named });
+            await assertClosed(late);
+        });
+    });
+}
+
 export function testConnectionContract(label: string, create: (options: { maxConnections: number }) => TestConnectionDriver) {
+    contextResolutionContract(label, create);
     describe(`withTestConnection / ${label} (real database)`, () => {
         const datasource = Symbol(label);
         const other = Symbol(`${label}-other`);

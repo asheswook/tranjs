@@ -1,8 +1,11 @@
 import { Pool, PoolClient as NativeClient, Query } from "pg";
 import QueryStream = require("pg-query-stream");
 import { EventEmitter } from "node:events";
+import { AsyncResource } from "node:async_hooks";
 import {
+    ConcurrentNestedTransactionError,
     IsolationLevel,
+    DEFAULT_DATASOURCE,
     InvalidIsolationLevelError,
     getTransactionManager,
     PlatformTransactionManager,
@@ -183,6 +186,94 @@ describe("PostgreSQL driver (real database)", () => {
             }, { propagation: Propagation.NESTED })();
         })();
         expect(await ids()).toEqual([1, 3]);
+    });
+
+    it("rejects a NESTED scope from the retained context of an ended sibling while another sibling is open", async () => {
+        const nested = { propagation: Propagation.NESTED };
+        const events: string[] = [];
+        const callbackC = jest.fn();
+        await transactional(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            // 1. A finishes; its async context is kept.
+            let fromA!: <T>(fn: () => T) => T;
+            await transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                fromA = AsyncResource.bind(<T>(fn: () => T): T => fn());
+            }, nested)();
+            // 2. B is open under the owner.
+            let closeB!: () => void;
+            const holdB = new Promise<void>(resolve => { closeB = resolve; });
+            let enteredB!: () => void;
+            const inB = new Promise<void>(resolve => { enteredB = resolve; });
+            const b = transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+                enteredB();
+                await holdB;
+                throw failure;
+            }, nested)();
+            await inB;
+            // 3. C from A's context would open a savepoint inside B's and be undone with it.
+            await expect(fromA(() => transactional(async () => {
+                callbackC();
+                await ctx().query(`INSERT INTO ${table} VALUES (4)`);
+                registerAfterCommit(() => { events.push("C commit hook"); });
+            }, nested)())).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+            // Detached work can still start an independent transaction on its own connection.
+            await fromA(() => transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (5)`);
+            }, { propagation: Propagation.REQUIRES_NEW })());
+            // 4. B rolls back to its savepoint; the owner continues.
+            closeB();
+            await expect(b).rejects.toBe(failure);
+            // With no sibling open, the retained context nests again and its work and hook are kept.
+            await fromA(() => transactional(async () => {
+                await ctx().query(`INSERT INTO ${table} VALUES (6)`);
+                registerAfterCommit(() => { events.push("sequential commit hook"); });
+            }, nested)());
+            expect((await ctx().query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id)).toEqual([1, 2, 5, 6]);
+        })();
+        expect(callbackC).not.toHaveBeenCalled();
+        expect(events).toEqual(["sequential commit hook"]);
+        expect(await ids()).toEqual([1, 2, 5, 6]);
+    });
+
+    it("rejects a NESTED scope from the retained context of an ended scope whose own child is still open", async () => {
+        const nested = { propagation: Propagation.NESTED };
+        const callbackD = jest.fn();
+        let childResult!: PromiseSettledResult<unknown>;
+        await expect(transactional(async () => {
+            await ctx().query(`INSERT INTO ${table} VALUES (1)`);
+            let fromE!: <T>(fn: () => T) => T;
+            let closeC!: () => void;
+            const holdC = new Promise<void>(resolve => { closeC = resolve; });
+            let c!: Promise<unknown>;
+            // E starts child C without awaiting it, then ends.
+            await transactional(async () => {
+                fromE = AsyncResource.bind(<T>(fn: () => T): T => fn());
+                await ctx().query(`INSERT INTO ${table} VALUES (2)`);
+                let enteredC!: () => void;
+                const inC = new Promise<void>(resolve => { enteredC = resolve; });
+                c = transactional(async () => {
+                    await ctx().query(`INSERT INTO ${table} VALUES (3)`);
+                    enteredC();
+                    await holdC;
+                }, nested)();
+                await inC;
+            }, nested)();
+            // D from E's retained context must not open a savepoint next to the open C.
+            await expect(fromE(() => transactional(async () => {
+                callbackD();
+                await ctx().query(`INSERT INTO ${table} VALUES (4)`);
+            }, nested)())).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+            expect((await ctx().query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id)).toEqual([1, 2, 3]);
+            closeC();
+            [childResult] = await Promise.allSettled([c]);
+            throw failure;
+        })()).rejects.toBe(failure);
+        expect(callbackD).not.toHaveBeenCalled();
+        // Releasing E's savepoint already removed C's, which is what the missing await costs the caller.
+        expect(childResult).toMatchObject({ status: "rejected", reason: { code: "3B001" } });
+        expect(await ids()).toEqual([]);
     });
 
     it("applies the requested isolation level", async () => {
@@ -466,13 +557,61 @@ describe("PostgreSQL driver (real database)", () => {
             await outer.query(`INSERT INTO ${table} VALUES (1)`);
             expect(() => ctx(second)).toThrow("Transaction context not initialized");
             await transactional(async () => {
-                expect(ctx()).toBe(outer);
+                expect(ctx(DEFAULT_DATASOURCE)).toBe(outer);
+                expect(ctx()).toBe(ctx(second));
                 expect(ctx(second)).not.toBe(outer);
                 await ctx(second).query(`INSERT INTO ${table} VALUES (2)`);
             }, { datasource: second })();
             throw failure;
         })()).rejects.toBe(failure);
         expect(await ids()).toEqual([2]);
+    });
+
+    it.each([false, true])("omitted named-datasource hooks run only after physical SQL completion (rollback: %s)", async rollback => {
+        const events: string[] = [];
+        const observedRows: number[][] = [];
+        const committed = jest.fn(async () => {
+            events.push("commit hook");
+            observedRows.push(await ids());
+        });
+        const rolledBack = jest.fn(async () => {
+            events.push("rollback hook");
+            observedRows.push(await ids());
+        });
+        let querySpy: jest.SpyInstance | undefined;
+        try {
+            const operation = transactional(async () => {
+                const connection = getTransactionManager(second).getCurrentTransaction() as NativeClient;
+                const query = connection.query;
+                querySpy = jest.spyOn(connection, "query").mockImplementation(((...args: any[]) => {
+                    const result = Reflect.apply(query, connection, args);
+                    if (args[0] === "COMMIT" || args[0] === "ROLLBACK") {
+                        return Promise.resolve(result).then(completed => {
+                            events.push(`SQL ${completed.command}`);
+                            return completed;
+                        });
+                    }
+                    return result;
+                }) as any);
+                registerAfterCommit(committed);
+                registerAfterRollback(rolledBack);
+                await ctx(second).query(`INSERT INTO ${table} VALUES (1)`);
+                expect(await ids()).toEqual([]);
+                expect(committed).not.toHaveBeenCalled();
+                expect(rolledBack).not.toHaveBeenCalled();
+                if (rollback) throw failure;
+            }, { datasource: second })();
+            if (rollback) await expect(operation).rejects.toBe(failure);
+            else await operation;
+            expect(events).toEqual(rollback ? ["SQL ROLLBACK", "rollback hook"] : ["SQL COMMIT", "commit hook"]);
+            expect(observedRows).toEqual([rollback ? [] : [1]]);
+            expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 1);
+            expect(rolledBack).toHaveBeenCalledTimes(rollback ? 1 : 0);
+            expect(await ids()).toEqual(rollback ? [] : [1]);
+        } finally {
+            querySpy?.mockRestore();
+            await pool.query(`DELETE FROM ${table}`);
+        }
     });
 
     it("throws the compatibility error outside a transaction", () => {

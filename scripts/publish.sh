@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Before a core release, set BOTH @tranjs/testing's @tranjs/core peerDependency
-# (with its caret range) and devDependency to the selected release version.
-# Lerna updates only the first matching dependency collection; do not rely on it
-# to update the peer range as well. Make both edits before publishing the release.
+# Release @tranjs/testing when its code changes or it needs a newer core than
+# its peer range allows. For a core range update, set BOTH its @tranjs/core
+# peerDependency (caret range) and devDependency to the selected version before
+# publishing. Lerna updates only the first matching dependency collection.
 npm run build
 npm test
 npm run test:packed

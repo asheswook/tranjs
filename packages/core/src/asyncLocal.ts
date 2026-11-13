@@ -16,11 +16,19 @@ export interface TxState {
     savepointCounter: number;
     afterCommit: TransactionSynchronization[];
     afterRollback: TransactionSynchronization[];
+    /** Set once, in the step that clears `active` and before any hook runs. `failed`: COMMIT or ROLLBACK threw. */
+    outcome?: "committed" | "rolled-back" | "failed";
 }
 
 /** Per-parent scope guard; distinct recursive scopes share the physical TxState. */
 export interface TransactionScope {
     nestedOpen: boolean;
+    /** NESTED scopes only: hooks wait here until the savepoint is released or rolled back. */
+    hooks?: Pick<TxState, "afterCommit" | "afterRollback">;
+    /** NESTED scopes only: the scope that was open when this one began. */
+    parent?: TransactionScope;
+    /** NESTED scopes only: `released` covers every exit that did not roll back to the savepoint. */
+    outcome?: "released" | "rolled-back";
 }
 
 export interface TransactionFrame {

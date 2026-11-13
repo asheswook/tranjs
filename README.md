@@ -4,14 +4,11 @@
 [![npm](https://img.shields.io/npm/v/@tranjs/core)](https://www.npmjs.com/package/@tranjs/core)
 [![license](https://img.shields.io/npm/l/@tranjs/core)](https://github.com/asheswook/tranjs/blob/main/LICENSE)
 
-![Node.js](https://img.shields.io/badge/Node.js-supported-339933?logo=nodedotjs&logoColor=white)
-![Bun](https://img.shields.io/badge/Bun-supported-000000?logo=bun&logoColor=white)
-![Deno](https://img.shields.io/badge/Deno-supported-000000?logo=deno&logoColor=white)
-![Cloudflare Workers](https://img.shields.io/badge/Cloudflare%20Workers-supported-F38020?logo=cloudflareworkers&logoColor=white)
+Declarative transactions for JavaScript and TypeScript, without an ORM. Queries are written with the driver's own API (`pg`, `postgres`, or `mysql2`); TranJS manages the transaction around them, with semantics modeled on Spring's `@Transactional`.
 
-Declarative transactions for JavaScript and TypeScript, without an ORM. You write SQL with your usual driver (`pg`, `postgres`, or `mysql2`); TranJS manages the transaction around it, with semantics modelled on Spring's `@Transactional`.
-
-```ts
+```typescript
+// Example: a service with @Transactional methods (pg).
+// Assumes a registered pg manager and an accounts(id, balance) table.
 import { Transactional, Propagation } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
@@ -38,15 +35,15 @@ class AccountService {
 
 ## Features
 
-- ✅ **Declarative transactions** with `@Transactional`, or `transactional` for plain functions
-- 🔁 **All 7 Spring propagation types**: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `NESTED` (savepoints)
-- 🛡️ **Spring rollback rules**: a failure in a joined method marks the whole transaction rollback-only
-- 🎛️ **Isolation level, read-only and timeout** per transaction
-- 🗄️ **Multiple datasources**, each with independent transactions
-- 🪝 **`afterCommit` / `afterRollback` hooks**
-- 🐘 **PostgreSQL and MySQL** through `pg`, `postgres` (postgres.js), and `mysql2`, or [your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
-- ☁️ **Runs on Node.js, Bun, Deno and Cloudflare Workers**
-- ⚡ **TypeScript native**, no runtime dependencies in the core package
+- Declarative transactions with `@Transactional`, or `transactional` for plain functions
+- All 7 Spring propagation types: `REQUIRED`, `REQUIRES_NEW`, `MANDATORY`, `SUPPORTS`, `NOT_SUPPORTED`, `NEVER`, `NESTED` (savepoints)
+- Spring rollback rules: a failure in a joined method marks the whole transaction rollback-only
+- Isolation level, read-only and timeout per transaction
+- Multiple datasources, each with independent transactions
+- `afterCommit` / `afterRollback` hooks
+- PostgreSQL and MySQL through `pg`, `postgres` (postgres.js) and `mysql2`, or a [custom driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
+- Node.js, Bun, Deno and Cloudflare Workers
+- Written in TypeScript, with no runtime dependencies in the core package
 
 ## Install
 
@@ -61,33 +58,48 @@ npm install @tranjs/core @tranjs/postgres postgres
 npm install @tranjs/core @tranjs/mysql2 mysql2
 ```
 
-Enable decorators in `tsconfig.json`:
+`@tranjs/core` needs Node.js 16.4 or later. `@tranjs/postgres` needs Node.js 18 or later.
 
-```json
+`@Transactional` is a TypeScript legacy decorator and needs `experimentalDecorators`. With standard decorators the class definition throws a `TypeError`. `transactional()` needs no compiler option.
+
+```jsonc
+// tsconfig.json. Only for @Transactional; transactional() needs no compiler option.
 { "compilerOptions": { "experimentalDecorators": true } }
 ```
 
-Register a transaction manager once at startup:
+A transaction manager is registered per datasource. Each driver has a helper for it:
 
-```ts
+```typescript
+// Example: pg
 import { Pool } from "pg";
 import { usePostgreSQLTransactionManager } from "@tranjs/pg";
 
 usePostgreSQLTransactionManager(new Pool({ connectionString: process.env.DATABASE_URL }));
 ```
 
-```ts
+```typescript
+// Example: postgres.js
+import postgres from "postgres";
+import { usePostgresTransactionManager } from "@tranjs/postgres";
+
+usePostgresTransactionManager(postgres(process.env.DATABASE_URL!));
+```
+
+```typescript
+// Example: mysql2
 import { createPool } from "mysql2/promise";
 import { useMySQLTransactionManager } from "@tranjs/mysql2";
 
 useMySQLTransactionManager(createPool(process.env.DATABASE_URL!));
 ```
 
-Register managers once, not inside a request handler. Re-registering per request breaks concurrent requests.
+Registration replaces the manager for that datasource process-wide. A transaction that began under the previous manager keeps running, but a transactional call made inside it afterwards resolves the new manager and begins a separate transaction instead of joining. That is why registration belongs at startup or module scope and not in a request handler.
 
 ## Without decorators
 
-```ts
+```typescript
+// Example: transactional() around a plain function (pg).
+// Assumes a registered pg manager and an orders(user_id) table.
 import { transactional, IsolationLevel } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
 
@@ -96,22 +108,25 @@ const createOrder = transactional(async (userId: string) => {
     return rows[0];
 }, { isolationLevel: IsolationLevel.SERIALIZABLE, timeout: 5000 });
 
-const order = await createOrder(userId);
+const order = await createOrder("user-1");
 ```
 
-`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` used when you call it. The function can be synchronous or asynchronous. The wrapper always returns a Promise: it waits for the result and rejects if the call fails. It copies the configuration when you create it and looks up the manager when you call it.
+`transactional(fn, config?)` wraps a function and keeps its arguments and the `this` it is called with. The function can be synchronous or asynchronous; the wrapper always returns a Promise. See [transaction scopes](https://github.com/asheswook/tranjs/blob/main/docs/api.md#transaction-scopes).
 
 ## Rollback rules
 
 - If a method throws, its transaction rolls back and the error is rethrown.
-- If an inner method that joined the transaction throws, the whole transaction is marked rollback-only. Catching the error in the outer method does not save it; the commit turns into a rollback and throws `UnexpectedRollbackError`. To let an inner step fail on its own, use `Propagation.REQUIRES_NEW` (separate transaction) or `Propagation.NESTED` (savepoint).
+- If an inner method that joined the transaction throws, the whole transaction is marked rollback-only. Catching the error in the outer method does not save it; the commit turns into a rollback and throws `UnexpectedRollbackError`.
+- An inner step fails on its own under `Propagation.REQUIRES_NEW` (a separate transaction on a second connection, which stays committed if the outer one later rolls back) or `Propagation.NESTED` (a savepoint, which rolls back with the outer one).
 
-```ts
+```typescript
+// Partial example: a method of a service class.
+// this.audit.record is @Transactional(Propagation.REQUIRES_NEW).
 @Transactional()
 async placeOrder(order: Order) {
     await this.saveOrder(order);
     try {
-        await this.audit.record(order);   // @Transactional(Propagation.REQUIRES_NEW)
+        await this.audit.record(order);
     } catch {
         // audit failure is rolled back on its own; the order still commits
     }
@@ -120,9 +135,11 @@ async placeOrder(order: Order) {
 
 ## Testing
 
-Use `@tranjs/testing` to check transactions and roll back test data. This example uses the PostgreSQL manager and `docs_users` table from the guide's setup.
+`@tranjs/testing` runs a service against a real database and rolls its writes back, or checks transaction boundaries with no database. Example with Jest and `pg`; `example_users` stands for any table:
 
-```ts
+```typescript
+// Example (Jest + pg). Assumes a registered pg manager and any table
+// with a text column, here example_users(name).
 import { expect, test } from "@jest/globals";
 import { transactional } from "@tranjs/core";
 import { ctx } from "@tranjs/pg";
@@ -131,7 +148,7 @@ import "@tranjs/testing/jest";
 
 const repository = {
     async save(name: string) {
-        await ctx().query("INSERT INTO docs_users(name) VALUES ($1)", [name]);
+        await ctx().query("INSERT INTO example_users(name) VALUES ($1)", [name]);
     },
 };
 function createUserService(repo: typeof repository) {
@@ -146,52 +163,51 @@ test("create saves a user in a transaction", () => withTestTransaction(async tx 
 }));
 ```
 
-See [connection lifetime](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#connection-lifetime) for connection rules and the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for setup and examples.
+See [connection lifetime](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#connection-lifetime) for connection rules and the [testing guide](https://github.com/asheswook/tranjs/blob/main/docs/testing.md) for the example setup and more examples.
 
 ## Supported platforms
 
-| Platform | Status | How to use |
+| Platform | Status | Mode |
 |---|---|---|
-| Node.js | ✅ Supported | Pool mode (`usePostgreSQLTransactionManager`, `useMySQLTransactionManager`) |
-| Bun | ✅ Supported | Same as Node.js |
-| Deno | ✅ Supported | Same as Node.js, with `npm:` specifiers and `experimentalDecorators` in `deno.json` |
-| AWS Lambda, Vercel Functions (Node.js runtime) | ✅ Supported | Pool mode, registered once at module scope |
-| Cloudflare Workers | ✅ Supported | Connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) |
-| Edge runtimes without TCP sockets (e.g. Vercel Edge) | ❌ Not supported | The drivers need TCP connections |
+| Node.js | Supported | Pool mode |
+| Bun | Supported | Pool mode |
+| Deno | Supported | Pool mode, with `npm:` specifiers. `@Transactional` needs `"experimentalDecorators": true` in `deno.json`. |
+| AWS Lambda, Vercel Functions (Node.js runtime) | Supported | Pool mode, registered once at module scope |
+| Cloudflare Workers | Supported | Connection-per-transaction mode with [Hyperdrive](https://developers.cloudflare.com/hyperdrive/) |
+| Edge runtimes without TCP sockets (e.g. Vercel Edge) | Not supported | The drivers need TCP connections |
+
+CI runs the test suites on Node.js only.
 
 ### Cloudflare Workers
 
-Workers can't share a connection pool between requests. Use the connection-per-transaction mode and register it at module scope:
+Workers cannot keep a connection pool across requests, so the pool managers do not apply. The connection-per-transaction managers open one connection per transaction and need the `nodejs_compat` flag. Example with Hyperdrive:
 
-```ts
+```typescript
+// Example: Cloudflare Workers + Hyperdrive (pg).
+// Assumes a Hyperdrive binding named HYPERDRIVE.
 import { env } from "cloudflare:workers";
 import { usePostgreSQLClientPerTransaction } from "@tranjs/pg";
 
 usePostgreSQLClientPerTransaction(() => ({ connectionString: env.HYPERDRIVE.connectionString }));
 ```
 
-MySQL works the same way with `useMySQLConnectionPerTransaction`, but Hyperdrive ignores MySQL isolation levels, so this mode rejects them. See [Cloudflare Workers + Hyperdrive](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#cloudflare-workers--hyperdrive).
+postgres.js has `usePostgresConnectionPerTransaction` and MySQL has `useMySQLConnectionPerTransaction`. Hyperdrive ignores MySQL isolation levels, so the MySQL mode rejects them. See [Cloudflare Workers + Hyperdrive](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md#cloudflare-workers--hyperdrive).
 
 ## Documentation
 
 - [API](https://github.com/asheswook/tranjs/blob/main/docs/api.md): propagation, options, hooks, multiple datasources, errors
 - [Drivers](https://github.com/asheswook/tranjs/blob/main/docs/drivers.md): PostgreSQL, MySQL, Cloudflare Workers
 - [Testing](https://github.com/asheswook/tranjs/blob/main/docs/testing.md): mockTransactions, withTestTransaction, Jest, Vitest
-- [Writing your own driver](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
+- [Custom drivers](https://github.com/asheswook/tranjs/blob/main/docs/self-implement-guide.md)
 - [Examples](https://github.com/asheswook/tranjs/tree/main/examples)
+- [Changelog](https://github.com/asheswook/tranjs/blob/main/CHANGELOG.md): behavior changes and migration notes for each release
 
 ## Contributing
 
-Issues and pull requests are welcome. To run the tests locally:
-
-```bash
-docker compose up -d
-npm install
-npm run build && npm test
-```
+Issues and pull requests are welcome. [CONTRIBUTING.md](https://github.com/asheswook/tranjs/blob/main/CONTRIBUTING.md) lists the local test commands.
 
 ## License
 
-[LGPL-2.1](https://github.com/asheswook/tranjs/blob/main/LICENSE)
+[LGPL-2.1-only](https://github.com/asheswook/tranjs/blob/main/LICENSE)
 
 Inspired by the [Spring Framework](https://github.com/spring-projects/spring-framework).

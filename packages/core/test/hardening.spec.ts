@@ -1,4 +1,5 @@
 import "reflect-metadata";
+import { AsyncResource } from "node:async_hooks";
 import {
     afterCommit, afterRollback, AsyncLocal, ctx, DatasourceSetupError, DEFAULT_DATASOURCE,
     getTransactionManager, GlobalTransactionManager, IllegalTransactionStateException, IsolationLevel,
@@ -424,6 +425,171 @@ describe("transaction hardening", () => {
         ]);
     });
 
+    describe("concurrent NESTED guard and retained contexts of ended scopes", () => {
+        type Retained = <T>(fn: () => T) => T;
+        const retain = (): Retained => AsyncResource.bind(<T>(fn: () => T): T => fn());
+        const nested = <T>(callback: () => T | Promise<T>) => manager.executeTransaction(Propagation.NESTED, callback);
+        function gate() {
+            let open!: () => void;
+            const closed = new Promise<void>(resolve => { open = resolve; });
+            return { closed, open };
+        }
+        const savepoints = () => manager.events.filter(event => event.startsWith("savepoint")).length;
+
+        it.each([
+            ["released", "the owner"], ["rolled back", "the owner"],
+            ["released", "an open NESTED scope"], ["released", "the owner, two ended levels up"],
+        ] as const)("rejects a NESTED scope from the context of a %s sibling while another is open under %s", async (ended, where) => {
+            const callbackC = jest.fn();
+            const hookC = jest.fn();
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromA!: Retained;
+                const a = () => nested(() => {
+                    fromA = retain();
+                    if (ended === "rolled back") throw new Error("A fails");
+                });
+                const scenario = async () => {
+                    // 1. A ends and its context is kept.
+                    if (where === "the owner, two ended levels up") await nested(a);
+                    else if (ended === "rolled back") await expect(a()).rejects.toThrow("A fails");
+                    else await a();
+                    // 2. B is open under the same effective parent.
+                    const hold = gate();
+                    const b = nested(async () => { await hold.closed; throw new Error("B fails"); });
+                    await new Promise(resolve => setImmediate(resolve));
+                    const before = savepoints();
+                    // 3. C from A's retained context is a sibling of B, not a child of the ended A.
+                    await expect(fromA(() => nested(() => { callbackC(); afterCommit(hookC); })))
+                        .rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                    expect(savepoints()).toBe(before);
+                    // The rejected call must not have released B's guard.
+                    await expect(nested(callbackC)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                    hold.open();
+                    await expect(b).rejects.toThrow("B fails");
+                    // 4. With no sibling open, the retained context starts NESTED scopes again, one at a time.
+                    await fromA(() => nested(() => { afterCommit(hookC); }));
+                    await nested(() => undefined);
+                    expect(savepoints()).toBe(before + 2);
+                };
+                if (where === "an open NESTED scope") await nested(scenario);
+                else await scenario();
+                expect(hookC).not.toHaveBeenCalled();
+            });
+            expect(callbackC).not.toHaveBeenCalled();
+            // Only the sequential scope's hook: the rejected C registered nothing.
+            expect(hookC).toHaveBeenCalledTimes(1);
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
+        it("a NESTED scope open from a retained context locks the same parent for direct siblings", async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromA!: Retained;
+                await nested(() => { fromA = retain(); });
+                const hold = gate();
+                const c = fromA(() => nested(() => hold.closed));
+                await new Promise(resolve => setImmediate(resolve));
+                await expect(nested(() => undefined)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                await expect(fromA(() => nested(() => undefined))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                hold.open();
+                await c;
+                await nested(() => undefined);
+            });
+            expect(manager.events).toEqual([
+                "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "savepoint:1:tranjs_sp_2", "release:1:tranjs_sp_2",
+                "savepoint:1:tranjs_sp_3", "release:1:tranjs_sp_3", "commit:1",
+            ]);
+        });
+
+        it.each(["released", "rolled back"] as const)("an ended (%s) scope whose own child is still open keeps guarding its retained context", async ended => {
+            const callbackD = jest.fn();
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromE!: Retained;
+                const hold = gate();
+                let c!: Promise<unknown>;
+                // E starts child C without awaiting it, then ends.
+                const e = nested(async () => {
+                    fromE = retain();
+                    const entered = gate();
+                    c = nested(async () => { entered.open(); await hold.closed; });
+                    await entered.closed;
+                    if (ended === "rolled back") throw new Error("E fails");
+                });
+                if (ended === "rolled back") await expect(e).rejects.toThrow("E fails");
+                else await e;
+                const before = savepoints();
+                // D from E's retained context is a sibling of the open C, as it was before E ended.
+                for (let attempt = 0; attempt < 2; attempt++) {
+                    // The second attempt shows that a rejected call does not release C's lock.
+                    await expect(fromE(() => nested(callbackD))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                }
+                expect(savepoints()).toBe(before);
+                hold.open();
+                await c;
+                // C unlocked the scope it locked (E), and nothing else was left locked.
+                await fromE(() => nested(() => undefined));
+                await nested(() => undefined);
+                expect(savepoints()).toBe(before + 2);
+            });
+            expect(callbackD).not.toHaveBeenCalled();
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
+        it("walks past an ended scope with no open child, and stops at an ended ancestor that has one", async () => {
+            await manager.executeTransaction(Propagation.REQUIRED, async () => {
+                let fromInner!: Retained;
+                const hold = gate();
+                let c!: Promise<unknown>;
+                // E > F: F ends with no child and its context is kept; E starts C without awaiting it, then ends.
+                await nested(async () => {
+                    await nested(() => { fromInner = retain(); });
+                    const entered = gate();
+                    c = nested(async () => { entered.open(); await hold.closed; });
+                    await entered.closed;
+                });
+                await expect(fromInner(() => nested(() => undefined))).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                hold.open();
+                await c;
+                // With C ended the walk passes F and E and reaches the owner's scope.
+                const longer = gate();
+                const d = fromInner(() => nested(() => longer.closed));
+                await new Promise(resolve => setImmediate(resolve));
+                await expect(nested(() => undefined)).rejects.toBeInstanceOf(ConcurrentNestedTransactionError);
+                longer.open();
+                await d;
+                await nested(() => undefined);
+            });
+            expect(manager.events[manager.events.length - 1]).toBe("commit:1");
+        });
+
+        it("detached work from an ended NESTED scope still starts new physical transactions", async () => {
+            let fromA!: Retained;
+            await manager.executeTransaction(Propagation.REQUIRED, async outer => {
+                await nested(() => { fromA = retain(); });
+                const hold = gate();
+                const b = nested(() => hold.closed);
+                await new Promise(resolve => setImmediate(resolve));
+                // An open sibling does not block an independent transaction.
+                await fromA(() => manager.executeTransaction(Propagation.REQUIRES_NEW, inner => {
+                    expect(inner).not.toBe(outer);
+                    expect(manager.getCurrentTransaction()).toBe(inner);
+                }));
+                hold.open();
+                await b;
+            });
+            // After the owner finished, the retained context has no transaction to nest in or join.
+            for (const propagation of [Propagation.NESTED, Propagation.REQUIRED, Propagation.REQUIRES_NEW]) {
+                await fromA(() => manager.executeTransaction(propagation, tx => {
+                    expect(manager.getCurrentTransaction()).toBe(tx);
+                }));
+            }
+            expect(manager.events).toEqual([
+                "begin:1", "savepoint:1:tranjs_sp_1", "release:1:tranjs_sp_1", "savepoint:1:tranjs_sp_2",
+                "begin:2", "commit:2", "release:1:tranjs_sp_2", "commit:1",
+                "begin:3", "commit:3", "begin:4", "commit:4", "begin:5", "commit:5",
+            ]);
+        });
+    });
+
     it("marks failed savepoint rollback rollback-only and rolls back the physical owner with hooks", async () => {
         const rollbackError = new Error("savepoint rollback failed");
         manager.savepointRollbackError = rollbackError;
@@ -603,7 +769,7 @@ describe("transaction hardening", () => {
         expect(log.error).not.toHaveBeenCalled();
     });
 
-    it("runs afterRollback sequentially after physical rollback, including hooks from failed NESTED scopes", async () => {
+    it("runs afterRollback sequentially after physical rollback, and a failed NESTED scope's hooks at its savepoint rollback", async () => {
         const log = logger();
         manager.setLogger(log);
         const error = new Error("outer");
@@ -616,14 +782,14 @@ describe("transaction hardening", () => {
                 afterRollback(() => { manager.events.push("nested"); });
                 throw new Error("nested");
             })).rejects.toThrow("nested");
-            expect(manager.events).not.toContain("nested");
+            expect(manager.events).toContain("nested");
             afterRollback(() => { throw new Error("hook"); });
             afterRollback(() => { manager.events.push("last"); });
             afterCommit(() => { manager.events.push("wrong"); });
             throw error;
         })).rejects.toBe(error);
         expect(manager.events).toEqual([
-            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "rollback:1", "first", "nested", "last",
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", "nested", "rollback:1", "first", "last",
         ]);
         expect(log.error).toHaveBeenCalledTimes(1);
     });
@@ -640,12 +806,182 @@ describe("transaction hardening", () => {
         const order: string[] = [];
         await manager.executeTransaction(Propagation.REQUIRED, async () => {
             await b.executeTransaction(Propagation.REQUIRED, () => {
-                afterCommit(() => { order.push("A"); });
+                afterCommit(() => { order.push("A"); }, DEFAULT_DATASOURCE);
                 afterCommit(() => { order.push("B"); }, datasourceB);
             });
             expect(order).toEqual(["B"]);
         });
         expect(order).toEqual(["B", "A"]);
+    });
+
+    it.each([
+        ["default", true, false], ["default", true, true],
+        ["named", true, false], ["named", true, true],
+        ["named", false, false], ["named", false, true],
+    ] as const)("omitted hooks follow the %s owner (default registered: %s, rollback: %s)", async (name, defaultRegistered, rollback) => {
+        const owner = name === "default" ? manager : new SavepointManager();
+        if (name === "named") useTransactionManager(owner, datasourceB);
+        if (!defaultRegistered) useTransactionManager(undefined as any);
+        const committed = jest.fn(() => { owner.events.push("committed hook"); });
+        const rolledBack = jest.fn(() => { owner.events.push("rolled back hook"); });
+        const error = new Error("owner failure");
+        const operation = owner.executeTransaction(Propagation.REQUIRED, () => {
+            afterCommit(committed);
+            afterRollback(rolledBack);
+            expect(committed).not.toHaveBeenCalled();
+            expect(rolledBack).not.toHaveBeenCalled();
+            if (rollback) throw error;
+        });
+        if (rollback) await expect(operation).rejects.toBe(error);
+        else await operation;
+        expect(owner.events).toEqual([
+            "begin:1", rollback ? "rollback:1" : "commit:1",
+            rollback ? "rolled back hook" : "committed hook",
+        ]);
+        expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 1);
+        expect(rolledBack).toHaveBeenCalledTimes(rollback ? 1 : 0);
+        if (name === "named") expect(manager.events).toEqual([]);
+    });
+
+    it.each([
+        ["default to named", false], ["default to named", true],
+        ["named to default", false], ["named to default", true],
+    ] as const)("omitted hooks choose the innermost owner, %s (rollback: %s)", async (direction, rollback) => {
+        const b = new SavepointManager();
+        useTransactionManager(b, datasourceB);
+        const outer = direction === "default to named" ? manager : b;
+        const inner = direction === "default to named" ? b : manager;
+        const outerName = outer === manager ? DEFAULT_DATASOURCE : datasourceB;
+        const order: string[] = [];
+        const outerRollback = jest.fn();
+        const error = new Error("inner failure");
+        await outer.executeTransaction(Propagation.REQUIRED, async () => {
+            afterCommit(() => { order.push("outer"); });
+            afterRollback(outerRollback);
+            const operation = inner.executeTransaction(Propagation.REQUIRED, async () => {
+                afterCommit(() => { order.push("inner commit"); });
+                afterRollback(() => { order.push("inner rollback"); });
+                afterCommit(() => { order.push("explicit outer"); }, outerName);
+                afterRollback(outerRollback, outerName);
+                const unregistered = jest.fn();
+                expect(() => afterCommit(unregistered, "unregistered")).toThrow(DatasourceSetupError);
+                expect(() => afterRollback(unregistered, "unregistered")).toThrow(DatasourceSetupError);
+                expect(unregistered).not.toHaveBeenCalled();
+                expect(order).toEqual([]);
+                if (rollback) throw error;
+            });
+            if (rollback) await expect(operation).rejects.toBe(error);
+            else await operation;
+            expect(order).toEqual([rollback ? "inner rollback" : "inner commit"]);
+            afterCommit(() => { order.push("restored outer"); });
+        });
+        expect(order).toEqual([
+            rollback ? "inner rollback" : "inner commit", "outer", "explicit outer", "restored outer",
+        ]);
+        expect(outerRollback).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("omitted hooks outside a transaction do not require a default registration (%s)", async registered => {
+        if (!registered) useTransactionManager(undefined as any);
+        const committed = jest.fn();
+        const rolledBack = jest.fn();
+        await afterCommit(committed);
+        afterRollback(rolledBack);
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            await manager.executeTransaction(Propagation.NOT_SUPPORTED, async () => {
+                await afterCommit(committed);
+                afterRollback(rolledBack);
+                expect(committed).toHaveBeenCalledTimes(2);
+            });
+        });
+        expect(committed).toHaveBeenCalledTimes(2);
+        expect(rolledBack).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])("named joined hooks stay on the physical owner and failed NESTED hooks follow their savepoint (rollback: %s)", async rollback => {
+        const b = new SavepointManager();
+        useTransactionManager(b, datasourceB);
+        const committed = jest.fn();
+        const rolledBack = jest.fn();
+        const error = new Error("physical owner failure");
+        const operation = b.executeTransaction(Propagation.REQUIRED, async () => {
+            const owner = AsyncLocal.Frame!.txs.get(b);
+            await b.executeTransaction(Propagation.REQUIRED, () => {
+                expect(AsyncLocal.Frame!.txs.get(b)).toBe(owner);
+                afterCommit(committed);
+                afterRollback(rolledBack);
+            });
+            await expect(b.executeTransaction(Propagation.NESTED, () => {
+                expect(AsyncLocal.Frame!.txs.get(b)).toBe(owner);
+                afterCommit(committed);
+                afterRollback(rolledBack);
+                throw new Error("savepoint failure");
+            })).rejects.toThrow("savepoint failure");
+            expect(committed).not.toHaveBeenCalled();
+            // Only the NESTED scope's hook: the joined one still waits for the owner.
+            expect(rolledBack).toHaveBeenCalledTimes(1);
+            if (rollback) throw error;
+        });
+        if (rollback) await expect(operation).rejects.toBe(error);
+        else await operation;
+        expect(committed).toHaveBeenCalledTimes(rollback ? 0 : 1);
+        expect(rolledBack).toHaveBeenCalledTimes(rollback ? 2 : 1);
+        expect(b.events).toEqual([
+            "begin:1", "savepoint:1:tranjs_sp_1", "rollbackTo:1:tranjs_sp_1", rollback ? "rollback:1" : "commit:1",
+        ]);
+    });
+
+    it.each([DEFAULT_DATASOURCE, datasourceB])("explicit %s hooks follow the registered manager and reject a cleared name", async datasource => {
+        useTransactionManager(manager, datasource);
+        const replacement = new RecordingManager();
+        const order: string[] = [];
+        const ignored = jest.fn();
+        await manager.executeTransaction(Propagation.REQUIRED, async () => {
+            afterCommit(() => { order.push("registered owner"); }, datasource);
+            useTransactionManager(replacement, datasource);
+            await afterCommit(() => { order.push("replacement inactive"); }, datasource);
+            afterRollback(ignored, datasource);
+            afterCommit(() => { order.push("omitted after replacement"); });
+            useTransactionManager(undefined as any, datasource);
+            expect(() => afterCommit(ignored, datasource)).toThrow(DatasourceSetupError);
+            expect(() => afterRollback(ignored, datasource)).toThrow(DatasourceSetupError);
+            afterCommit(() => { order.push("omitted after clear"); });
+            expect(order).toEqual(["replacement inactive"]);
+        });
+        expect(order).toEqual([
+            "replacement inactive", "registered owner", "omitted after replacement", "omitted after clear",
+        ]);
+        expect(ignored).not.toHaveBeenCalled();
+        expect(replacement.events).toEqual([]);
+    });
+
+    it("a retained finished innermost transaction keeps its hooks: they follow its outcome and never move to the active outer", async () => {
+        const b = new RecordingManager();
+        useTransactionManager(b, datasourceB);
+        const committed = jest.fn();
+        const rolledBack = jest.fn();
+        let retained!: () => void | Promise<void>;
+        let retainedRollback!: () => void | Promise<void>;
+        await manager.executeTransaction(Propagation.REQUIRED, async outer => {
+            await b.executeTransaction(Propagation.REQUIRED, () => {
+                retained = AsyncResource.bind(() => {
+                    // The deprecated global lookup still falls back; hook selection does not.
+                    expect(AsyncLocal.Context?.transaction).toBe(manager.getCurrentTransaction());
+                    return afterCommit(committed);
+                });
+                retainedRollback = AsyncResource.bind(() => afterRollback(rolledBack));
+            });
+            expect(manager.getCurrentTransaction()).toBe(outer);
+            await retained();
+            expect(retainedRollback()).toBeUndefined();
+            expect(committed).toHaveBeenCalledTimes(1);
+            expect(manager.events).toEqual(["begin:1"]);
+        });
+        expect(committed).toHaveBeenCalledTimes(1);
+        await retained();
+        retainedRollback();
+        expect(committed).toHaveBeenCalledTimes(2);
+        expect(rolledBack).not.toHaveBeenCalled();
     });
 
     it("transactional supports sync/async results, propagation, options, datasource and setup errors", async () => {

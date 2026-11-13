@@ -1,14 +1,18 @@
-# Implement a driver
+# Custom drivers
+
+A custom driver connects TranJS to a database client that the bundled drivers (`@tranjs/pg`, `@tranjs/postgres`, `@tranjs/mysql2`) do not cover.
 
 ```bash
+# A custom driver depends only on the core package.
 npm install @tranjs/core
 ```
 
 ## Minimal manager
 
-Extend `PlatformTransactionManager<Tx>` and implement begin, commit, and rollback. Begin returns the connection and its driver metadata. This example assumes a pool with the interface below and PostgreSQL-compatible transaction SQL; adapt acquisition and SQL to your database.
+A driver is a subclass of `PlatformTransactionManager<Tx>`. `beginTransaction`, `commitTransaction` and `rollbackTransaction` are abstract. Begin returns the connection and its driver metadata. The example assumes a pool with the interface below and PostgreSQL-style transaction SQL.
 
 ```typescript
+// Example manager for a hypothetical pooled driver with PostgreSQL-style transaction SQL.
 import {
     getTransactionManager,
     MetadataWrappedTransaction,
@@ -82,31 +86,35 @@ function ctx(datasource?: string | symbol): Connection {
     if (!(manager instanceof CustomTransactionManager)) {
         throw new TransactionContextMixingError(manager.constructor.name, DRIVER_NAME);
     }
+    manager.assertCurrentTransactionOpen();
     const tx = manager.getCurrentTransaction();
     if (!tx) throw new NoTransactionContextError();
     return tx;
 }
 ```
 
-Call `register(pool, name?)` once at module scope, then use `@Transactional` or `transactional`. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
+After `register(pool, name?)` has run, `@Transactional` and `transactional` use this manager. `getCurrentTransaction()` returns `Tx | undefined`, so a driver can expose a typed `ctx()` without using the deprecated core `ctx()`.
 
-Bundled drivers enforce the [connection lifetime check](drivers.md#connection-lifetime); a custom `ctx()` does not unless it calls `manager.assertCurrentTransactionOpen()`.
+The example's `ctx()` looks its manager up by name, so an omitted name means the default datasource. The bundled drivers select the innermost transaction instead; see [datasource selection](api.md#datasource-selection). `afterCommit` and `afterRollback` come from core and use that selection with any manager.
+
+`manager.assertCurrentTransactionOpen()` makes `ctx()` throw `TransactionClosedError` after the transaction ends. A connection kept from `ctx()` is not covered; the bundled drivers wrap it for the [connection lifetime check](drivers.md#connection-lifetime).
 
 `withTestTransaction` needs all three savepoint methods: `createSavepoint`, `rollbackToSavepoint`, and `releaseSavepoint`. Only the bundled drivers support `withTestConnection` and its `TestConnection` type.
 
 ## Connection cleanup
 
-The lifecycle is begin → callback → commit or rollback → completion hooks → `releaseTransaction(tx, failed)` in a `finally` block. The release hook is optional (a no-op by default) and is called exactly once after a successful begin, even if a completion hook throws. Put connection cleanup there, not in commit or rollback.
+The lifecycle is begin → callback → commit or rollback → completion hooks → `releaseTransaction(tx, failed)` in a `finally` block. The release hook is optional (a no-op by default) and is called exactly once after a successful begin, even if a completion hook throws. It is the only point that runs on every path after a successful begin, which makes it the place for connection cleanup.
 
-`failed` is true only if physical commit or rollback throws. An application error followed by successful rollback gives `false`; an `afterCommit` error also gives `false`. Dispose of connections with uncertain completion outcomes rather than returning them to a pool. Begin failures must clean up within `beginTransaction`, because core has not received the connection yet. Keep release reliable: a thrown cleanup error can replace a pending error.
+`failed` is true only if physical commit or rollback throws. An application error followed by successful rollback gives `false`; an `afterCommit` error also gives `false`. When `failed` is true the connection may still be inside the transaction. Returned to a pool in that state, its next user inherits the open transaction. If `beginTransaction` throws, core never sees the connection and `releaseTransaction` is not called for it. An error thrown from `releaseTransaction` replaces the transaction's own error.
 
 Core does not call rollback after commit failure. For error precedence, completion hooks, and logging, see the [API rollback rules](api.md#rollback-rules) and [hooks](api.md#hooks).
 
 ## Optional savepoints
 
-Implement all three savepoint methods to support `NESTED` inside a transaction. Otherwise the default methods throw `NestedTransactionNotSupportedError`. Building on the manager above:
+`NESTED` inside a transaction uses `createSavepoint`, `rollbackToSavepoint` and `releaseSavepoint`. The defaults throw `NestedTransactionNotSupportedError`. Example that builds on the manager above:
 
 ```typescript
+// Partial example: extends CustomTransactionManager and Connection from the manager example above.
 class SavepointTransactionManager extends CustomTransactionManager {
     protected async createSavepoint(tx: Connection, name: string): Promise<void> {
         await tx.query(`SAVEPOINT ${name}`);
@@ -126,10 +134,10 @@ Core generates savepoint names and manages rollback-only state, including the [r
 
 ## Query deadlines
 
-The minimal `ctx()` above returns the raw connection. Core checks deadlines before commit, but query-level enforcement needs a wrapper. The [native driver wrappers](../packages/pg/src/manager.ts) provide examples.
+The minimal `ctx()` above returns the raw connection. Core checks deadlines before commit, but query-level enforcement needs a wrapper. The [bundled driver wrappers](../packages/pg/src/manager.ts) are examples.
 
-Expose protected `getRemainingTimeout()` through a public manager method and call it immediately before each query. It returns the remaining milliseconds, or `undefined` without a deadline; on expiry it marks rollback-only and throws `TransactionTimeoutError`. Inject the remaining time into the driver's per-query timeout, preserving other arguments and overriding user timeouts and pool defaults, including shorter values. Leave options untouched when no deadline exists. Bind other connection methods to the real connection.
+`getRemainingTimeout()` is protected. The bundled drivers expose it through a public method and call it before each query. It returns the remaining milliseconds, or `undefined` without a deadline; on expiry it marks rollback-only and throws `TransactionTimeoutError`. The bundled drivers then pass the remaining time as the driver's per-query timeout, replacing any user or pool timeout, including a shorter one. That is their choice, not a core rule: a custom driver can take the smaller of the two. Without a deadline they leave the query options untouched. Their wrappers bind every other connection method to the real connection.
 
-If that injected timer fires, use protected `expireTransaction()` to mark rollback-only and obtain a `TransactionTimeoutError` without rechecking the clock: timers can fire just before `Date.now()` reaches the deadline. It returns `undefined` without a deadline.
+When that injected timer fires, the protected `expireTransaction()` marks the transaction rollback-only and returns a `TransactionTimeoutError` without rechecking the clock: timers can fire just before `Date.now()` reaches the deadline. It returns `undefined` without a deadline.
 
-See [deadline limits and client-side semantics](api.md#deadlines), including PostgreSQL Submittable handling. Implement or reject isolation and read-only options according to the database's capabilities.
+See [deadline limits and client-side semantics](api.md#deadlines), including `pg` Submittable handling. Core validates `isolationLevel` and `timeout` and passes the options to `beginTransaction` unchanged. Applying, ignoring or rejecting `isolationLevel` and `readOnly` is the driver's decision.

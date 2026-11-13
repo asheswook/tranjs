@@ -1,6 +1,6 @@
 import { MetadataWrappedTransaction, TransactionContext } from "./context";
 import { Propagation } from "./propagation";
-import { AsyncLocal, TransactionSynchronization, TxState } from "./asyncLocal";
+import { AsyncLocal, TransactionScope, TransactionSynchronization, TxState } from "./asyncLocal";
 import { DEFAULT_DATASOURCE, IsolationLevel, TransactionConfig, TransactionOptions } from "./config";
 import { DatasourceSetupError, IllegalTransactionStateException, NestedTransactionNotSupportedError,
     NoTransactionContextError, TransactionTimeoutError, UnsupportedTransactionPropagationException,
@@ -48,6 +48,17 @@ export function getTransactionManager(name: string | symbol = DEFAULT_DATASOURCE
     return manager;
 }
 
+/** Internal driver lookup. A retained closed scope cannot select an outer connection. */
+export function resolveContextManager(datasource?: string | symbol): PlatformTransactionManager<any> {
+    if (datasource !== undefined) return getTransactionManager(datasource);
+    for (const [manager, state] of Array.from(AsyncLocal.Frame?.txs ?? []).reverse()) {
+        if (!state) continue;
+        manager.assertCurrentTransactionOpen();
+        return manager;
+    }
+    return getTransactionManager();
+}
+
 export function runInTransaction<T>(fn: () => Promise<T> | T, config: TransactionConfig = {}): Promise<T> {
     const { propagation = Propagation.REQUIRED, datasource, ...options } = config;
     // Resolve inside an async call so setup errors are Promise rejections, too.
@@ -64,17 +75,57 @@ export function transactional<This, Args extends unknown[], R>(
     };
 }
 
-/** Register on the physical transaction; without an active transaction, run immediately. */
-export function afterCommit(fn: TransactionSynchronization, datasource: string | symbol = DEFAULT_DATASOURCE): void | Promise<void> {
-    const state = AsyncLocal.Frame?.txs.get(managers.get(datasource)!);
-    if (state?.active) state.afterCommit.push(fn);
-    else return runTestProvenance("hook", fn);
+type HookQueues = Pick<TxState, "afterCommit" | "afterRollback">;
+type SynchronizationTarget = { manager: PlatformTransactionManager<any>; state: TxState; scope?: TransactionScope | null };
+const rollbackHookRunners = new WeakMap<PlatformTransactionManager<any>, (hooks: TransactionSynchronization[]) => Promise<void>>();
+
+/**
+ * A hook addresses one transaction: the named datasource's, or the innermost
+ * non-suspended one in this async context. A finished one is selected, not skipped.
+ */
+function synchronizationTarget(datasource?: string | symbol): SynchronizationTarget | undefined {
+    const frame = AsyncLocal.Frame;
+    if (datasource !== undefined) {
+        const manager = getTransactionManager(datasource);
+        const state = frame?.txs.get(manager);
+        return state ? { manager, state, scope: frame!.scopes?.get(manager) } : undefined;
+    }
+    for (const [manager, state] of Array.from(frame?.txs ?? []).reverse()) {
+        if (state) return { manager, state, scope: frame!.scopes?.get(manager) };
+    }
+    return undefined;
 }
 
-/** Register on the physical transaction (including NESTED scopes); without one, ignore. */
-export function afterRollback(fn: TransactionSynchronization, datasource: string | symbol = DEFAULT_DATASOURCE): void {
-    const state = AsyncLocal.Frame?.txs.get(managers.get(datasource)!);
-    if (state?.active) state.afterRollback.push(fn);
+/** The queue that holds a registration from this scope while it is pending, otherwise the outcome it follows. */
+function hookStanding(state: TxState, scope?: TransactionScope | null): HookQueues | "committed" | "undone" {
+    while (scope?.outcome === "released") scope = scope.parent;
+    if (scope?.outcome === "rolled-back") return "undone";
+    if (state.active) return scope?.hooks ?? state;
+    // A manager always publishes an outcome. A hand-built finished state has none: nothing to wait for, as before.
+    return state.outcome === "rolled-back" || state.outcome === "failed" ? "undone" : "committed";
+}
+
+/**
+ * Run after the selected transaction commits. With no transaction, or after it
+ * committed, call fn now and return its result; after it failed, do nothing.
+ */
+export function afterCommit(fn: TransactionSynchronization, datasource?: string | symbol): void | Promise<void> {
+    const target = synchronizationTarget(datasource);
+    const standing = target ? hookStanding(target.state, target.scope) : "committed";
+    if (typeof standing === "object") standing.afterCommit.push(fn);
+    else if (standing === "committed") return runTestProvenance("hook", fn);
+}
+
+/**
+ * Run after the selected transaction rolls back or its completion fails. If that
+ * already happened, call fn now: errors are logged and the promise never rejects.
+ */
+export function afterRollback(fn: TransactionSynchronization, datasource?: string | symbol): void | Promise<void> {
+    const target = synchronizationTarget(datasource);
+    if (!target) return;
+    const standing = hookStanding(target.state, target.scope);
+    if (typeof standing === "object") standing.afterRollback.push(fn);
+    else if (standing === "undone") return runTestProvenance("hook", () => rollbackHookRunners.get(target.manager)!([fn]));
 }
 
 export abstract class PlatformTransactionManager<Tx extends TransactionContext> {
@@ -102,6 +153,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
     }
 
     protected constructor(private logger: Logger = new DefaultLogger()) {
+        rollbackHookRunners.set(this, hooks => this.synchronize(hooks));
         testAccess.set(this, {
             begin: async options => {
                 const context = await this.beginTransaction(options);
@@ -225,14 +277,22 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         }
     }
 
+    /** The outcome is published in the same step that ends the transaction, before any hook runs. */
+    private finish(state: TxState, outcome: NonNullable<TxState["outcome"]>): void {
+        state.outcome = outcome;
+        state.active = false;
+    }
+
     private async rollback(state: TxState, failure: { error: unknown }, info?: TestBoundaryInfo, savepoint?: string): Promise<void> {
         const session = testSession(this);
         if (savepoint && session?.connectionGate?.closed) {
             if (state.gate) state.gate.closed = true;
-            state.active = false;
+            // The test already ended: this savepoint is neither rolled back nor confirmed here.
+            this.finish(state, "failed");
             throw new TransactionClosedError();
         }
         if (state.gate) state.gate.closed = true;
+        let outcome: "rolled-back" | "failed" = "rolled-back";
         try {
             // Even an injected rollback failure must not leave test writes behind.
             let injected: unknown;
@@ -244,6 +304,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
             if (hasInjected) throw injected;
         }
         catch (error) {
+            outcome = "failed";
             this.logError("Transaction application error before rollback failure", failure.error);
             const rollbackError = new TransactionSystemError(error, failure.error);
             // Final test cleanup must retain both failures even if the caller catches this one.
@@ -252,7 +313,7 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
         }
         finally {
             if (info) session!.complete(info, "rolled-back");
-            state.active = false;
+            this.finish(state, outcome);
             await this.inScope(null, () => this.synchronize(state.afterRollback));
         }
     }
@@ -338,14 +399,14 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                             // selector, contain native writes, and combine errors.
                             await this.rollback(state, { error }, info, savepoint);
                         } else {
-                            state.active = false;
+                            this.finish(state, "failed");
                             await this.inScope(null, () => this.synchronize(state.afterRollback));
                         }
                         if (savepoint) throw this.testTransactionCommitError(error);
                         throw error;
                     }
                     if (info) session!.complete(info, "committed");
-                    state.active = false;
+                    this.finish(state, "committed");
                     await this.inScope(null, async () => {
                         for (const hook of state.afterCommit) {
                             // Only a live test session captures callback provenance.
@@ -357,19 +418,55 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     return result;
                 } finally {
                     state.gate!.closed = true;
-                    state.active = false;
+                    // Every path above has published an outcome. An exit that has not is unknown, never committed.
+                    if (state.active) this.finish(state, "failed");
                     if (!savepoint) await this.releaseTransaction(context.transaction as Tx, failed);
                 }
             });
         }));
     }
 
+    /** Savepoint rolled back: drop commit hooks and run rollback hooks. Any other exit: pass both to the enclosing scope. */
+    private settleNestedHooks(state: TxState, scope: TransactionScope, hooks: HookQueues, enclosing: TransactionScope): Promise<void> | undefined {
+        if (scope.outcome === "rolled-back") return this.runScopeHooks(state, enclosing, hooks.afterRollback);
+        scope.outcome = "released";
+        const standing = hookStanding(state, enclosing);
+        if (typeof standing === "object") {
+            standing.afterCommit.push(...hooks.afterCommit);
+            standing.afterRollback.push(...hooks.afterRollback);
+            return undefined;
+        }
+        // Only a detached scope ends after the work enclosing it: that outcome is already known.
+        return this.runScopeHooks(state, enclosing, standing === "undone" ? hooks.afterRollback : hooks.afterCommit);
+    }
+
+    /** Hooks of an ended NESTED scope. Errors are logged: the transaction's caller is not the one waiting here. */
+    private runScopeHooks(state: TxState, from: TransactionScope, hooks: TransactionSynchronization[]): Promise<void> | undefined {
+        if (!hooks.length) return undefined;
+        if (!state.active) return this.inScope(null, () => this.synchronize(hooks));
+        // The owning transaction is still open: run in its nearest open scope, not outside it.
+        let open = from;
+        while (open.outcome) open = open.parent!;
+        const frame = AsyncLocal.Frame!;
+        return AsyncLocal.RunFrame({ ...frame, scopes: new Map(frame.scopes).set(this, open) }, () => this.synchronize(hooks));
+    }
+
     private executeNested<R>(state: TxState, callback: (tx: Tx) => R | Promise<R>): Promise<R> {
         return testScope(this, () => {
-            const parent = AsyncLocal.Frame!.scopes!.get(this)!;
-            if (parent.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
-            parent.nestedOpen = true;
+            // Work that kept the context of an ended NESTED scope is a child of the nearest scope still open.
+            // Guard and hooks both use that scope: an ended scope's own flag would be a second lock for it.
+            // An ended scope whose flag is still set has a child of its own still open, so the walk stops there.
+            let nearest = AsyncLocal.Frame!.scopes!.get(this)!;
+            while (nearest.outcome && !nearest.nestedOpen) nearest = nearest.parent!;
+            if (nearest.nestedOpen) return Promise.reject(new ConcurrentNestedTransactionError());
+            // Past the guard this scope is open. It is the one locked here and unlocked in the finally below.
+            const enclosing = nearest;
+            enclosing.nestedOpen = true;
             return this.inScope(state, async () => {
+                const scope = AsyncLocal.Frame!.scopes!.get(this)!;
+                const hooks: HookQueues = { afterCommit: [], afterRollback: [] };
+                scope.hooks = hooks;
+                scope.parent = enclosing;
                 try {
                     const tx = state.context.transaction as Tx;
                     const session = testSession(this);
@@ -388,6 +485,8 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                             await this.rollbackToSavepoint(tx, name);
                             // Spring resets the entire connection flag, including pre-existing rollback-only.
                             state.rollbackOnly = false;
+                            // Published before any hook runs: later registrations from this scope follow it.
+                            scope.outcome = "rolled-back";
                         }
                         catch (rollbackError) {
                             state.rollbackOnly = true;
@@ -403,7 +502,11 @@ export abstract class PlatformTransactionManager<Tx extends TransactionContext> 
                     if (state.gate) this.assertConnectionOpen(state.gate);
                     await this.releaseSavepoint(tx, name);
                     return result;
-                } finally { parent.nestedOpen = false; }
+                } finally {
+                    enclosing.nestedOpen = false;
+                    const dispatched = this.settleNestedHooks(state, scope, hooks, enclosing);
+                    if (dispatched) await dispatched;
+                }
             }, true);
         });
     }

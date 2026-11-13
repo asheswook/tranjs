@@ -1,6 +1,19 @@
 // Executed in a fresh Node process for each built core: never imports /testing.
 const core = require(process.argv[2]);
 const { AsyncResource } = require('node:async_hooks');
+const { existsSync } = require('node:fs');
+const { dirname, join } = require('node:path');
+const contextEntry = join(dirname(process.argv[2]), 'internal/context.js');
+// Model the driver lookup with the internal helper, or the published driver's default lookup.
+const resolveContextManager = existsSync(contextEntry) ? require(contextEntry).resolveContextManager : core.getTransactionManager;
+
+function driverContext(datasource) {
+    const manager = resolveContextManager(datasource);
+    manager.assertCurrentTransactionOpen?.();
+    const transaction = manager.getCurrentTransaction();
+    if (!transaction) throw new Error('Transaction context not initialized');
+    return transaction;
+}
 
 function errorInfo(error) {
     if (!(error instanceof Error)) return { thrown: error === undefined ? '<undefined>' : error };
@@ -216,6 +229,62 @@ async function main() {
         mark('deepest');
         return 'nested result';
     }, { propagation: P.NESTED }), { propagation: P.NESTED })));
+    await add('nested/retained-ended-sibling', ({ run, mark, hook }) => run(async () => {
+        let fromA;
+        await run(() => { fromA = AsyncResource.bind(callback => callback()); }, { propagation: P.NESTED });
+        let enteredB;
+        const inB = new Promise(resolve => { enteredB = resolve; });
+        let closeB;
+        const holdB = new Promise(resolve => { closeB = resolve; });
+        const b = run(async () => {
+            mark('B-open');
+            enteredB();
+            await holdB;
+            throw new Error('B failed');
+        }, { propagation: P.NESTED });
+        await inB;
+        let c;
+        try {
+            await fromA(() => run(() => {
+                mark('C-body');
+                core.afterCommit(hook('C-commit'));
+            }, { propagation: P.NESTED }));
+            c = 'succeeded';
+        } catch (error) { c = errorInfo(error); }
+        closeB();
+        try { await b; } catch (error) { mark(`caught:${error.message}`); }
+        return { c };
+    }));
+    // An ended scope whose own child is still open keeps guarding its retained context.
+    await add('nested/retained-open-child', ({ run, mark }) => run(async () => {
+        const nested = { propagation: P.NESTED };
+        const attempt = async start => {
+            try { await start(); return 'succeeded'; }
+            catch (error) { return errorInfo(error); }
+        };
+        let fromE;
+        let closeC;
+        const holdC = new Promise(resolve => { closeC = resolve; });
+        let c;
+        await run(async () => {
+            fromE = AsyncResource.bind(callback => callback());
+            let enteredC;
+            const inC = new Promise(resolve => { enteredC = resolve; });
+            c = run(async () => {
+                mark('C-open');
+                enteredC();
+                await holdC;
+            }, nested);
+            await inC;
+        }, nested);
+        mark('E-ended');
+        const whileOpen = await attempt(() => fromE(() => run(() => mark('D-body'), nested)));
+        closeC();
+        await c;
+        mark('C-ended');
+        const afterwards = await attempt(() => fromE(() => run(() => mark('D2-body'), nested)));
+        return { whileOpen, afterwards };
+    }));
     for (const thrown of [undefined, null, 'plain failure', 0]) {
         await add(`non-error-throw/${String(thrown)}`, ({ run, failure }) => run(() => { throw failure('application', thrown); }), { rollback: true });
     }
@@ -273,6 +342,93 @@ async function main() {
     }
     await add('propagation/invalid', ({ run }) => run(() => 42, { propagation: 'INVALID' }));
     await add('datasource/missing', ({ run }) => run(() => 42, { datasource: 'missing' }));
+    await add('hooks/implicit-named-datasource', async ({ run, mark, hook, manager }) => {
+        const datasource = 'analytics';
+        core.useTransactionManager(manager, datasource);
+        core.useTransactionManager(undefined);
+        try {
+            await run(() => {
+                core.afterCommit(hook('implicit-commit'));
+                core.afterCommit(hook('explicit-commit'), datasource);
+                core.afterRollback(hook('wrong-rollback'));
+                mark('commit-body');
+            }, { datasource });
+            try {
+                await run(() => {
+                    core.afterCommit(hook('wrong-commit'));
+                    core.afterRollback(hook('implicit-rollback'));
+                    core.afterRollback(hook('explicit-rollback'), datasource);
+                    mark('rollback-body');
+                    throw new Error('named body failed');
+                }, { datasource });
+            } catch (error) {
+                if (error.message !== 'named body failed') throw error;
+            }
+            return 'named hooks complete';
+        } finally { core.useTransactionManager(undefined, datasource); }
+    });
+    // Work that kept the async context of a finished transaction registers both hooks.
+    for (const completion of ['commit', 'rollback']) {
+        await add(`hooks/late-after-${completion}`, async ({ run, mark, hook }) => {
+            let late;
+            try {
+                await run(() => {
+                    late = AsyncResource.bind(callback => callback());
+                    mark('body');
+                    if (completion === 'rollback') throw new Error('application failed');
+                });
+            } catch (error) {
+                if (error.message !== 'application failed') throw error;
+            }
+            const returned = late(() => {
+                core.afterCommit(hook('late-commit'));
+                return core.afterRollback(hook('late-rollback'));
+            });
+            await returned;
+            mark('after-registration');
+            return { afterRollbackReturned: returned instanceof Promise ? 'promise' : String(returned) };
+        });
+    }
+    await add('hooks/nested-savepoint-rollback', ({ run, mark, hook }) => run(async () => {
+        core.afterCommit(hook('outer-commit'));
+        core.afterRollback(hook('outer-rollback'));
+        try {
+            await run(() => {
+                core.afterCommit(hook('nested-commit'));
+                core.afterRollback(hook('nested-rollback'));
+                throw new Error('nested application failed');
+            }, { propagation: P.NESTED });
+        } catch (error) { mark(`caught:${error.message}`); }
+        mark('outer-continues');
+        return 'outer result';
+    }));
+    await add('hooks/unregistered-datasource', ({ run, mark, hook }) => run(() => {
+        const capture = callback => {
+            try { return { returned: callback() ?? null }; }
+            catch (error) { return { error: errorInfo(error) }; }
+        };
+        const result = {
+            afterCommit: capture(() => core.afterCommit(hook('unregistered-commit'), 'misspelt')),
+            afterRollback: capture(() => core.afterRollback(hook('unregistered-rollback'), 'misspelt')),
+        };
+        mark('body');
+        return result;
+    }));
+    await add('ctx/implicit-named-datasource', async ({ run, mark, manager }) => {
+        const datasource = 'analytics';
+        core.useTransactionManager(manager, datasource);
+        core.useTransactionManager(new manager.constructor());
+        try {
+            return await run(() => {
+                let implicit;
+                try { implicit = { returned: driverContext().id }; }
+                catch (error) { implicit = { error: errorInfo(error) }; }
+                const explicit = driverContext(datasource).id;
+                mark('named-body');
+                return { implicit, explicit };
+            }, { datasource });
+        } finally { core.useTransactionManager(undefined, datasource); }
+    });
     await add('detached/new-transaction-after-commit', async ({ run, mark, manager }) => {
         let resume;
         const ready = new Promise(resolve => { resume = resolve; });

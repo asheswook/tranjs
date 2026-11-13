@@ -47,6 +47,9 @@ async function runtimeChecks() {
     const importedLegacy = await import("@tranjs/core/dist/asyncLocal");
     const bridge = require("@tranjs/core/internal/testing-bridge");
     const importedBridge = await import("@tranjs/core/internal/testing-bridge");
+    const context = require("@tranjs/core/internal/context");
+    const importedContext = await import("@tranjs/core/internal/context");
+    same(context.resolveContextManager, importedContext.resolveContextManager);
     for (const entry of [main, importedCore]) {
         for (const key of ["AsyncLocal", "PlatformTransactionManager", "getTransactionManager", "useTransactionManager", "transactional"]) {
             assert.equal(typeof core[key], "function", `Missing core export ${key}`);
@@ -101,6 +104,8 @@ async function runtimeChecks() {
                 assert.equal(probe.records.length, 0, "withTestConnection must not record a logical transaction");
                 const save = probe.track(async function save(id) {
                     const db = drivers.pg.ctx(datasource);
+                    same(drivers.pg.ctx(), db, "Implicit ctx must select the named packed transaction");
+                    same(context.resolveContextManager(), manager);
                     assert(manager.getCurrentTransaction());
                     await db.query(`INSERT INTO ${table} VALUES ($1)`, [id]);
                     return (await db.query(`SELECT id FROM ${table} ORDER BY id`)).rows.map(row => row.id);
